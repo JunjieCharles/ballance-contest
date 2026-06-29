@@ -1,0 +1,142 @@
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { CommandQueue } from "../../../apps/server/src/command-queue.js";
+import { CompetitionController, type AutomationAction, type AutomationPolicy } from "../../../packages/core/src/index.js";
+
+class ManualClock {
+  public constructor(private currentMs = 0) {}
+  public now(): number { return this.currentMs; }
+  public advanceBy(milliseconds: number): void { this.currentMs += milliseconds; }
+}
+
+const makeController = (clock: ManualClock, policy: Partial<AutomationPolicy> = {}, participants = ["p1", "p2", "p3"]): CompetitionController =>
+  new CompetitionController({
+    competitionId: "competition-automation",
+    participants,
+    stages: [
+      { id: "s1", map: "1", mode: "sr", timeLimitMs: 600_000, minimumScoringPlace: 1 },
+      { id: "s2", map: "2", mode: "sr", timeLimitMs: 600_000, minimumScoringPlace: 1 }
+    ],
+    policy: { announcementLeadMs: 0, readyBufferMs: 15_000, reconnectStableMs: 15_000, intermissionMs: 3_000, ...policy },
+    confirmationSecret: "secret"
+  }, clock);
+
+const acknowledge = (controller: CompetitionController, statusFor: (action: AutomationAction) => "acknowledged" | "failed" | "uncertain" = () => "acknowledged"): void => {
+  for (const action of controller.drainActions()) controller.acknowledgeAction(action.id, statusFor(action));
+};
+
+const settle = (controller: CompetitionController, statusFor?: (action: AutomationAction) => "acknowledged" | "failed" | "uncertain"): void => {
+  for (let index = 0; index < 10; index += 1) {
+    const before = controller.snapshot().stateVersion;
+    controller.tick();
+    acknowledge(controller, statusFor);
+    if (controller.snapshot().stateVersion === before) break;
+  }
+};
+
+const putEveryoneOnline = (controller: CompetitionController, participants = ["p1", "p2", "p3"]): void => {
+  for (const participantId of participants) controller.observeConnection(participantId, true);
+};
+
+afterEach(() => vi.useRealTimers());
+
+describe("P0 centralized automation and command regression", () => {
+  it("BE-DISC-001/002: waits for reconnect stability and resets the timer when the player drops again", () => {
+    const clock = new ManualClock();
+    const controller = makeController(clock);
+    putEveryoneOnline(controller);
+    controller.enable(0);
+    settle(controller);
+    expect(controller.snapshot()).toMatchObject({ phase: "ready", attempts: [] });
+
+    controller.observeConnection("p2", false);
+    expect(controller.snapshot()).toMatchObject({ phase: "pre-start-wait", waitingParticipants: ["p2"] });
+    clock.advanceBy(1_000);
+    controller.observeConnection("p2", true);
+    clock.advanceBy(14_000);
+    settle(controller);
+    expect(controller.snapshot().phase).toBe("pre-start-wait");
+
+    controller.observeConnection("p2", false);
+    controller.observeConnection("p2", true);
+    clock.advanceBy(15_000);
+    settle(controller);
+    expect(controller.snapshot()).toMatchObject({ phase: "ready", waitingParticipants: [], attempts: [] });
+  });
+
+  it("BE-WINDOW-001/002: keeps tail intake open until the next actual Ready boundary", () => {
+    const clock = new ManualClock();
+    const controller = makeController(clock, { readyBufferMs: 0 });
+    putEveryoneOnline(controller);
+    controller.enable(0);
+    settle(controller);
+    expect(controller.snapshot().phase).toBe("running");
+
+    expect(controller.recordResult({ stageId: "s1", playerId: "p1", status: "finished", sourceId: "s1-p1" })).toBe("accepted");
+    expect(controller.snapshot()).toMatchObject({ phase: "tail-intake", attempts: [{ intakeOpen: true, results: [{ playerId: "p1" }] }] });
+    expect(controller.recordResult({ stageId: "s1", playerId: "p2", status: "finished", sourceId: "s1-p2" })).toBe("accepted");
+    expect(controller.snapshot().attempts[0]?.results).toHaveLength(2);
+
+    clock.advanceBy(3_000);
+    settle(controller);
+    expect(controller.snapshot().currentStageId).toBe("s2");
+    expect(controller.snapshot().attempts[0]).toMatchObject({ stageId: "s1", intakeOpen: false });
+    expect(controller.recordResult({ stageId: "s1", playerId: "p3", status: "finished", sourceId: "s1-p3-after-ready" })).toBe("intake-closed");
+  });
+
+  it("BE-CHEAT-001/002: turns in-race cheat into DNF while leaving completed players untouched", () => {
+    const clock = new ManualClock();
+    const controller = makeController(clock, { readyBufferMs: 0 }, ["p1", "p2"]);
+    putEveryoneOnline(controller, ["p1", "p2"]);
+    controller.observeCheat("p2", true, "practice-cheat");
+    controller.observeCheat("p2", false, "practice-cheat-off");
+    controller.enable(0);
+    settle(controller);
+    expect(controller.snapshot().phase).toBe("running");
+
+    expect(controller.recordResult({ stageId: "s1", playerId: "p1", status: "finished", sourceId: "p1-finish" })).toBe("accepted");
+    controller.observeCheat("p1", true, "p1-cheat-after-finish");
+    controller.observeCheat("p2", true, "p2-cheat-running");
+    const attempt = controller.snapshot().attempts[0];
+    expect(attempt?.results).toEqual([
+      expect.objectContaining({ playerId: "p1", status: "finished", sourceId: "p1-finish" }),
+      expect.objectContaining({ playerId: "p2", status: "dnf", sourceId: "p2-cheat-running", reason: "cheat-enabled" })
+    ]);
+    expect(controller.snapshot().incidents).toEqual([expect.objectContaining({ type: "cheat-violation", participantIds: ["p2"], recommendedRestart: false })]);
+    expect(controller.recordResult({ stageId: "s1", playerId: "p2", status: "finished", sourceId: "p2-finish-after-cheat" })).toBe("duplicate");
+  });
+
+  it("BE-RESTART-001/002/003: binds restart confirmation to current state and sends one force-next-restart before the new Go", () => {
+    const clock = new ManualClock();
+    const controller = makeController(clock, { readyBufferMs: 0 }, ["p1", "p2"]);
+    putEveryoneOnline(controller, ["p1", "p2"]);
+    controller.enable(0);
+    settle(controller);
+    controller.observeCrash("p2", "protected crash");
+    const incident = controller.snapshot().incidents[0];
+    expect(incident).toMatchObject({ type: "protected-crash", recommendedRestart: true });
+
+    const confirmation = controller.issueRestartConfirmation(incident!.id);
+    expect(() => controller.confirmRestart({ incidentId: incident!.id, impactHash: confirmation.impactHash, token: "bad-token", reason: "bad" })).toThrow("INVALID_CONFIRMATION_TOKEN");
+    controller.confirmRestart({ incidentId: incident!.id, impactHash: confirmation.impactHash, token: confirmation.token, reason: "保护窗口崩溃重赛" });
+    settle(controller);
+    expect(controller.snapshot().actions.filter((action) => action.kind === "force-next-restart")).toHaveLength(1);
+    expect(controller.snapshot().attempts[0]).toMatchObject({ voided: true });
+    expect(controller.snapshot().phase).toBe("running");
+    expect(controller.snapshot().attempts).toHaveLength(2);
+  });
+
+  it("BE-CMD-002/003: marks an unconfirmed critical Go uncertain, does not retry and preserves idempotency", async () => {
+    vi.useFakeTimers();
+    const writes: string[] = [];
+    const queue = new CommandQueue({ write: async (command) => { writes.push(command); } }, 100);
+    const pending = queue.enqueue({ type: "go", map: "1", mode: "sr" }, "critical-go");
+    await vi.advanceTimersByTimeAsync(100);
+    const result = await pending;
+
+    expect(result).toMatchObject({ status: "uncertain", command: "countdown 1 sr" });
+    expect(writes).toEqual(["countdown 1 sr"]);
+    const duplicate = await queue.enqueue({ type: "go", map: "1", mode: "sr" }, "critical-go");
+    expect(duplicate.id).toBe(result.id);
+    expect(writes).toEqual(["countdown 1 sr"]);
+  });
+});

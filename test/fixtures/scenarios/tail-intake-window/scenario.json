@@ -1,0 +1,27 @@
+{
+  "schemaVersion": 1,
+  "id": "tail-intake-window",
+  "name": "最低计分名次后继续接收尾部成绩",
+  "year": 2026,
+  "timezone": "Asia/Shanghai",
+  "refereeConnectionId": "ref-main",
+  "players": [
+    { "id": "p1", "displayName": "Alpha", "connectionId": "101" },
+    { "id": "p2", "displayName": "Beta", "connectionId": "102" },
+    { "id": "p3", "displayName": "Gamma", "connectionId": "103" }
+  ],
+  "stages": [
+    { "id": "s1", "order": 1, "level": 1, "mode": "SR", "timeLimitMs": 600000, "scoring": [20], "minimumScoringPlace": 1 },
+    { "id": "s2", "order": 2, "level": 2, "mode": "SR", "timeLimitMs": 600000, "scoring": [20], "minimumScoringPlace": 1 }
+  ],
+  "events": [
+    { "atMs": 0, "sourceId": "login-p1", "type": "login", "playerId": "p1", "connectionId": "101" },
+    { "atMs": 0, "sourceId": "login-p2", "type": "login", "playerId": "p2", "connectionId": "102" },
+    { "atMs": 0, "sourceId": "login-p3", "type": "login", "playerId": "p3", "connectionId": "103" },
+    { "atMs": 1000, "sourceId": "go-s1", "type": "go", "stageId": "s1", "refereeConnectionId": "ref-main" },
+    { "atMs": 2000, "sourceId": "p1-finish-s1", "type": "finish", "stageId": "s1", "playerId": "p1", "score": 1000, "elapsedMs": 1000 },
+    { "atMs": 2500, "sourceId": "p2-finish-tail", "type": "finish", "stageId": "s1", "playerId": "p2", "score": 900, "elapsedMs": 1500 },
+    { "atMs": 3000, "sourceId": "go-s2", "type": "go", "stageId": "s2", "refereeConnectionId": "ref-main" }
+  ],
+  "expected": { "attempts": 2, "scoreboardVersions": 2 }
+}

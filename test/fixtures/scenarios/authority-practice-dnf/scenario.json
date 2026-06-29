@@ -1,0 +1,29 @@
+{
+  "schemaVersion": 1,
+  "id": "authority-practice-dnf",
+  "name": "权威发令、练习成绩排除与完赛后 DNF",
+  "year": 2026,
+  "timezone": "Asia/Shanghai",
+  "refereeConnectionId": "ref-main",
+  "players": [
+    { "id": "p1", "displayName": "Alpha", "connectionId": "101" },
+    { "id": "p2", "displayName": "Beta", "connectionId": "102" },
+    { "id": "p3", "displayName": "Gamma", "connectionId": "103" }
+  ],
+  "stages": [
+    { "id": "s1", "order": 1, "level": 1, "mode": "SR", "timeLimitMs": 600000, "scoring": [20, 15, 12], "minimumScoringPlace": 2 }
+  ],
+  "events": [
+    { "atMs": 0, "sourceId": "login-p1", "type": "login", "playerId": "p1", "connectionId": "101" },
+    { "atMs": 0, "sourceId": "login-p2", "type": "login", "playerId": "p2", "connectionId": "102" },
+    { "atMs": 0, "sourceId": "login-p3", "type": "login", "playerId": "p3", "connectionId": "103" },
+    { "atMs": 100, "sourceId": "practice-finish-before-go", "type": "finish", "stageId": "s1", "playerId": "p1", "score": 1000, "elapsedMs": 1000 },
+    { "atMs": 200, "sourceId": "outsider-go", "type": "go", "stageId": "s1", "refereeConnectionId": "spectator-9" },
+    { "atMs": 300, "sourceId": "official-go", "type": "go", "stageId": "s1", "refereeConnectionId": "ref-main" },
+    { "atMs": 1000, "sourceId": "p1-finish", "type": "finish", "stageId": "s1", "playerId": "p1", "score": 900, "elapsedMs": 700 },
+    { "atMs": 1100, "sourceId": "p1-late-dnf", "type": "dnf", "stageId": "s1", "playerId": "p1", "reason": "warning-after-finish" },
+    { "atMs": 1200, "sourceId": "p2-finish", "type": "finish", "stageId": "s1", "playerId": "p2", "score": 800, "elapsedMs": 900 },
+    { "atMs": 1300, "sourceId": "p3-dnf", "type": "dnf", "stageId": "s1", "playerId": "p3", "reason": "timeout" }
+  ],
+  "expected": { "attempts": 1, "scoreboardVersions": 3 }
+}

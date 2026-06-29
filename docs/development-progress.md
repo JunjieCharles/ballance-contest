@@ -1,8 +1,8 @@
 # Ballance 比赛控制台开发进展
 
-> 当前版本：0.1.0-dev  
-> 最后更新：2026-06-29  
-> 当前里程碑：M7 — 已完成
+> 当前版本：0.1.0-dev
+> 最后更新：2026-06-30
+> 当前里程碑：TEST — 已完成
 > 下一项工作：在目标赛事服务器上执行赛前权限/网络彩排，再按发布工作流生成候选便携包
 
 ## 里程碑任务
@@ -23,6 +23,7 @@
 | M5-T01 自动流程与事故 | 已完成 | BE 7–8；BE-FLOW/WINDOW/DISC/INC/RESTART/CHEAT | 调度、掉线、cheat、重赛测试通过 | 单调时钟状态机、真实/模拟命令执行器、Ready 原子关窗、15 秒稳定/保护窗口、群体异常、cheat DNF 与短时重赛令牌共 10 项新增测试通过 |
 | M6-T01 恢复、修订与归档 | 已完成 | BE 10、12；BE-OVR/EXPORT/BOOT | 恢复、导出、归档测试通过 | 快照后事件重放、关键命令不确定化、观察缺口、现场确认、覆盖/撤销、未归属处理、HTML/TSV/CSV/XLSX 与只读哈希归档共 11 项新增测试通过 |
 | M7-T01 非功能与发布 | 已完成 | BE/FE 14–15；BE-PERF/SEC/COMPAT | 性能、安全、浏览器和便携包门禁通过 | 30×30×8h/900 榜单版本、休眠/磁盘/轮转、固定端口/来源/路径安全、Edge/Chrome、真实 MockClient 管道及无系统 Node 便携冒烟通过 |
+| TEST-T01 `test/` 集中回归完善 | 已完成 | BE-MODE/GO/SCORE/DNF/DISC/WINDOW/CHEAT/CMD/RECOVER/FILE，E2E-TEST，NF-SOAK/DETERMINISM | `test/` 下具备 P0 场景夹具、集中自动化测试和用例覆盖矩阵；全部门禁通过 | 新增 `test/unit/backend`、`test/integration`、`test/nonfunctional` 与 e2e 集中回归；`npm run lint/typecheck/test/build/test:e2e` 通过 |
 
 ## 当前检查结果
 
@@ -61,10 +62,20 @@
 | 2026-06-29 | 第三方再分发清单 | 通过 | 包含 Node.js 完整许可证、BallanceMMO BSD-3-Clause 许可证和实际安装生产包的版本/许可证清单 |
 | 2026-06-29 | 开发实例安全替换实测 | 通过 | 第二个 `npm run dev` 使用锁文件令牌关闭并终止第一个进程树，随后健康接管固定端口；未知占用仍拒绝终止 |
 | 2026-06-29 | Windows 发布工作流 | 已配置 | CI 配置 Windows Server 2022/2025；手动发布门禁负责取得 MockClient、核对版本、执行全门禁并上传便携产物 |
+| 2026-06-30 | TEST 首轮 `npx vitest run test` | 失败 | 75 项中 2 项测试假设错误：增长日志截断样本未小于旧偏移；API 虚拟自动化启动前未让玩家上线。已修正测试数据流 |
+| 2026-06-30 | TEST `npx vitest run test` | 通过 | 使用便携 Node 临时加入 PATH；26 个测试文件、75 个测试通过，覆盖集中单元、集成与非功能测试 |
+| 2026-06-30 | TEST 首轮 `npm run lint` | 失败 | 发现 1 个未使用导入与 1 个 Playwright 类型写法问题；已清理 |
+| 2026-06-30 | TEST `npm run lint` | 通过 | ESLint 9 对新增集中测试、夹具引用和 e2e 辅助函数无错误 |
+| 2026-06-30 | TEST `npm run typecheck` | 通过 | contracts、core、testkit、server、web 全部通过严格类型检查 |
+| 2026-06-30 | TEST `npm test` | 通过 | 26 个测试文件、75 个测试通过；新增 P0 集中回归进入默认 Vitest |
+| 2026-06-30 | TEST `npm run build` | 通过 | 共享包、Fastify 服务与 Vite 前端构建成功 |
+| 2026-06-30 | TEST 首轮 `npm run test:e2e` | 失败 | Edge/Chrome 共享本地服务时测试间控制租约与比赛状态互相影响；已让用例显式接管控制并移除脆弱初始状态断言 |
+| 2026-06-30 | TEST `npm run test:e2e` | 通过 | Edge 与 Chrome 共 4 个 Playwright 用例通过，覆盖测试模式创建/播放与工作模式隔离 |
 
 ## 阻塞与风险
 
 - 当前无产品决策阻塞。
+- 当前测试完善批次无实现阻塞。
 - npm 11 在多工作区存在同名不同主版本依赖时会错误提升旧版本；根工具链显式固定 AJV、LRU、semver 等构建依赖，便携生产安装已使用 `--workspaces=false` 隔离。
 - `better-sqlite3` 的安装辅助包 `prebuild-install` 已弃用，但当前生产依赖审计为 0；后续升级原生模块时应重新验证便携安装。
 - 自动化覆盖 Windows 11 与 Windows Server 2022/2025；若正式对外声明 Windows 10 客户端支持，仍建议在目标 Windows 10 实机补做一次启动器冒烟。

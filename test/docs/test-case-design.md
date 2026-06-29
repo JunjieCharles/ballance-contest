@@ -2,7 +2,7 @@
 
 > 版本：1.0
 > 日期：2026-06-29
-> 状态：需求基线用例；待实现后绑定具体测试框架与接口路径
+> 状态：需求基线与集中自动化覆盖并行维护；P0 首批已绑定到 `test/` 下的可执行回归
 
 ## 1. 设计依据与目标
 
@@ -14,7 +14,7 @@
 - [成绩表视觉样例](../../docs/scoreboard.xlsx)
 - [MockClient 本地说明](../../server-windows/README.md)
 
-目标是验证配置、直播控制、观察、回放、身份、状态机、事故、计分、修订、导出、归档、恢复和本地安全的完整闭环。主观违规、录像真实性、代打和申诉结论只验证“进入人工复核并保留证据”，不设计成系统自动裁决。
+目标是验证配置、工作/测试模式控制、身份、状态机、事故、计分、修订、导出、归档、恢复和本地安全的完整闭环。主观违规、录像真实性、代打和申诉结论只验证“进入人工复核并保留证据”，不设计成系统自动裁决。
 
 ## 2. 测试分层与执行约定
 
@@ -42,6 +42,19 @@
 | D-SCENARIO | 三轮混合 SR/HS、5 名玩家、最低计分名次 3 的人工场景 | 默认端到端回归 |
 | D-REFERENCE | [2025 SR1–SR13 参考日志](../fixtures/replay/2025-grandprix-sr1-13/README.md) | 非门禁格式研究与人工排查 |
 | D-SCOREBOARD | `docs/scoreboard.xlsx` | 前三名配色、DNF、宽表和复制语义 |
+
+## 3.1 首批集中自动化覆盖矩阵
+
+| 用例 ID | 自动化文件 | 夹具/数据 | 证据 |
+| --- | --- | --- | --- |
+| BE-MODE-002/003，E2E-TEST-001/002 | `test/integration/p0-api-mode-isolation.test.ts`，`test/e2e/console.spec.ts` | `scenarios/three-stage-main` | 测试模式能力禁用真实进程/命令；工作模式拒绝测试运行；UI 显示测试水印并能播放主场景 |
+| BE-GO-001/002/003/004，BE-DNF-001 | `test/unit/backend/p0-domain-regression.test.ts` | `scenarios/authority-practice-dnf` | 只接受场景配置的权威 Go；Go 前成绩为练习；完赛后 DNF 仅留异常 |
+| BE-SCORE-001/003/004，NF-DETERMINISM-001 | `test/unit/backend/p0-domain-regression.test.ts`，`test/nonfunctional/determinism.test.ts` | `scenarios/three-stage-main` | 三轮 SR/HS 排名、同分顺序、逐事件榜单版本和重复运行哈希稳定 |
+| BE-DISC-001/002，BE-WINDOW-001/002，BE-CHEAT-001/002 | `test/unit/backend/p0-automation-regression.test.ts` | 程序化虚拟时钟夹具 | Ready 掉线稳定窗口、尾部成绩窗口、cheat DNF 均由领域状态验证 |
+| BE-CMD-002/003 | `test/unit/backend/p0-automation-regression.test.ts` | 假命令传输 | 关键 Go 无回显进入 `uncertain`，同幂等键不重发 |
+| BE-RECOVER-001/003 | `test/integration/p0-file-recovery-regression.test.ts` | 临时 SQLite + 恢复快照 | 恢复后 `sent` 命令变 `uncertain`，观察缺口保留且不自动继续 |
+| BE-FILE-001/002/003/004 | `test/integration/p0-file-recovery-regression.test.ts` | `fixtures/logs/mockclient-edge-cases.log` + 临时增长日志 | 静态源只读、完整行解析、轮转换代、ANSI 与异常编码处理 |
+| NF-SOAK-001 | `test/nonfunctional/scale.test.ts` | 程序化 30×30×8h 场景 | 900 个逐事件榜单版本完整保留 |
 
 ## 4. 后端用例
 

@@ -1,0 +1,22 @@
+{
+  "schemaVersion": 1,
+  "id": "identity-reconnect",
+  "name": "重连与身份冲突最小场景",
+  "year": 2026,
+  "timezone": "Asia/Shanghai",
+  "refereeConnectionId": "ref-main",
+  "players": [
+    { "id": "p1", "displayName": "Alpha", "connectionId": "101" },
+    { "id": "p2", "displayName": "alpha", "connectionId": "102" }
+  ],
+  "stages": [
+    { "id": "s1", "order": 1, "level": 1, "mode": "SR", "timeLimitMs": 600000, "scoring": [20, 15], "minimumScoringPlace": 1 }
+  ],
+  "events": [
+    { "atMs": 0, "sourceId": "login-alpha-101", "type": "login", "playerId": "p1", "connectionId": "101" },
+    { "atMs": 1000, "sourceId": "disconnect-alpha-101", "type": "disconnect", "playerId": "p1", "connectionId": "101" },
+    { "atMs": 2000, "sourceId": "login-alpha-201", "type": "login", "playerId": "p1", "connectionId": "201" },
+    { "atMs": 2100, "sourceId": "login-conflict-202", "type": "login", "playerId": "p2", "connectionId": "202" }
+  ],
+  "expected": { "attempts": 0, "scoreboardVersions": 0 }
+}

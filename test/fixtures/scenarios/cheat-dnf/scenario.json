@@ -1,0 +1,26 @@
+{
+  "schemaVersion": 1,
+  "id": "cheat-dnf",
+  "name": "比赛中 cheat 触发 DNF，练习与完赛后不追溯",
+  "year": 2026,
+  "timezone": "Asia/Shanghai",
+  "refereeConnectionId": "ref-main",
+  "players": [
+    { "id": "p1", "displayName": "Alpha", "connectionId": "101" },
+    { "id": "p2", "displayName": "Beta", "connectionId": "102" }
+  ],
+  "stages": [
+    { "id": "s1", "order": 1, "level": 1, "mode": "SR", "timeLimitMs": 600000, "scoring": [20, 15], "minimumScoringPlace": 1 }
+  ],
+  "events": [
+    { "atMs": 0, "sourceId": "login-p1", "type": "login", "playerId": "p1", "connectionId": "101" },
+    { "atMs": 0, "sourceId": "login-p2", "type": "login", "playerId": "p2", "connectionId": "102" },
+    { "atMs": 100, "sourceId": "practice-cheat-on", "type": "cheat", "playerId": "p2", "enabled": true },
+    { "atMs": 200, "sourceId": "practice-cheat-off", "type": "cheat", "playerId": "p2", "enabled": false },
+    { "atMs": 1000, "sourceId": "go-s1", "type": "go", "stageId": "s1", "refereeConnectionId": "ref-main" },
+    { "atMs": 2000, "sourceId": "p1-finish", "type": "finish", "stageId": "s1", "playerId": "p1", "score": 1000, "elapsedMs": 1000 },
+    { "atMs": 2500, "sourceId": "p2-cheat-on", "type": "cheat", "playerId": "p2", "enabled": true },
+    { "atMs": 2600, "sourceId": "p1-cheat-after-finish", "type": "cheat", "playerId": "p1", "enabled": true }
+  ],
+  "expected": { "attempts": 1, "scoreboardVersions": 1 }
+}

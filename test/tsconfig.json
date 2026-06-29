@@ -6,5 +6,5 @@
     "noEmit": true,
     "types": ["node", "vitest/globals", "@playwright/test"]
   },
-  "include": ["e2e/**/*.ts", "nonfunctional/**/*.ts"]
+  "include": ["unit/**/*.ts", "component/**/*.ts", "integration/**/*.ts", "e2e/**/*.ts", "nonfunctional/**/*.ts"]
 }
