@@ -1,0 +1,73 @@
+import { spawn, spawnSync, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { createInterface } from "node:readline";
+
+export interface MockClientLaunchOptions {
+  executable: string;
+  workingDirectory: string;
+  server: string;
+  loginName: string;
+  uuid: string;
+  logPath: string;
+}
+
+const PRESET_SERVERS = new Set(["0.bmmo.win", "1.bmmo.win", "2.bmmo.win"]);
+
+export const buildMockClientArguments = (options: MockClientLaunchOptions): readonly string[] => {
+  if (PRESET_SERVERS.has(options.server.split(":")[0] ?? "") && options.server.includes(":")) throw new Error("bmmo.win presets must not include a port");
+  return ["-s", options.server, "-n", options.loginName, "-u", options.uuid, "-l", options.logPath, "--auto-flush", "--no-sound-files"];
+};
+
+export const readMockClientVersion = (executable: string, workingDirectory: string): string => {
+  const result = spawnSync(executable, ["-v"], { cwd: workingDirectory, encoding: "utf8", shell: false, windowsHide: true });
+  if (result.status !== 0) throw new Error(`MockClient version probe failed: ${result.stderr}`);
+  const match = /Version:\s*([^\r\n]+)/.exec(result.stdout);
+  if (!match?.[1]) throw new Error("MockClient version output was not recognized");
+  return match[1].trim();
+};
+
+export interface CommandTransport {
+  write(command: string): Promise<void>;
+}
+
+export class ManagedMockClient implements CommandTransport {
+  private process: ChildProcessWithoutNullStreams | undefined;
+  private readonly listeners = new Set<(line: string) => void>();
+
+  public constructor(private readonly options: MockClientLaunchOptions) {}
+
+  public start(): void {
+    if (this.process) throw new Error("MockClient is already running");
+    const child = spawn(this.options.executable, buildMockClientArguments(this.options), {
+      cwd: this.options.workingDirectory,
+      shell: false,
+      windowsHide: true,
+      stdio: "pipe"
+    });
+    this.process = child;
+    for (const stream of [child.stdout, child.stderr]) {
+      const lines = createInterface({ input: stream });
+      lines.on("line", (line) => { for (const listener of this.listeners) listener(line); });
+    }
+    child.on("exit", () => { this.process = undefined; });
+  }
+
+  public onLine(listener: (line: string) => void): () => void {
+    this.listeners.add(listener);
+    return () => this.listeners.delete(listener);
+  }
+
+  public async write(command: string): Promise<void> {
+    if (!this.process?.stdin.writable) throw new Error("MockClient is not running");
+    await new Promise<void>((resolve, reject) => this.process?.stdin.write(`${command}\n`, (error) => error ? reject(error) : resolve()));
+  }
+
+  public async stop(timeoutMs = 5_000): Promise<void> {
+    const child = this.process;
+    if (!child) return;
+    await this.write("stop");
+    await new Promise<void>((resolve, reject) => {
+      const timeout = setTimeout(() => reject(new Error("MockClient graceful stop timed out")), timeoutMs);
+      child.once("exit", () => { clearTimeout(timeout); resolve(); });
+    });
+  }
+}
