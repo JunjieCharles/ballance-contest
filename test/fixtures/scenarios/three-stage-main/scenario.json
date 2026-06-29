@@ -1,0 +1,48 @@
+{
+  "schemaVersion": 1,
+  "id": "three-stage-main",
+  "name": "三轮混合模式主回归",
+  "year": 2026,
+  "timezone": "Asia/Shanghai",
+  "refereeConnectionId": "ref-1",
+  "players": [
+    { "id": "p1", "displayName": "Alpha", "connectionId": "101" },
+    { "id": "p2", "displayName": "Beta", "connectionId": "102" },
+    { "id": "p3", "displayName": "Gamma", "connectionId": "103" },
+    { "id": "p4", "displayName": "Delta", "connectionId": "104" },
+    { "id": "p5", "displayName": "测试选手", "connectionId": "105" }
+  ],
+  "stages": [
+    { "id": "s1", "order": 1, "level": 1, "mode": "SR", "timeLimitMs": 600000, "scoring": [20, 15, 12], "minimumScoringPlace": 3 },
+    { "id": "s2", "order": 2, "level": 2, "mode": "HS", "timeLimitMs": 600000, "scoring": [20, 15, 12], "minimumScoringPlace": 3 },
+    { "id": "s3", "order": 3, "level": 13, "mode": "SR", "timeLimitMs": 900000, "scoring": [20, 15, 12], "minimumScoringPlace": 3 }
+  ],
+  "events": [
+    { "atMs": 0, "sourceId": "login-1", "type": "login", "playerId": "p1", "connectionId": "101" },
+    { "atMs": 0, "sourceId": "login-2", "type": "login", "playerId": "p2", "connectionId": "102" },
+    { "atMs": 0, "sourceId": "login-3", "type": "login", "playerId": "p3", "connectionId": "103" },
+    { "atMs": 0, "sourceId": "login-4", "type": "login", "playerId": "p4", "connectionId": "104" },
+    { "atMs": 0, "sourceId": "login-5", "type": "login", "playerId": "p5", "connectionId": "105" },
+    { "atMs": 500, "sourceId": "practice-finish", "type": "finish", "stageId": "s1", "playerId": "p2", "score": 500, "elapsedMs": 50000 },
+    { "atMs": 900, "sourceId": "ready-1", "type": "ready", "stageId": "s1", "refereeConnectionId": "ref-1" },
+    { "atMs": 1000, "sourceId": "go-1", "type": "go", "stageId": "s1", "refereeConnectionId": "ref-1" },
+    { "atMs": 2000, "sourceId": "s1-f1", "type": "finish", "stageId": "s1", "playerId": "p1", "score": 1000, "elapsedMs": 1000 },
+    { "atMs": 2200, "sourceId": "s1-f2", "type": "finish", "stageId": "s1", "playerId": "p2", "score": 900, "elapsedMs": 1200 },
+    { "atMs": 2400, "sourceId": "s1-f3", "type": "finish", "stageId": "s1", "playerId": "p3", "score": 800, "elapsedMs": 1400 },
+    { "atMs": 2600, "sourceId": "s1-f4", "type": "finish", "stageId": "s1", "playerId": "p4", "score": 700, "elapsedMs": 1600 },
+    { "atMs": 2800, "sourceId": "s1-d5", "type": "dnf", "stageId": "s1", "playerId": "p5", "reason": "timeout" },
+    { "atMs": 4000, "sourceId": "go-2", "type": "go", "stageId": "s2", "refereeConnectionId": "ref-1" },
+    { "atMs": 5000, "sourceId": "s2-f2", "type": "finish", "stageId": "s2", "playerId": "p2", "score": 1800, "elapsedMs": 1000 },
+    { "atMs": 5100, "sourceId": "s2-f1", "type": "finish", "stageId": "s2", "playerId": "p1", "score": 2000, "elapsedMs": 1100 },
+    { "atMs": 5200, "sourceId": "s2-f3", "type": "finish", "stageId": "s2", "playerId": "p3", "score": 1800, "elapsedMs": 1200 },
+    { "atMs": 5300, "sourceId": "s2-f4", "type": "finish", "stageId": "s2", "playerId": "p4", "score": 1500, "elapsedMs": 1300 },
+    { "atMs": 5400, "sourceId": "s2-d5", "type": "dnf", "stageId": "s2", "playerId": "p5", "reason": "warning" },
+    { "atMs": 7000, "sourceId": "go-3", "type": "go", "stageId": "s3", "refereeConnectionId": "ref-1" },
+    { "atMs": 8000, "sourceId": "s3-f3", "type": "finish", "stageId": "s3", "playerId": "p3", "score": 1000, "elapsedMs": 1000 },
+    { "atMs": 8200, "sourceId": "s3-f1", "type": "finish", "stageId": "s3", "playerId": "p1", "score": 900, "elapsedMs": 1200 },
+    { "atMs": 8400, "sourceId": "s3-f4", "type": "finish", "stageId": "s3", "playerId": "p4", "score": 800, "elapsedMs": 1400 },
+    { "atMs": 8600, "sourceId": "s3-f2", "type": "finish", "stageId": "s3", "playerId": "p2", "score": 700, "elapsedMs": 1600 },
+    { "atMs": 8800, "sourceId": "s3-d5", "type": "dnf", "stageId": "s3", "playerId": "p5", "reason": "timeout" }
+  ],
+  "expected": { "attempts": 3, "scoreboardVersions": 15 }
+}
