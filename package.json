@@ -32,17 +32,22 @@
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
     "acorn": "^8.0.0",
+    "ajv": "^8.17.0",
     "concurrently": "^9.0.0",
+    "cookie": "^1.1.1",
     "eslint": "^9.0.0",
     "eslint-plugin-react-hooks": "^7.0.0",
     "eslint-plugin-react-refresh": "^0.4.0",
     "jsdom": "^26.0.0",
+    "lru-cache": "^11.0.0",
+    "minimatch": "^10.2.0",
+    "process-warning": "^4.0.0",
+    "real-require": "^1.0.0",
+    "semver": "^7.0.0",
+    "set-cookie-parser": "^2.7.0",
     "typescript": "^5.9.0",
     "typescript-eslint": "^8.0.0",
     "vitest": "^3.2.0"
   },
-  "allowScripts": {
-    "better-sqlite3@12.11.1": true,
-    "esbuild@0.28.1": true
-  }
+  "allowScripts": {}
 }

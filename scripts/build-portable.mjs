@@ -21,21 +21,21 @@ const rootPackage = JSON.parse(await readFile(join(root, "package.json"), "utf8"
 delete serverPackage.devDependencies;
 serverPackage.main = "app/server/main.js";
 serverPackage.scripts = { start: "node app/server/main.js" };
-for (const name of ["@ballance/contracts", "@ballance/core"]) delete serverPackage.dependencies[name];
+for (const name of ["@ballance/contracts", "@ballance/core", "@ballance/testkit"]) delete serverPackage.dependencies[name];
 serverPackage.allowScripts = rootPackage.allowScripts;
 await writeFile(join(output, "package.json"), JSON.stringify(serverPackage, null, 2));
 
 const node = join(runtime, "node.exe");
 const npmCli = join(runtime, "node_modules", "npm", "bin", "npm-cli.js");
-const install = spawnSync(node, [npmCli, "install", "--omit=dev", "--no-audit", "--no-fund"], {
+const install = spawnSync(node, [npmCli, "install", "--workspaces=false", "--omit=dev", "--no-audit", "--no-fund"], {
   cwd: output,
-  env: { ...process.env, PATH: `${runtime};${process.env.PATH ?? ""}` },
+  env: { ...process.env, npm_config_workspaces: "false", PATH: `${runtime};${process.env.PATH ?? ""}` },
   encoding: "utf8",
   stdio: "inherit"
 });
 if (install.status !== 0) process.exit(install.status ?? 1);
 
-for (const packageName of ["contracts", "core"]) {
+for (const packageName of ["contracts", "core", "testkit"]) {
   const target = join(output, "node_modules", "@ballance", packageName);
   await mkdir(target, { recursive: true });
   await cp(join(root, "packages", packageName, "dist"), join(target, "dist"), { recursive: true });
