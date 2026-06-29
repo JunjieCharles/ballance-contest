@@ -49,4 +49,20 @@ describe("local API", () => {
     const forbidden = await app.inject({ method: "POST", url: `/api/v1/competitions/${workId}/test-runs`, headers: auth(token), payload: scenario });
     expect(forbidden.json()).toMatchObject({ error: { code: "CAPABILITY_UNSUPPORTED" } });
   });
+
+  it("drives automation with a virtual clock and applies test faults without a real command transport", async () => {
+    const scenario = JSON.parse(readFileSync(resolve("test/fixtures/scenarios/three-stage-main/scenario.json"), "utf8")) as Record<string, unknown>;
+    const created = await app.inject({ method: "POST", url: "/api/v1/competitions", headers: auth(token), payload: { name: "Automation", mode: "test", idempotencyKey: "automation" } });
+    const competitionId = created.json<{ data: { id: string } }>().data.id;
+    const run = await app.inject({ method: "POST", url: `/api/v1/competitions/${competitionId}/test-runs`, headers: auth(token), payload: scenario });
+    const runId = run.json<{ data: { runId: string } }>().data.runId;
+    await app.inject({ method: "POST", url: `/api/v1/competitions/${competitionId}/test-runs/${runId}/play`, headers: auth(token) });
+
+    const started = await app.inject({ method: "POST", url: `/api/v1/competitions/${competitionId}/test-runs/${runId}/automation/start`, headers: auth(token), payload: {} });
+    expect(started.json()).toMatchObject({ data: { phase: "ready", actions: expect.any(Array) } });
+    const advanced = await app.inject({ method: "POST", url: `/api/v1/competitions/${competitionId}/test-runs/${runId}/automation/advance`, headers: auth(token), payload: { milliseconds: 15_000 } });
+    expect(advanced.json()).toMatchObject({ data: { phase: "running", attempts: [{ attemptNumber: 1 }] } });
+    const fault = await app.inject({ method: "POST", url: `/api/v1/competitions/${competitionId}/test-runs/${runId}/faults`, headers: auth(token), payload: { fault: "player-crash", playerId: "p1" } });
+    expect(fault.json()).toMatchObject({ data: { phase: "incident", incidents: [{ type: "protected-crash", recommendedRestart: true }] } });
+  });
 });

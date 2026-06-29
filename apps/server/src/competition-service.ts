@@ -1,7 +1,8 @@
 import { randomUUID } from "node:crypto";
 import { assertScenarioDefinition, capabilitiesFor, type CompetitionMode, type ScenarioDefinition } from "@ballance/contracts";
-import { CompetitionEngine, type EngineSnapshot } from "@ballance/core";
-import { ScenarioRunner } from "@ballance/testkit";
+import { CompetitionController, CompetitionEngine, type AutomationSnapshot, type EngineSnapshot } from "@ballance/core";
+import { ScenarioRunner, VirtualClock } from "@ballance/testkit";
+import { TestAutomationRuntime } from "./automation-runtime.js";
 import { EventJournal } from "./event-journal.js";
 
 export interface CompetitionRecord {
@@ -21,6 +22,9 @@ interface TestRuntime {
   definition: ScenarioDefinition;
   runner: ScenarioRunner;
   engine: CompetitionEngine;
+  automationClock: VirtualClock;
+  automation: CompetitionController;
+  automationRuntime: TestAutomationRuntime;
 }
 
 export class ServiceError extends Error {
@@ -72,18 +76,18 @@ export class CompetitionService {
     const competition = this.get(competitionId);
     if (competition.mode !== "test") throw new ServiceError("CAPABILITY_UNSUPPORTED", "工作模式不支持测试运行", 409);
     const definition = assertScenarioDefinition(input);
-    const runtime: TestRuntime = { id: randomUUID(), competitionId, definition, runner: new ScenarioRunner(definition), engine: new CompetitionEngine(definition) };
+    const runtime = this.makeTestRuntime(competitionId, definition);
     this.testRuns.set(runtime.id, runtime);
     this.journal.append({ type: "test-run.created", competitionId, stateVersion: competition.stateVersion, data: { runId: runtime.id, scenarioId: definition.id } });
     return { runId: runtime.id, snapshot: runtime.engine.snapshot() };
   }
 
   public advanceTestRun(competitionId: string, runId: string, all: boolean): EngineSnapshot {
-    const runtime = this.testRuns.get(runId);
-    if (!runtime || runtime.competitionId !== competitionId) throw new ServiceError("NOT_FOUND", "测试运行不存在", 404);
+    const runtime = this.getTestRuntime(competitionId, runId);
     const events = all ? runtime.runner.playAll() : [runtime.runner.next()].filter((event) => event !== undefined);
     for (const event of events) {
       runtime.engine.apply(event);
+      this.applyAutomationEvent(runtime, event);
       this.journal.append({ type: "test-run.event", competitionId, data: event });
     }
     const snapshot = runtime.engine.snapshot();
@@ -92,11 +96,106 @@ export class CompetitionService {
   }
 
   public resetTestRun(competitionId: string, runId: string): EngineSnapshot {
+    const runtime = this.getTestRuntime(competitionId, runId);
+    const reset = this.makeTestRuntime(competitionId, runtime.definition, runtime.id);
+    this.testRuns.set(runId, reset);
+    this.journal.append({ type: "test-run.reset", competitionId, data: { runId } });
+    return reset.engine.snapshot();
+  }
+
+  public startTestAutomation(competitionId: string, runId: string, readyInMs = 0): AutomationSnapshot {
+    const runtime = this.getTestRuntime(competitionId, runId);
+    runtime.automation.enable(runtime.automationClock.now() + readyInMs);
+    this.settleTestAutomation(runtime);
+    const snapshot = runtime.automation.snapshot();
+    this.journal.append({ type: "test-run.automation-started", competitionId, data: snapshot });
+    return snapshot;
+  }
+
+  public advanceTestAutomation(competitionId: string, runId: string, milliseconds: number): AutomationSnapshot {
+    if (!Number.isFinite(milliseconds) || milliseconds < 0) throw new ServiceError("VALIDATION_FAILED", "推进时间必须是非负数", 400);
+    const runtime = this.getTestRuntime(competitionId, runId);
+    runtime.automationClock.advanceBy(milliseconds);
+    this.settleTestAutomation(runtime);
+    const snapshot = runtime.automation.snapshot();
+    this.journal.append({ type: "test-run.clock-advanced", competitionId, data: { runId, milliseconds, snapshot } });
+    return snapshot;
+  }
+
+  public injectTestFault(competitionId: string, runId: string, input: { fault: string; playerId?: string; milliseconds?: number }): AutomationSnapshot {
+    const runtime = this.getTestRuntime(competitionId, runId);
+    this.applyFault(runtime, input);
+    this.settleTestAutomation(runtime);
+    const snapshot = runtime.automation.snapshot();
+    this.journal.append({ type: "test-run.fault", competitionId, data: { runId, ...input, snapshot } });
+    return snapshot;
+  }
+
+  public getTestAutomation(competitionId: string, runId: string): AutomationSnapshot {
+    return this.getTestRuntime(competitionId, runId).automation.snapshot();
+  }
+
+  private makeTestRuntime(competitionId: string, definition: ScenarioDefinition, id: string = randomUUID()): TestRuntime {
+    const automationClock = new VirtualClock(0);
+    const automation = new CompetitionController({
+      competitionId,
+      participants: definition.players.map((player) => player.id),
+      stages: [...definition.stages].sort((left, right) => left.order - right.order).map((stage) => ({
+        id: stage.id, map: String(stage.level), mode: stage.mode.toLowerCase() as "sr" | "hs",
+        timeLimitMs: stage.timeLimitMs, minimumScoringPlace: stage.minimumScoringPlace
+      }))
+    }, automationClock);
+    return {
+      id, competitionId, definition, runner: new ScenarioRunner(definition), engine: new CompetitionEngine(definition),
+      automationClock, automation, automationRuntime: new TestAutomationRuntime(automation)
+    };
+  }
+
+  private getTestRuntime(competitionId: string, runId: string): TestRuntime {
+    const competition = this.get(competitionId);
+    if (competition.mode !== "test") throw new ServiceError("CAPABILITY_UNSUPPORTED", "工作模式不支持测试运行", 409);
     const runtime = this.testRuns.get(runId);
     if (!runtime || runtime.competitionId !== competitionId) throw new ServiceError("NOT_FOUND", "测试运行不存在", 404);
-    runtime.runner = new ScenarioRunner(runtime.definition);
-    runtime.engine = new CompetitionEngine(runtime.definition);
-    this.journal.append({ type: "test-run.reset", competitionId, data: { runId } });
-    return runtime.engine.snapshot();
+    return runtime;
+  }
+
+  private settleTestAutomation(runtime: TestRuntime): void {
+    for (let iteration = 0; iteration < 8; iteration += 1) {
+      const before = runtime.automation.snapshot().stateVersion;
+      runtime.automation.tick();
+      runtime.automationRuntime.dispatch();
+      if (runtime.automation.snapshot().stateVersion === before) break;
+    }
+  }
+
+  private applyAutomationEvent(runtime: TestRuntime, event: ScenarioDefinition["events"][number]): void {
+    if (event.atMs > runtime.automationClock.now()) runtime.automationClock.advanceBy(event.atMs - runtime.automationClock.now());
+    switch (event.type) {
+      case "login": runtime.automation.observeConnection(event.playerId, true); break;
+      case "disconnect": runtime.automation.observeConnection(event.playerId, false); break;
+      case "cheat": runtime.automation.observeCheat(event.playerId, event.enabled, event.sourceId); break;
+      case "finish": runtime.automation.recordResult({ stageId: event.stageId, playerId: event.playerId, status: "finished", sourceId: event.sourceId, receivedAtMs: runtime.automationClock.now() }); break;
+      case "dnf": runtime.automation.recordResult({ stageId: event.stageId, playerId: event.playerId, status: "dnf", sourceId: event.sourceId, reason: event.reason, receivedAtMs: runtime.automationClock.now() }); break;
+      case "fault": this.applyFault(runtime, event); break;
+      default: break;
+    }
+    this.settleTestAutomation(runtime);
+  }
+
+  private applyFault(runtime: TestRuntime, input: { fault: string; playerId?: string; milliseconds?: number }): void {
+    switch (input.fault) {
+      case "process-exit":
+      case "server-disconnect": runtime.automation.observeServerDisconnect(`测试故障：${input.fault}`); break;
+      case "participant-disconnect":
+        if (!input.playerId) throw new ServiceError("VALIDATION_FAILED", "玩家掉线故障需要 playerId", 400);
+        runtime.automation.observeConnection(input.playerId, false);
+        break;
+      case "player-crash":
+        if (!input.playerId) throw new ServiceError("VALIDATION_FAILED", "玩家崩溃故障需要 playerId", 400);
+        runtime.automation.observeCrash(input.playerId, "测试注入玩家崩溃");
+        break;
+      case "clock-jump": runtime.automationClock.advanceBy(input.milliseconds ?? 60_000); break;
+      default: throw new ServiceError("VALIDATION_FAILED", "未知故障类型", 400);
+    }
   }
 }

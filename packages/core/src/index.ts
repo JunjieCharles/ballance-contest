@@ -4,3 +4,4 @@ export * from "./events.js";
 export * from "./log-parser.js";
 export * from "./identity.js";
 export * from "./competition-engine.js";
+export * from "./competition-controller.js";

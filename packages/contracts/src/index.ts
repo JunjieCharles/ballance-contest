@@ -88,7 +88,16 @@ export const ScenarioEventSchema = Type.Union([
   Type.Object({ ...ScenarioEventBase, type: Type.Literal("dnf"), stageId: Type.String(), playerId: Type.String(), reason: Type.String() }),
   Type.Object({ ...ScenarioEventBase, type: Type.Literal("cheat"), playerId: Type.String(), enabled: Type.Boolean() }),
   Type.Object({ ...ScenarioEventBase, type: Type.Literal("warning"), playerId: Type.Optional(Type.String()), message: Type.String() }),
-  Type.Object({ ...ScenarioEventBase, type: Type.Literal("fault"), fault: Type.Union([Type.Literal("process-exit"), Type.Literal("server-disconnect"), Type.Literal("clock-jump")]) })
+  Type.Object({
+    ...ScenarioEventBase,
+    type: Type.Literal("fault"),
+    fault: Type.Union([
+      Type.Literal("process-exit"), Type.Literal("server-disconnect"), Type.Literal("clock-jump"),
+      Type.Literal("participant-disconnect"), Type.Literal("player-crash")
+    ]),
+    playerId: Type.Optional(Type.String()),
+    milliseconds: Type.Optional(Type.Integer({ minimum: 0 }))
+  })
 ]);
 export type ScenarioEvent = Static<typeof ScenarioEventSchema>;
 

@@ -87,12 +87,21 @@ export const buildApp = async (options: BuildAppOptions): Promise<FastifyInstanc
     requireSession(request, true);
     return { data: service.resetTestRun(request.params.competitionId, request.params.runId) };
   });
-  app.post<{ Params: { competitionId: string; runId: string }; Body: { fault: string } }>("/api/v1/competitions/:competitionId/test-runs/:runId/faults", async (request) => {
+  app.get<{ Params: { competitionId: string; runId: string } }>("/api/v1/competitions/:competitionId/test-runs/:runId/automation", async (request) => {
+    requireSession(request, false);
+    return { data: service.getTestAutomation(request.params.competitionId, request.params.runId) };
+  });
+  app.post<{ Params: { competitionId: string; runId: string }; Body: { readyInMs?: number } }>("/api/v1/competitions/:competitionId/test-runs/:runId/automation/start", async (request) => {
     requireSession(request, true);
-    const competition = service.get(request.params.competitionId);
-    if (competition.mode !== "test") throw new ServiceError("CAPABILITY_UNSUPPORTED", "工作模式不支持故障注入", 409);
-    service.journal.append({ type: "test-run.fault", competitionId: competition.id, data: { runId: request.params.runId, fault: request.body.fault } });
-    return { data: { accepted: true } };
+    return { data: service.startTestAutomation(request.params.competitionId, request.params.runId, request.body.readyInMs ?? 0) };
+  });
+  app.post<{ Params: { competitionId: string; runId: string }; Body: { milliseconds: number } }>("/api/v1/competitions/:competitionId/test-runs/:runId/automation/advance", async (request) => {
+    requireSession(request, true);
+    return { data: service.advanceTestAutomation(request.params.competitionId, request.params.runId, request.body.milliseconds) };
+  });
+  app.post<{ Params: { competitionId: string; runId: string }; Body: { fault: string; playerId?: string; milliseconds?: number } }>("/api/v1/competitions/:competitionId/test-runs/:runId/faults", async (request) => {
+    requireSession(request, true);
+    return { data: service.injectTestFault(request.params.competitionId, request.params.runId, request.body) };
   });
 
   type WebSocketRequest = FastifyRequest<{ Querystring: { token?: string; after?: string } }>;
