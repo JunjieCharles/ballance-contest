@@ -72,6 +72,7 @@ export const ScenarioStageSchema = Type.Object({
   scoring: Type.Array(Type.Number(), { minItems: 1 }),
   minimumScoringPlace: Type.Integer({ minimum: 1 })
 });
+export type ScenarioStage = Static<typeof ScenarioStageSchema>;
 
 const ScenarioEventBase = {
   atMs: Type.Integer({ minimum: 0 }),
