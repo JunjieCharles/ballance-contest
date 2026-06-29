@@ -1,4 +1,4 @@
-import { existsSync } from "node:fs";
+import { existsSync, mkdirSync } from "node:fs";
 import { resolve } from "node:path";
 import staticPlugin from "@fastify/static";
 import websocket from "@fastify/websocket";
@@ -7,12 +7,16 @@ import { APPLICATION_VERSION } from "@ballance/core";
 import Fastify, { type FastifyInstance, type FastifyRequest } from "fastify";
 import type { WebSocket } from "ws";
 import { CompetitionService, ServiceError } from "./competition-service.js";
+import { createCompetitionArchive } from "./archive.js";
+import { createScoreboardExports } from "./scoreboard-export.js";
 import { SessionManager, type LocalSession } from "./session.js";
+import { defaultDataRoot } from "./storage/database.js";
 
 export interface BuildAppOptions {
   bootstrapToken: string;
   serveStatic?: boolean;
   service?: CompetitionService;
+  dataRoot?: string;
 }
 
 const bearer = (request: FastifyRequest): string | undefined => {
@@ -23,6 +27,7 @@ const bearer = (request: FastifyRequest): string | undefined => {
 export const buildApp = async (options: BuildAppOptions): Promise<FastifyInstance> => {
   const app = Fastify({ logger: false });
   const service = options.service ?? new CompetitionService();
+  const dataRoot = resolve(options.dataRoot ?? defaultDataRoot());
   const sessions = new SessionManager(options.bootstrapToken);
   await app.register(websocket);
 
@@ -102,6 +107,59 @@ export const buildApp = async (options: BuildAppOptions): Promise<FastifyInstanc
   app.post<{ Params: { competitionId: string; runId: string }; Body: { fault: string; playerId?: string; milliseconds?: number } }>("/api/v1/competitions/:competitionId/test-runs/:runId/faults", async (request) => {
     requireSession(request, true);
     return { data: service.injectTestFault(request.params.competitionId, request.params.runId, request.body) };
+  });
+  app.get<{ Params: { competitionId: string; runId: string; format: string }; Querystring: { version?: string } }>("/api/v1/competitions/:competitionId/test-runs/:runId/exports/:format", async (request, reply) => {
+    requireSession(request, false);
+    const requestedVersion = request.query.version === undefined ? undefined : Number(request.query.version);
+    if (requestedVersion !== undefined && !Number.isInteger(requestedVersion)) throw new ServiceError("VALIDATION_FAILED", "榜单版本必须是整数", 400);
+    const fixed = service.getTestScoreboardVersion(request.params.competitionId, request.params.runId, requestedVersion);
+    const bundle = createScoreboardExports({
+      competitionName: fixed.competition.name, mode: fixed.competition.mode, version: fixed.scoreboard.version,
+      generatedAt: new Date().toISOString(), entries: fixed.scoreboard.entries,
+      scoringRules: fixed.definition.stages.map((stage) => ({ stage: stage.id, rule: stage.scoring.join("/") }))
+    });
+    const formats = {
+      html: { contentType: "text/html; charset=utf-8", body: bundle.html },
+      tsv: { contentType: "text/tab-separated-values; charset=utf-8", body: bundle.tsv },
+      csv: { contentType: "text/csv; charset=utf-8", body: bundle.csv },
+      xlsx: { contentType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", body: bundle.xlsx }
+    } as const;
+    const selected = formats[request.params.format as keyof typeof formats];
+    if (!selected) throw new ServiceError("VALIDATION_FAILED", "不支持的导出格式", 400);
+    const encodedName = encodeURIComponent(`${bundle.basename}.${request.params.format}`);
+    return reply.header("Content-Type", selected.contentType)
+      .header("Content-Disposition", `attachment; filename="scoreboard-v${fixed.scoreboard.version}.${request.params.format}"; filename*=UTF-8''${encodedName}`)
+      .send(selected.body);
+  });
+  app.post<{ Params: { competitionId: string; runId: string }; Body: { version: number } }>("/api/v1/competitions/:competitionId/test-runs/:runId/archive", async (request) => {
+    requireSession(request, true);
+    const fixed = service.getTestScoreboardVersion(request.params.competitionId, request.params.runId);
+    const generatedAt = new Date().toISOString();
+    const exports = createScoreboardExports({
+      competitionName: fixed.competition.name, mode: fixed.competition.mode, version: fixed.scoreboard.version,
+      generatedAt, entries: fixed.scoreboard.entries,
+      scoringRules: fixed.definition.stages.map((stage) => ({ stage: stage.id, rule: stage.scoring.join("/") }))
+    });
+    mkdirSync(dataRoot, { recursive: true });
+    const archive = createCompetitionArchive({
+      dataRoot, sourceRoot: dataRoot,
+      competition: { id: fixed.competition.id, name: fixed.competition.name, mode: fixed.competition.mode, timezone: fixed.definition.timezone },
+      version: request.body.version, generatedAt, applicationVersion: APPLICATION_VERSION, parserVersion: "1", mockClientVersion: "test-double",
+      sourceFiles: [],
+      records: {
+        "config/scenario.json": fixed.definition,
+        "participants/participants.json": fixed.definition.players,
+        "events/standard-events.json": fixed.definition.events,
+        "results/scoreboard.json": fixed.scoreboard,
+        "runtime/automation.json": fixed.automation,
+        "audit/commands.json": fixed.automation.actions,
+        "audit/incidents.json": fixed.automation.incidents,
+        "audit/overrides.json": []
+      },
+      exports
+    });
+    service.journal.append({ type: "test-run.archived", competitionId: fixed.competition.id, data: { runId: request.params.runId, version: request.body.version, manifestHash: archive.manifestHash } });
+    return { data: { directory: archive.directory, packagePath: archive.packagePath, manifestHash: archive.manifestHash } };
   });
 
   type WebSocketRequest = FastifyRequest<{ Querystring: { token?: string; after?: string } }>;

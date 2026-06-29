@@ -1,5 +1,6 @@
-import { readFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
 import type { FastifyInstance } from "fastify";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { buildApp } from "./app.js";
@@ -9,13 +10,15 @@ const auth = (token: string) => ({ authorization: `Bearer ${token}` });
 describe("local API", () => {
   let app: FastifyInstance;
   let token: string;
+  let dataRoot: string;
 
   beforeEach(async () => {
-    app = await buildApp({ bootstrapToken: "bootstrap", serveStatic: false });
+    dataRoot = mkdtempSync(join(tmpdir(), "ballance-api-"));
+    app = await buildApp({ bootstrapToken: "bootstrap", serveStatic: false, dataRoot });
     const response = await app.inject({ method: "POST", url: "/api/v1/sessions/bootstrap", payload: { bootstrapToken: "bootstrap", tabId: "tab-1" } });
     token = response.json<{ token: string }>().token;
   });
-  afterEach(async () => { if (app) await app.close(); });
+  afterEach(async () => { if (app) await app.close(); if (dataRoot) rmSync(dataRoot, { recursive: true, force: true }); });
 
   it("rejects invalid bootstrap and gives only the first tab control", async () => {
     expect((await app.inject({ method: "POST", url: "/api/v1/sessions/bootstrap", payload: { bootstrapToken: "bad", tabId: "bad" } })).statusCode).toBe(401);
@@ -64,5 +67,24 @@ describe("local API", () => {
     expect(advanced.json()).toMatchObject({ data: { phase: "running", attempts: [{ attemptNumber: 1 }] } });
     const fault = await app.inject({ method: "POST", url: `/api/v1/competitions/${competitionId}/test-runs/${runId}/faults`, headers: auth(token), payload: { fault: "player-crash", playerId: "p1" } });
     expect(fault.json()).toMatchObject({ data: { phase: "incident", incidents: [{ type: "protected-crash", recommendedRestart: true }] } });
+  });
+
+  it("exports a fixed test scoreboard version and archives it under the test data tree", async () => {
+    const scenario = JSON.parse(readFileSync(resolve("test/fixtures/scenarios/three-stage-main/scenario.json"), "utf8")) as Record<string, unknown>;
+    const created = await app.inject({ method: "POST", url: "/api/v1/competitions", headers: auth(token), payload: { name: "Export", mode: "test", idempotencyKey: "export" } });
+    const competitionId = created.json<{ data: { id: string } }>().data.id;
+    const run = await app.inject({ method: "POST", url: `/api/v1/competitions/${competitionId}/test-runs`, headers: auth(token), payload: scenario });
+    const runId = run.json<{ data: { runId: string } }>().data.runId;
+    await app.inject({ method: "POST", url: `/api/v1/competitions/${competitionId}/test-runs/${runId}/play`, headers: auth(token) });
+
+    const csv = await app.inject({ method: "GET", url: `/api/v1/competitions/${competitionId}/test-runs/${runId}/exports/csv?version=1`, headers: auth(token) });
+    expect(csv.statusCode).toBe(200);
+    expect(csv.headers["content-type"]).toContain("text/csv");
+    expect(csv.body).toContain("测试数据");
+    const archived = await app.inject({ method: "POST", url: `/api/v1/competitions/${competitionId}/test-runs/${runId}/archive`, headers: auth(token), payload: { version: 1 } });
+    const archive = archived.json<{ data: { directory: string; packagePath: string; manifestHash: string } }>().data;
+    expect(archive.directory.replaceAll("\\", "/")).toContain(`/test/${competitionId}/archive/`);
+    expect(readFileSync(join(archive.directory, "manifest.json"), "utf8")).toContain('"testData": true');
+    expect(archive.manifestHash).toMatch(/^[a-f0-9]{64}$/);
   });
 });

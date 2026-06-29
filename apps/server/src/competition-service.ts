@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { assertScenarioDefinition, capabilitiesFor, type CompetitionMode, type ScenarioDefinition } from "@ballance/contracts";
-import { CompetitionController, CompetitionEngine, type AutomationSnapshot, type EngineSnapshot } from "@ballance/core";
+import { CompetitionController, CompetitionEngine, type AutomationSnapshot, type EngineSnapshot, type ScoreboardVersion } from "@ballance/core";
 import { ScenarioRunner, VirtualClock } from "@ballance/testkit";
 import { TestAutomationRuntime } from "./automation-runtime.js";
 import { EventJournal } from "./event-journal.js";
@@ -133,6 +133,19 @@ export class CompetitionService {
 
   public getTestAutomation(competitionId: string, runId: string): AutomationSnapshot {
     return this.getTestRuntime(competitionId, runId).automation.snapshot();
+  }
+
+  public getTestScoreboardVersion(competitionId: string, runId: string, version?: number): {
+    competition: CompetitionRecord;
+    definition: ScenarioDefinition;
+    scoreboard: ScoreboardVersion;
+    automation: AutomationSnapshot;
+  } {
+    const runtime = this.getTestRuntime(competitionId, runId);
+    const versions = runtime.engine.snapshot().scoreboardVersions;
+    const scoreboard = version === undefined ? versions.at(-1) : versions.find((candidate) => candidate.version === version);
+    if (!scoreboard) throw new ServiceError("NOT_FOUND", "榜单版本不存在", 404);
+    return { competition: this.get(competitionId), definition: runtime.definition, scoreboard, automation: runtime.automation.snapshot() };
   }
 
   private makeTestRuntime(competitionId: string, definition: ScenarioDefinition, id: string = randomUUID()): TestRuntime {

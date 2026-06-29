@@ -129,3 +129,35 @@ export const runtimeSnapshots = sqliteTable("runtime_snapshots", {
   payload: text("payload", { mode: "json" }).notNull(),
   updatedAt: text("updated_at").notNull()
 });
+
+export const recoveryAudits = sqliteTable("recovery_audits", {
+  id: text("id").primaryKey(),
+  competitionId: text("competition_id").notNull().references(() => competitions.id),
+  stateVersion: integer("state_version").notNull(),
+  status: text("status").notNull(),
+  report: text("report", { mode: "json" }).notNull(),
+  createdAt: text("created_at").notNull(),
+  confirmedAt: text("confirmed_at"),
+  confirmedBy: text("confirmed_by"),
+  confirmationReason: text("confirmation_reason")
+});
+
+export const observationGaps = sqliteTable("observation_gaps", {
+  id: text("id").primaryKey(),
+  competitionId: text("competition_id").notNull().references(() => competitions.id),
+  code: text("code").notNull(),
+  detail: text("detail").notNull(),
+  status: text("status").notNull(),
+  createdAt: text("created_at").notNull(),
+  resolvedAt: text("resolved_at")
+});
+
+export const archiveVersions = sqliteTable("archive_versions", {
+  id: text("id").primaryKey(),
+  competitionId: text("competition_id").notNull().references(() => competitions.id),
+  version: integer("version").notNull(),
+  mode: text("mode", { enum: ["work", "test"] }).notNull(),
+  relativePath: text("relative_path").notNull(),
+  manifestHash: text("manifest_hash").notNull(),
+  createdAt: text("created_at").notNull()
+}, (table) => [uniqueIndex("archive_versions_competition_version").on(table.competitionId, table.version)]);

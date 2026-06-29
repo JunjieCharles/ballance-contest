@@ -22,6 +22,11 @@ const MIGRATIONS: readonly string[] = [
   CREATE TABLE incidents (id TEXT PRIMARY KEY, competition_id TEXT NOT NULL REFERENCES competitions(id), code TEXT NOT NULL, status TEXT NOT NULL, evidence TEXT NOT NULL, created_at TEXT NOT NULL, resolved_at TEXT) STRICT;
   CREATE TABLE overrides (id TEXT PRIMARY KEY, competition_id TEXT NOT NULL REFERENCES competitions(id), target_type TEXT NOT NULL, target_id TEXT NOT NULL, before_value TEXT, after_value TEXT NOT NULL, reason TEXT NOT NULL, actor TEXT NOT NULL, reversed_by TEXT, created_at TEXT NOT NULL) STRICT;
   CREATE TABLE runtime_snapshots (competition_id TEXT PRIMARY KEY REFERENCES competitions(id), state_version INTEGER NOT NULL, payload TEXT NOT NULL, updated_at TEXT NOT NULL) STRICT;
+  `,
+  `
+  CREATE TABLE recovery_audits (id TEXT PRIMARY KEY, competition_id TEXT NOT NULL REFERENCES competitions(id), state_version INTEGER NOT NULL, status TEXT NOT NULL, report TEXT NOT NULL, created_at TEXT NOT NULL, confirmed_at TEXT, confirmed_by TEXT, confirmation_reason TEXT) STRICT;
+  CREATE TABLE observation_gaps (id TEXT PRIMARY KEY, competition_id TEXT NOT NULL REFERENCES competitions(id), code TEXT NOT NULL, detail TEXT NOT NULL, status TEXT NOT NULL, created_at TEXT NOT NULL, resolved_at TEXT) STRICT;
+  CREATE TABLE archive_versions (id TEXT PRIMARY KEY, competition_id TEXT NOT NULL REFERENCES competitions(id), version INTEGER NOT NULL, mode TEXT NOT NULL CHECK(mode IN ('work','test')), relative_path TEXT NOT NULL, manifest_hash TEXT NOT NULL, created_at TEXT NOT NULL, UNIQUE(competition_id, version)) STRICT;
   `
 ];
 
