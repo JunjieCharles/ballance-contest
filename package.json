@@ -20,7 +20,9 @@
     "lint": "eslint .",
     "test": "vitest run",
     "test:watch": "vitest",
-    "test:e2e": "playwright test",
+    "test:e2e": "npm run build && playwright test",
+    "test:portable": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/Test-Portable.ps1",
+    "test:mock-client": "npm run build -w @ballance/server && node scripts/Test-MockClientPipe.mjs",
     "package:portable": "node scripts/build-portable.mjs"
   },
   "devDependencies": {
@@ -33,6 +35,7 @@
     "@types/react-dom": "^19.0.0",
     "acorn": "^8.0.0",
     "ajv": "^8.17.0",
+    "better-sqlite3": "^12.11.1",
     "concurrently": "^9.0.0",
     "cookie": "^1.1.1",
     "eslint": "^9.0.0",
@@ -49,5 +52,8 @@
     "typescript-eslint": "^8.0.0",
     "vitest": "^3.2.0"
   },
-  "allowScripts": {}
+  "allowScripts": {
+    "better-sqlite3": true,
+    "esbuild": true
+  }
 }

@@ -1,0 +1,36 @@
+name: Portable release gate
+
+on:
+  workflow_dispatch:
+
+jobs:
+  package:
+    runs-on: windows-2025
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24.18.0
+          cache: npm
+      - run: npm ci
+      - name: Provision pinned BallanceMMO artifact
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.BALLANCEMMO_TOKEN }}
+        run: ./scripts/Get-LatestBallanceMMOServer.ps1 -Force
+      - name: Verify supported MockClient baseline
+        shell: pwsh
+        run: |
+          $version = & ./server-windows/BallanceMMOMockClient.exe -v 2>&1 | Out-String
+          if ($version -notmatch '3\.6\.8-beta18') { throw "Unsupported MockClient: $version" }
+      - run: npm run lint
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run test:e2e
+      - run: npm run test:mock-client
+      - run: npm run package:portable
+      - run: npm run test:portable
+      - uses: actions/upload-artifact@v4
+        with:
+          name: BallanceContestConsole-windows-portable
+          path: dist/portable/BallanceContestConsole

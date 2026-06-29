@@ -207,7 +207,10 @@ export class CompetitionService {
         if (!input.playerId) throw new ServiceError("VALIDATION_FAILED", "玩家崩溃故障需要 playerId", 400);
         runtime.automation.observeCrash(input.playerId, "测试注入玩家崩溃");
         break;
-      case "clock-jump": runtime.automationClock.advanceBy(input.milliseconds ?? 60_000); break;
+      case "clock-jump":
+        runtime.automationClock.advanceBy(input.milliseconds ?? 60_000);
+        runtime.automation.observeTimingDiscontinuity("测试注入系统时钟或休眠跳变");
+        break;
       default: throw new ServiceError("VALIDATION_FAILED", "未知故障类型", 400);
     }
   }

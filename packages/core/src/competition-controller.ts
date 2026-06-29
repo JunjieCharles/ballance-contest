@@ -88,7 +88,7 @@ export interface ControlledAttempt {
 
 export interface AutomationIncident {
   id: string;
-  type: "protected-crash" | "group-disconnect" | "server-disconnect" | "cheat-violation";
+  type: "protected-crash" | "group-disconnect" | "server-disconnect" | "cheat-violation" | "timing-discontinuity";
   severity: "high" | "critical";
   createdAtMs: number;
   attemptId?: string;
@@ -302,6 +302,17 @@ export class CompetitionController {
     });
     this.automationEnabled = false;
     this.phase = "incident";
+    this.bump();
+  }
+
+  public observeTimingDiscontinuity(evidence: string): void {
+    const attempt = this.currentAttempt;
+    this.incidents.push({
+      id: randomUUID(), type: "timing-discontinuity", severity: "critical", createdAtMs: this.clock.now(),
+      ...(attempt ? { attemptId: attempt.id } : {}), participantIds: [], recommendedRestart: false, status: "open", evidence
+    });
+    this.automationEnabled = false;
+    this.phase = "paused";
     this.bump();
   }
 

@@ -192,4 +192,20 @@ describe("CompetitionController", () => {
     controller.observeConnection("p2", false);
     expect(controller.snapshot().incidents).toContainEqual(expect.objectContaining({ type: "group-disconnect", recommendedRestart: true }));
   });
+
+  it("blocks overdue actions after a detected sleep or clock discontinuity", () => {
+    const clock = new FakeClock();
+    const controller = new CompetitionController(configuration(), clock);
+    connectAll(controller);
+    controller.enable(0);
+    controller.drainActions();
+    controller.tick();
+    for (const item of controller.drainActions()) controller.acknowledgeAction(item.id, "acknowledged");
+    clock.advance(60_000);
+    controller.observeTimingDiscontinuity("event loop suspended for 60 seconds");
+    controller.tick();
+    expect(controller.snapshot()).toMatchObject({ phase: "paused", automationEnabled: false, attempts: [] });
+    expect(controller.snapshot().actions.filter((item) => item.kind === "go")).toHaveLength(0);
+    expect(controller.snapshot().incidents).toContainEqual(expect.objectContaining({ type: "timing-discontinuity" }));
+  });
 });

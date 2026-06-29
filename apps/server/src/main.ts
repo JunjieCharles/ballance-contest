@@ -1,12 +1,27 @@
+import { spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
+import { join } from "node:path";
 import { buildApp } from "./app.js";
 
 const bootstrapToken = randomBytes(32).toString("base64url");
-const app = await buildApp({ bootstrapToken });
+const effectiveBootstrapToken = process.env.BALLANCE_BOOTSTRAP_TOKEN ?? bootstrapToken;
+const appPromise = buildApp({
+  bootstrapToken: effectiveBootstrapToken,
+  ...(process.env.BALLANCE_DEV_SHUTDOWN_TOKEN
+    ? { devShutdown: { token: process.env.BALLANCE_DEV_SHUTDOWN_TOKEN, onShutdown: async () => (await appPromise).close() } }
+    : {})
+});
+const app = await appPromise;
 
 try {
   await app.listen({ host: "127.0.0.1", port: 32113 });
-  app.log.info(`Open http://127.0.0.1:32113/#token=${bootstrapToken}`);
+  const url = `http://127.0.0.1:32113/#token=${effectiveBootstrapToken}`;
+  console.log(`Open ${url}`);
+  if (process.platform === "win32" && process.env.BALLANCE_OPEN_BROWSER === "1") {
+    spawn(join(process.env.SystemRoot ?? "C:\\Windows", "System32", "rundll32.exe"), ["url.dll,FileProtocolHandler", url], {
+      detached: true, stdio: "ignore", shell: false, windowsHide: true
+    }).unref();
+  }
 } catch (error) {
   app.log.error(error);
   process.exitCode = 1;

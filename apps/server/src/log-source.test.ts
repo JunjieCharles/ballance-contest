@@ -34,4 +34,15 @@ describe("log sources", () => {
     const lines = await reader.readAvailable();
     expect(lines.map((line) => [line.offset, line.text])).toEqual([[6, "partial"], [14, "second"]]);
   });
+
+  it("starts a new generation after truncation or rotation without reusing source IDs", async () => {
+    const path = tempFile();
+    writeFileSync(path, "first\nsecond\n", "utf8");
+    const reader = new GrowingLogReader(path);
+    const original = await reader.readAvailable();
+    writeFileSync(path, "new\n", "utf8");
+    const rotated = await reader.readAvailable();
+    expect(rotated).toMatchObject([{ offset: 0, text: "new" }]);
+    expect(rotated[0]?.sourceId).not.toBe(original[0]?.sourceId);
+  });
 });

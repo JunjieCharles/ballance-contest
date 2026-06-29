@@ -17,6 +17,7 @@ export interface BuildAppOptions {
   serveStatic?: boolean;
   service?: CompetitionService;
   dataRoot?: string;
+  devShutdown?: { token: string; onShutdown: () => void | Promise<void> };
 }
 
 const bearer = (request: FastifyRequest): string | undefined => {
@@ -60,6 +61,13 @@ export const buildApp = async (options: BuildAppOptions): Promise<FastifyInstanc
     try { return sessions.exchange(request.body.bootstrapToken, request.body.tabId); }
     catch { throw new ServiceError("UNAUTHORIZED", "启动令牌无效", 401); }
   });
+  if (options.devShutdown) {
+    app.post<{ Body: { token: string } }>("/api/v1/dev/shutdown", async (request) => {
+      if (request.body.token !== options.devShutdown?.token) throw new ServiceError("DEV_SHUTDOWN_REJECTED", "开发实例关闭令牌无效", 403);
+      setImmediate(() => { void options.devShutdown?.onShutdown(); });
+      return { accepted: true };
+    });
+  }
   app.post("/api/v1/sessions/control", async (request) => sessions.acquire(requireSession(request).token));
 
   app.get("/api/v1/competitions", async (request) => { requireSession(request); return { data: service.list() }; });

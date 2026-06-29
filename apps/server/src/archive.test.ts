@@ -65,4 +65,23 @@ describe("competition archive", () => {
     expect(() => createCompetitionArchive(request)).toThrow("ARCHIVE_VERSION_EXISTS");
     expect(() => createCompetitionArchive({ ...request, version: 2, sourceFiles: [{ sourcePath: outside, kind: "log" }] })).toThrow("ARCHIVE_SOURCE_OUTSIDE_ROOT");
   });
+
+  it("surfaces a disk target error without changing source data", () => {
+    const root = mkdtempSync(join(tmpdir(), "ballance-archive-disk-"));
+    temporary.push(root);
+    const sourceRoot = join(root, "source");
+    mkdirSync(sourceRoot);
+    const log = join(sourceRoot, "source.log");
+    const invalidDataRoot = join(root, "data-root-is-a-file");
+    writeFileSync(log, "immutable source");
+    writeFileSync(invalidDataRoot, "not a directory");
+    const before = sha(log);
+    expect(() => createCompetitionArchive({
+      dataRoot: invalidDataRoot, sourceRoot,
+      competition: { id: "c1", name: "Disk", mode: "test", timezone: "Asia/Shanghai" },
+      version: 1, generatedAt: "2026-06-29T12:00:00.000Z", applicationVersion: "dev", parserVersion: "1", mockClientVersion: "fake",
+      sourceFiles: [{ sourcePath: log, kind: "log" }], records: {}, exports: exportsForTest()
+    })).toThrow();
+    expect(sha(log)).toBe(before);
+  });
 });

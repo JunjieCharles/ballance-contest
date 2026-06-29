@@ -112,7 +112,7 @@ export function App() {
             <p>粘贴人工维护的 ScenarioDefinition；测试模式不会启动真实 MockClient 或联网。</p>
             <textarea value={scenario} onChange={(event) => setScenario(event.target.value)} spellCheck={false} />
             <div className="actions"><button disabled={!session?.control} onClick={() => void createRun()}>创建测试运行</button><button disabled={!runId} onClick={() => void controlRun("step")}>逐事件</button><button disabled={!runId} onClick={() => void controlRun("play")}>播放到底</button><button disabled={!runId} onClick={() => void controlRun("reset")}>重置</button></div>
-          </div> : <div className="panel"><h2>工作控制台</h2><p>真实 MockClient 接入将在工作模式里进行；测试专属操作在此不可用。</p></div>}
+          </div> : <div className="panel"><h2>工作控制台</h2><p>工作模式由本服务托管真实 MockClient，并通过串行命令队列等待服务器回显；测试专属操作在此不可用。</p></div>}
           {snapshot && <div className="panel"><h2>实时成绩</h2><p>{snapshot.attempts.length} 次尝试 · {snapshot.scoreboardVersions.length} 个榜单版本 · {snapshot.anomalies.length} 条异常</p><table><thead><tr><th>名次</th><th>选手</th><th>积分</th></tr></thead><tbody>{snapshot.currentScoreboard.map((entry) => <tr key={entry.displayName}><td>{entry.rank}</td><td>{entry.displayName}</td><td>{entry.points}</td></tr>)}</tbody></table></div>}
         </section>
       </div>
