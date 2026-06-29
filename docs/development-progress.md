@@ -2,7 +2,7 @@
 
 > 当前版本：0.1.0-dev
 > 最后更新：2026-06-30
-> 当前里程碑：TEST — 已完成
+> 当前里程碑：DOCS — 已完成
 > 下一项工作：在目标赛事服务器上执行赛前权限/网络彩排，再按发布工作流生成候选便携包
 
 ## 里程碑任务
@@ -24,6 +24,7 @@
 | M6-T01 恢复、修订与归档 | 已完成 | BE 10、12；BE-OVR/EXPORT/BOOT | 恢复、导出、归档测试通过 | 快照后事件重放、关键命令不确定化、观察缺口、现场确认、覆盖/撤销、未归属处理、HTML/TSV/CSV/XLSX 与只读哈希归档共 11 项新增测试通过 |
 | M7-T01 非功能与发布 | 已完成 | BE/FE 14–15；BE-PERF/SEC/COMPAT | 性能、安全、浏览器和便携包门禁通过 | 30×30×8h/900 榜单版本、休眠/磁盘/轮转、固定端口/来源/路径安全、Edge/Chrome、真实 MockClient 管道及无系统 Node 便携冒烟通过 |
 | TEST-T01 `test/` 集中回归完善 | 已完成 | BE-MODE/GO/SCORE/DNF/DISC/WINDOW/CHEAT/CMD/RECOVER/FILE，E2E-TEST，NF-SOAK/DETERMINISM | `test/` 下具备 P0 场景夹具、集中自动化测试和用例覆盖矩阵；全部门禁通过 | 新增 `test/unit/backend`、`test/integration`、`test/nonfunctional` 与 e2e 集中回归；`npm run lint/typecheck/test/build/test:e2e` 通过 |
+| DOCS-T01 根目录 README | 已完成 | 使用说明、开发/测试/打包流程 | README 覆盖项目介绍、模式、运行、测试、便携包和目录说明；基础检查通过 | 新增根目录 `README.md`；`git diff --check` 与 `npm run lint` 通过 |
 
 ## 当前检查结果
 
@@ -71,6 +72,8 @@
 | 2026-06-30 | TEST `npm run build` | 通过 | 共享包、Fastify 服务与 Vite 前端构建成功 |
 | 2026-06-30 | TEST 首轮 `npm run test:e2e` | 失败 | Edge/Chrome 共享本地服务时测试间控制租约与比赛状态互相影响；已让用例显式接管控制并移除脆弱初始状态断言 |
 | 2026-06-30 | TEST `npm run test:e2e` | 通过 | Edge 与 Chrome 共 4 个 Playwright 用例通过，覆盖测试模式创建/播放与工作模式隔离 |
+| 2026-06-30 | DOCS `git diff --check` | 通过 | README 与进展文档无 whitespace 错误 |
+| 2026-06-30 | DOCS `npm run lint` | 通过 | ESLint 9 对新增 README 批次后的仓库检查无错误 |
 
 ## 阻塞与风险
 
