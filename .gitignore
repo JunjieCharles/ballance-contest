@@ -1,2 +1,3 @@
 /server-windows/*
 !/server-windows/README.md
+/docs/archive/
