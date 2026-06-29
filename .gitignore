@@ -1,4 +1,4 @@
 /server-windows/*
-!/server-windows/README.md
+!/server-windows/*.md
 /docs/archive/
 *.bin
