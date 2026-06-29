@@ -4,7 +4,7 @@
 > 适用平台：Windows 本机服务  
 > 配套前端文档：[contest-console-frontend-requirements.md](./contest-console-frontend-requirements.md)  
 > 参考规则：[rule.md](./rule.md)  
-> 日志样例：`test/2025 grandprix SR1-13 MockClient.log`  
+> 日志样例：`test/fixtures/replay/2025-grandprix-sr1-13/MockClient.log`
 > MockClient 本地说明：[server-windows/README.md](../server-windows/README.md)  
 > MockClient 上游实现：[BallanceMMOServer/client.cpp](https://github.com/Swung0x48/BallanceMMO/blob/main/BallanceMMOServer/client.cpp)
 
@@ -636,7 +636,7 @@ API 接收类型化动作，例如发送公告、Ready、关闭 cheat、正常�
 - 完整回测日志读取前后记录大小、最后写入时间和 SHA-256。
 - 回放、暂停、跳转和重置均不写源目录。
 - 实际比赛增长日志按已提交字节偏移增量读取，并保持源文件只读。
-- 后续可将稳定夹具组织到 `test/fixtures/replay/`，但目录重构需单独确认。
+- 稳定夹具组织在 `test/fixtures/replay/`；综合日志与人工维护的清单使用独立子目录保存。
 
 ### 13.4 测试夹具策略
 

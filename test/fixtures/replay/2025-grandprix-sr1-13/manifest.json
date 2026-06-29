@@ -1,0 +1,124 @@
+{
+  "schemaVersion": 1,
+  "source": {
+    "file": "MockClient.log",
+    "size": 132586,
+    "sha256": "77d9aee99ba3ee82b74c9e0a9106683062a2283837f2b8a58f8f693353a466b5"
+  },
+  "context": {
+    "competitionYear": 2025,
+    "timezone": "Asia/Shanghai",
+    "mode": "SR",
+    "chiefReferee": "Solntse332",
+    "nameMatching": "remove-one-leading-asterisk-and-ignore-case",
+    "minimumScoringPlace": 15
+  },
+  "completeness": "authority-result-count-and-top-three-index",
+  "stages": [
+    {
+      "level": 1,
+      "go": "2025-06-29T11:20:28+08:00",
+      "referee": { "name": "*Solntse332", "connectionId": "2717249041" },
+      "observedNextStageFirstReady": "2025-06-29T11:27:29+08:00",
+      "resultEvents": { "finish": 25, "dnf": 0 },
+      "topThree": ["Silent_Snow", "YLMJIU", "Qiyigww"]
+    },
+    {
+      "level": 2,
+      "go": "2025-06-29T11:29:20+08:00",
+      "referee": { "name": "*Solntse332", "connectionId": "2717249041" },
+      "observedNextStageFirstReady": "2025-06-29T11:38:12+08:00",
+      "resultEvents": { "finish": 25, "dnf": 0 },
+      "topThree": ["Silent_Snow", "623", "Qiyigww"]
+    },
+    {
+      "level": 3,
+      "go": "2025-06-29T11:39:04+08:00",
+      "referee": { "name": "*Solntse332", "connectionId": "2717249041" },
+      "observedNextStageFirstReady": "2025-06-29T11:47:33+08:00",
+      "resultEvents": { "finish": 24, "dnf": 1 },
+      "topThree": ["YLMJIU", "yu_ling", "zhenzhi"]
+    },
+    {
+      "level": 4,
+      "go": "2025-06-29T11:48:27+08:00",
+      "referee": { "name": "*Solntse332", "connectionId": "2717249041" },
+      "observedNextStageFirstReady": "2025-06-29T11:56:26+08:00",
+      "resultEvents": { "finish": 23, "dnf": 2 },
+      "topThree": ["623", "yu_ling", "Silent_Snow"]
+    },
+    {
+      "level": 5,
+      "go": "2025-06-29T11:57:19+08:00",
+      "referee": { "name": "*Solntse332", "connectionId": "2717249041" },
+      "observedNextStageFirstReady": "2025-06-29T12:07:30+08:00",
+      "resultEvents": { "finish": 24, "dnf": 1 },
+      "topThree": ["Silent_Snow", "YLMJIU", "SIZHONG"]
+    },
+    {
+      "level": 6,
+      "go": "2025-06-29T12:08:42+08:00",
+      "referee": { "name": "*Solntse332", "connectionId": "2717249041" },
+      "observedNextStageFirstReady": "2025-06-29T12:15:57+08:00",
+      "resultEvents": { "finish": 24, "dnf": 1 },
+      "topThree": ["YLMJIU", "623", "SIZHONG"]
+    },
+    {
+      "level": 7,
+      "go": "2025-06-29T12:16:21+08:00",
+      "referee": { "name": "*Solntse332", "connectionId": "2717249041" },
+      "observedNextStageFirstReady": "2025-06-29T12:26:41+08:00",
+      "resultEvents": { "finish": 24, "dnf": 2 },
+      "topThree": ["Silent_Snow", "yu_ling", "0mega_Pian"],
+      "reviewNote": "A-K finished in 7th place and then emitted a DNF event. Final domain treatment is intentionally not asserted here."
+    },
+    {
+      "level": 8,
+      "go": "2025-06-29T12:27:05+08:00",
+      "referee": { "name": "*Solntse332", "connectionId": "2717249041" },
+      "observedNextStageFirstReady": "2025-06-29T12:35:37+08:00",
+      "resultEvents": { "finish": 25, "dnf": 0 },
+      "topThree": ["Silent_Snow", "YLMJIU", "303"]
+    },
+    {
+      "level": 9,
+      "go": "2025-06-29T12:36:26+08:00",
+      "referee": { "name": "*Solntse332", "connectionId": "2717249041" },
+      "observedNextStageFirstReady": "2025-06-29T12:47:05+08:00",
+      "resultEvents": { "finish": 21, "dnf": 3 },
+      "topThree": ["0mega_Pian", "Silent_Snow", "YLMJIU"]
+    },
+    {
+      "level": 10,
+      "go": "2025-06-29T12:47:52+08:00",
+      "referee": { "name": "*Solntse332", "connectionId": "2717249041" },
+      "observedNextStageFirstReady": "2025-06-29T13:01:17+08:00",
+      "resultEvents": { "finish": 23, "dnf": 1 },
+      "topThree": ["623", "zhenzhi", "WaterMe1onzZ"]
+    },
+    {
+      "level": 11,
+      "go": "2025-06-29T13:02:07+08:00",
+      "referee": { "name": "*BallanceBug", "connectionId": "2916511056", "fixtureOnlyOverride": true },
+      "observedNextStageFirstReady": "2025-06-29T13:13:06+08:00",
+      "resultEvents": { "finish": 19, "dnf": 4 },
+      "topThree": ["Silent_Snow", "yu_ling", "Fresh_Mush"]
+    },
+    {
+      "level": 12,
+      "go": "2025-06-29T13:14:05+08:00",
+      "referee": { "name": "*Solntse332", "connectionId": "3821248252" },
+      "observedNextStageFirstReady": "2025-06-29T13:23:30+08:00",
+      "resultEvents": { "finish": 19, "dnf": 3 },
+      "topThree": ["Silent_Snow", "yu_ling", "Fresh_Mush"]
+    },
+    {
+      "level": 13,
+      "go": "2025-06-29T13:23:56+08:00",
+      "referee": { "name": "*Solntse332", "connectionId": "3386330366" },
+      "configuredDeadline": "2025-06-29T13:38:56+08:00",
+      "resultEvents": { "finish": 18, "dnf": 5 },
+      "topThree": ["YLMJIU", "386", "Silent_Snow"]
+    }
+  ]
+}
