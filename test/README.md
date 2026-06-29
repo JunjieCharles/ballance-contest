@@ -19,7 +19,7 @@ test/
 
 - [测试用例设计](./docs/test-case-design.md)
 - [夹具约定](./fixtures/README.md)
-- [SR1–SR13 综合回放夹具](./fixtures/replay/2025-grandprix-sr1-13/README.md)
+- [2025 SR1–SR13 非门禁参考日志](./fixtures/replay/2025-grandprix-sr1-13/README.md)
 
 ## 命名约定
 

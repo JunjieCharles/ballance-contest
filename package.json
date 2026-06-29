@@ -1,0 +1,48 @@
+{
+  "name": "ballance-contest-console",
+  "version": "0.1.0-dev",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=24.18.0 <25"
+  },
+  "workspaces": [
+    "packages/contracts",
+    "packages/core",
+    "packages/testkit",
+    "apps/server",
+    "apps/web"
+  ],
+  "scripts": {
+    "build": "npm run build -w @ballance/contracts && npm run build -w @ballance/core && npm run build -w @ballance/testkit && npm run build -w @ballance/server && npm run build -w @ballance/web",
+    "dev": "node scripts/dev.mjs",
+    "typecheck": "npm run build -w @ballance/contracts && npm run build -w @ballance/core && npm run build -w @ballance/testkit && npm run typecheck -w @ballance/server && npm run typecheck -w @ballance/web",
+    "lint": "eslint .",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:e2e": "playwright test",
+    "package:portable": "node scripts/build-portable.mjs"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.0.0",
+    "@playwright/test": "^1.52.0",
+    "@testing-library/jest-dom": "^6.6.0",
+    "@testing-library/react": "^16.0.0",
+    "@types/node": "^24.0.0",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "acorn": "^8.0.0",
+    "concurrently": "^9.0.0",
+    "eslint": "^9.0.0",
+    "eslint-plugin-react-hooks": "^7.0.0",
+    "eslint-plugin-react-refresh": "^0.4.0",
+    "jsdom": "^26.0.0",
+    "typescript": "^5.9.0",
+    "typescript-eslint": "^8.0.0",
+    "vitest": "^3.2.0"
+  },
+  "allowScripts": {
+    "better-sqlite3@12.11.1": true,
+    "esbuild@0.28.1": true
+  }
+}

@@ -2,3 +2,14 @@
 !/server-windows/*.md
 /docs/archive/
 *.bin
+node_modules/
+dist/
+coverage/
+.tools/
+.runtime/
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+*.tsbuildinfo
+test/artifacts/*
+!test/artifacts/.gitignore
