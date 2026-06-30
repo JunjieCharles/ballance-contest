@@ -42,4 +42,21 @@ describe("ScoreboardRevisionLedger", () => {
     expect(ledger.history().overrides[1]).toMatchObject({ reversesId: overrideId, actor: "chief-referee" });
     expect(() => ledger.reverse(overrideId, { actor: "chief-referee", reason: "again" })).toThrow("OVERRIDE_ALREADY_REVERSED");
   });
+
+  it("recalculates configured points for the edited and shifted stage places", () => {
+    const source = baseVersion();
+    const ledger = new ScoreboardRevisionLedger(source, { s3: [20, 15, 12] });
+    const revised = ledger.apply({
+      playerId: "p4",
+      stageId: "s3",
+      stage: { place: 1 },
+      rankPolicy: "shift",
+      actor: "referee",
+      reason: "按录像顺延名次"
+    });
+    const stageResults = Object.fromEntries(revised.entries.map((entry) => [entry.playerId, entry.stages.s3]));
+    expect(stageResults.p4).toMatchObject({ place: 1, points: 20 });
+    expect(stageResults.p3).toMatchObject({ place: 2, points: 15 });
+    expect(stageResults.p1).toMatchObject({ place: 3, points: 12 });
+  });
 });

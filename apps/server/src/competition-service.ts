@@ -1,11 +1,12 @@
 import { createHash, randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, readdirSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync } from "node:fs";
+import { isAbsolute, join, relative, resolve } from "node:path";
 import { performance } from "node:perf_hooks";
 import {
   assertScenarioDefinition,
   capabilitiesFor,
   createDefaultCompetitionConfig,
+  minimumScoringPlaceFor,
   normalizeRefereeName,
   validateCompetitionConfigForPublish,
   type CommandRecordView,
@@ -17,9 +18,11 @@ import {
   type CompetitionSnapshot,
   type ConfirmationSummary,
   type ParticipantView,
+  type RawClientLogLine,
   type RuntimeSnapshot,
   type ScenarioDefinition,
   type ScenarioEvent,
+  type ScenarioPlayerProfile,
   type ScoreboardOverrideInput,
   type ScoreboardVersionView,
   type TestRunSnapshot,
@@ -30,6 +33,7 @@ import {
   CompetitionEngine,
   parseLogLine,
   ScoreboardRevisionLedger,
+  type AutomationAction,
   type AutomationSnapshot,
   type DomainEvent,
   type EngineSnapshot,
@@ -161,13 +165,19 @@ const scoreboardView = (version: ScoreboardVersion): CompetitionSnapshot["scoreb
   deterministicHash: version.deterministicHash
 });
 
-const automationView = (mode: CompetitionMode, snapshot?: AutomationSnapshot, commands: readonly CommandRecordView[] = []): RuntimeSnapshot => ({
+const automationView = (
+  mode: CompetitionMode,
+  snapshot?: AutomationSnapshot,
+  commands: readonly CommandRecordView[] = [],
+  plannedStageStartAt?: string
+): RuntimeSnapshot => ({
   phase: snapshot?.phase ?? "draft",
   stateVersion: snapshot?.stateVersion ?? 0,
   mode,
   automationEnabled: snapshot?.automationEnabled ?? false,
   ...(snapshot?.currentStageId === undefined ? {} : { currentStageId: snapshot.currentStageId }),
   ...(snapshot?.plannedReadyAtMs === undefined ? {} : { plannedReadyAtMs: snapshot.plannedReadyAtMs }),
+  ...(plannedStageStartAt === undefined ? {} : { plannedStageStartAt }),
   blockers: snapshot?.blockers ?? [],
   waitingParticipants: snapshot?.waitingParticipants ?? [],
   attempts: snapshot?.attempts ?? [],
@@ -176,13 +186,27 @@ const automationView = (mode: CompetitionMode, snapshot?: AutomationSnapshot, co
   commands
 });
 
+const plannedStageStartAt = (snapshot: AutomationSnapshot, epochOriginMs: number, readyBufferMs: number): string | undefined => {
+  const stageActions = snapshot.actions.filter((action) => action.stageId === snapshot.currentStageId && action.status === "acknowledged");
+  const latestGo = [...stageActions].reverse().find((action) => action.kind === "go");
+  if (latestGo && (snapshot.phase === "running" || snapshot.phase === "tail-intake" || snapshot.phase === "review")) {
+    return new Date(epochOriginMs + latestGo.createdAtMs).toISOString();
+  }
+  const latestReady = [...stageActions].reverse().find((action) => action.kind === "ready");
+  const plannedAtMs = latestReady ? latestReady.createdAtMs + readyBufferMs
+    : snapshot.plannedReadyAtMs === undefined ? undefined : snapshot.plannedReadyAtMs + readyBufferMs;
+  return plannedAtMs === undefined ? undefined : new Date(epochOriginMs + plannedAtMs).toISOString();
+};
+
 const scenarioSummary = (definition: ScenarioDefinition): TestScenarioSummary => ({
   id: definition.id,
   name: definition.name,
+  kind: definition.kind ?? "scripted-replay",
   players: definition.players.length,
   stages: definition.stages.length,
   events: definition.events.length,
-  expectedScoreboardVersions: definition.expected.scoreboardVersions
+  expectedScoreboardVersions: definition.expected.scoreboardVersions,
+  playerProfiles: [...new Set(definition.players.map((player) => player.profile ?? "normal"))]
 });
 
 const utcOffsetMinutes = (timezone: string): number => timezone === "Asia/Shanghai" ? 8 * 60 : 0;
@@ -205,11 +229,11 @@ const builtinScenario = (): ScenarioDefinition => ({
   timezone: "Asia/Shanghai",
   refereeConnectionId: "ref-1",
   players: [
-    { id: "p1", displayName: "Alpha", connectionId: "101" },
-    { id: "p2", displayName: "Beta", connectionId: "102" },
-    { id: "p3", displayName: "Gamma", connectionId: "103" },
-    { id: "p4", displayName: "Delta", connectionId: "104" },
-    { id: "p5", displayName: "测试选手", connectionId: "105" }
+    { id: "p1", displayName: "Alpha", connectionId: "101", profile: "expert" },
+    { id: "p2", displayName: "Beta", connectionId: "102", profile: "normal" },
+    { id: "p3", displayName: "Gamma", connectionId: "103", profile: "normal" },
+    { id: "p4", displayName: "Delta", connectionId: "104", profile: "struggler" },
+    { id: "p5", displayName: "测试选手", connectionId: "105", profile: "disruptor" }
   ],
   stages: [
     { id: "s1", order: 1, level: 1, mode: "SR", timeLimitMs: 600_000, scoring: [20, 15, 12], minimumScoringPlace: 3 },
@@ -246,12 +270,59 @@ const builtinScenario = (): ScenarioDefinition => ({
   expected: { attempts: 3, scoreboardVersions: 15 }
 });
 
+const builtinPlayerSandbox = (): ScenarioDefinition => ({
+  schemaVersion: 1,
+  kind: "player-behavior",
+  id: "independent-player-sandbox",
+  name: "独立测试玩家沙盒",
+  year: 2026,
+  timezone: "Asia/Shanghai",
+  refereeConnectionId: "sandbox-referee",
+  players: [
+    { id: "expert", displayName: "游戏高手", connectionId: "201", profile: "expert" },
+    { id: "normal", displayName: "普通玩家", connectionId: "202", profile: "normal" },
+    { id: "struggler", displayName: "游戏低手", connectionId: "203", profile: "struggler" },
+    { id: "disruptor", displayName: "捣乱分子", connectionId: "204", profile: "disruptor" }
+  ],
+  stages: [],
+  events: [],
+  expected: { attempts: 0, scoreboardVersions: 0 }
+});
+
+const builtinBehaviorScenario = (id: string, name: string, profiles: readonly ScenarioPlayerProfile[]): ScenarioDefinition => ({
+  schemaVersion: 1,
+  kind: "player-behavior",
+  id,
+  name,
+  year: 2026,
+  timezone: "Asia/Shanghai",
+  refereeConnectionId: `${id}-referee`,
+  players: profiles.map((profile, index) => ({
+    id: `${id}-p${index + 1}`,
+    displayName: `${({ normal: "普通玩家", expert: "游戏高手", struggler: "游戏低手", disruptor: "捣乱分子" } as const)[profile]} ${index + 1}`,
+    connectionId: String(300 + index),
+    profile
+  })),
+  stages: [],
+  events: [],
+  expected: { attempts: 0, scoreboardVersions: 0 }
+});
+
+const builtinBehaviorScenarios = (): ScenarioDefinition[] => [
+  builtinPlayerSandbox(),
+  builtinBehaviorScenario("normal-player-roster", "普通玩家场景", ["normal", "normal", "normal", "normal"]),
+  builtinBehaviorScenario("expert-player-roster", "高手竞速场景", ["expert", "expert", "expert", "normal"]),
+  builtinBehaviorScenario("timeout-player-roster", "低手超时与 DNF 场景", ["normal", "struggler", "struggler", "struggler"]),
+  builtinBehaviorScenario("disruptor-player-roster", "捣乱与违规场景", ["normal", "normal", "disruptor", "disruptor"])
+];
+
 export class CompetitionService {
   private readonly competitions = new Map<string, CompetitionRecord>();
   private readonly testRuns = new Map<string, TestRuntime>();
   private readonly workRuntimes = new Map<string, WorkRuntime>();
   private readonly idempotency = new Map<string, unknown>();
   private readonly confirmations = new Map<string, ConfirmationRecord>();
+  private readonly rawLogs = new Map<string, RawClientLogLine[]>();
 
   public constructor(
     public readonly journal = new EventJournal(),
@@ -265,19 +336,20 @@ export class CompetitionService {
     return [...this.competitions.values()].sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
   }
 
-  public create(input: { name: string; mode: CompetitionMode; idempotencyKey: string }): CompetitionRecord {
+  public create(input: { name: string; mode?: CompetitionMode; idempotencyKey: string }): CompetitionRecord {
     const old = this.idempotency.get(`create:${input.idempotencyKey}`);
     if (old) return old as CompetitionRecord;
     if (!input.name.trim()) throw new ServiceError("VALIDATION_FAILED", "比赛名称不能为空", 400);
-    if (input.mode !== "work" && input.mode !== "test") throw new ServiceError("VALIDATION_FAILED", "无效比赛模式", 400);
+    const mode = input.mode ?? "work";
+    if (mode !== "work" && mode !== "test") throw new ServiceError("VALIDATION_FAILED", "无效比赛模式", 400);
     const now = new Date().toISOString();
     const record: CompetitionRecord = {
       id: randomUUID(),
       name: input.name.trim(),
-      mode: input.mode,
+      mode,
       status: "draft",
       stateVersion: 0,
-      capabilities: capabilitiesFor(input.mode),
+      capabilities: capabilitiesFor(mode),
       createdAt: now,
       updatedAt: now
     };
@@ -356,6 +428,7 @@ export class CompetitionService {
     const activeRunId = competition.activeRunId ?? payload.activeRunId;
     const testRun = activeRunId ? this.getTestRunSnapshot(id, activeRunId) : undefined;
     const workRuntime = this.workRuntimes.get(id);
+    const workAutomation = workRuntime?.controller.snapshot();
     const workScoreboard = workRuntime?.engine.snapshot().scoreboardVersions.map(scoreboardView) ?? [];
     const testScoreboard = testRun?.engine.scoreboardVersions ?? [];
     const scoreboardVersions = this.applyPlayerAliases(config, [
@@ -368,16 +441,39 @@ export class CompetitionService {
       ...(this.getPublishedConfig(id) === undefined ? {} : { publishedConfig: this.getPublishedConfig(id) as CompetitionConfig }),
       runtime: competition.mode === "test"
         ? testRun?.automation ?? automationView("test")
-        : automationView("work", workRuntime?.controller.snapshot(), this.commandHistory(id)),
+        : automationView(
+            "work",
+            workAutomation,
+            this.commandHistory(id),
+            workAutomation ? plannedStageStartAt(workAutomation, Date.now() - performance.now(), config.flow.readyBufferMs) : undefined
+          ),
       scoreboardVersions,
       currentScoreboard: scoreboardVersions.at(-1)?.entries ?? [],
+      scoreboardOverrides: this.scoreboardOverrideHistory(id),
       ...(testRun === undefined ? {} : { testRun }),
       archives: payload.archives ?? []
     };
   }
 
+  public getRawClientLogs(competitionId: string, limit = 200): readonly RawClientLogLine[] {
+    this.get(competitionId);
+    const boundedLimit = Math.min(1_000, Math.max(1, Math.trunc(limit)));
+    if (!this.options.database) return (this.rawLogs.get(competitionId) ?? []).slice(-boundedLimit);
+    return rows<{ source_id: string; source_file: string; occurred_at: string; raw_line: string }>(
+      this.options.database,
+      "SELECT source_id,source_file,occurred_at,raw_line FROM raw_log_events WHERE competition_id=? ORDER BY rowid DESC LIMIT ?",
+      competitionId,
+      boundedLimit
+    ).reverse().map((item) => ({
+      id: item.source_id,
+      source: item.source_file as RawClientLogLine["source"],
+      occurredAt: item.occurred_at,
+      rawLine: item.raw_line
+    }));
+  }
+
   public listTestScenarios(): readonly TestScenarioSummary[] {
-    return this.loadScenarioDefinitions().map(scenarioSummary);
+    return this.loadScenarioDefinitions().filter((definition) => definition.kind === "player-behavior").map(scenarioSummary);
   }
 
   public getTestScenario(id: string): ScenarioDefinition {
@@ -393,23 +489,46 @@ export class CompetitionService {
   public createTestRun(competitionId: string, input: unknown): { runId: string; snapshot: EngineSnapshot; run: TestRunSnapshot } {
     const competition = this.get(competitionId);
     if (competition.mode !== "test") throw new ServiceError("CAPABILITY_UNSUPPORTED", "工作模式不支持测试运行", 409);
-    const definition = assertScenarioDefinition(input);
+    const parsedDefinition = assertScenarioDefinition(input);
+    const definition = parsedDefinition.kind === "player-behavior"
+      ? this.materializeBehaviorScenario(competitionId, parsedDefinition)
+      : parsedDefinition;
     const runtime = this.makeTestRuntime(competitionId, definition);
     this.testRuns.set(runtime.id, runtime);
+    this.connectTestPlayers(runtime, true);
     const config = this.getDraftConfig(competitionId);
-    if (config.participants.length === 0) {
-      this.upsertConfig(competitionId, 0, false, {
-        ...config,
-        participants: definition.players.map((player) => ({
+    const primaryScoring = definition.stages[0]?.scoring ?? config.scoring.points;
+    const contestType = this.scoringContestType(primaryScoring);
+    this.upsertConfig(competitionId, 0, false, {
+      ...config,
+      contestType,
+      scoring: {
+        ...config.scoring,
+        contestType,
+        points: [...primaryScoring],
+        minimumScoringPlace: minimumScoringPlaceFor(primaryScoring)
+      },
+      stages: definition.stages.map((stage) => ({
+        id: stage.id,
+        order: stage.order,
+        label: `${stage.mode} ${stage.level}`,
+        level: stage.level,
+        mode: stage.mode,
+        timeLimitMs: stage.timeLimitMs,
+        scoring: [...stage.scoring],
+        minimumScoringPlace: minimumScoringPlaceFor(stage.scoring)
+      })),
+      participants: config.participants.length === 0
+        ? definition.players.map((player) => ({
           id: player.id,
           displayName: player.displayName,
           role: "participant",
           connectionIds: [player.connectionId],
-          online: false,
-          currentStageStatus: "not-started"
+          online: true,
+          currentStageStatus: "waiting"
         }))
-      });
-    }
+        : config.participants
+    });
     this.persistTestRuntime(runtime, true);
     this.journal.append({ type: "test-run.created", competitionId, stateVersion: competition.stateVersion, data: { runId: runtime.id, scenarioId: definition.id } });
     return { runId: runtime.id, snapshot: runtime.engine.snapshot(), run: this.getTestRunSnapshot(competitionId, runtime.id) };
@@ -426,9 +545,20 @@ export class CompetitionService {
     return snapshot;
   }
 
+  public actTestPlayers(competitionId: string, runId: string): TestRunSnapshot {
+    const runtime = this.getTestRuntime(competitionId, runId);
+    this.connectTestPlayers(runtime, true);
+    this.driveTestPlayers(runtime);
+    this.persistTestRuntime(runtime);
+    this.saveScoreboards(competitionId, runtime.engine.snapshot().scoreboardVersions);
+    this.journal.append({ type: "test-run.players-acted", competitionId, data: { runId } });
+    return this.getTestRunSnapshot(competitionId, runId);
+  }
+
   public resetTestRun(competitionId: string, runId: string): EngineSnapshot {
     const runtime = this.getTestRuntime(competitionId, runId);
     const reset = this.makeTestRuntime(competitionId, runtime.definition, runtime.id, runtime.createdAt);
+    this.connectTestPlayers(reset, true);
     this.testRuns.set(runId, reset);
     this.persistTestRuntime(reset);
     const payload = this.getPayload(competitionId);
@@ -478,6 +608,8 @@ export class CompetitionService {
   public getTestRunSnapshot(competitionId: string, runId: string): TestRunSnapshot {
     const runtime = this.getTestRuntime(competitionId, runId);
     const engine = runtime.engine.snapshot();
+    const automation = runtime.automation.snapshot();
+    const epochOriginMs = Date.parse(runtime.createdAt);
     return {
       runId,
       scenario: scenarioSummary(runtime.definition),
@@ -489,19 +621,19 @@ export class CompetitionService {
         anomalies: engine.anomalies,
         currentScoreboard: scoreEntries(engine.currentScoreboard)
       },
-      automation: automationView("test", runtime.automation.snapshot(), [
+      automation: automationView("test", automation, [
         ...this.commandHistory(competitionId),
-        ...runtime.automation.snapshot().actions.map((action) => ({
+        ...automation.actions.map((action) => ({
           id: action.id,
           actionType: action.kind,
           status: "simulated" as const,
-          createdAt: new Date(action.createdAtMs).toISOString(),
-          updatedAt: new Date(action.createdAtMs).toISOString(),
+          createdAt: new Date(epochOriginMs + action.createdAtMs).toISOString(),
+          updatedAt: new Date(epochOriginMs + action.createdAtMs).toISOString(),
           command: action.message ?? action.kind,
           responseLine: "模拟回显成功",
           simulated: true
         }))
-      ])
+      ], plannedStageStartAt(automation, epochOriginMs, this.getDraftConfig(competitionId).flow.readyBufferMs))
     };
   }
 
@@ -570,7 +702,10 @@ export class CompetitionService {
     if (competition.mode === "test") {
       const runId = input.runId ?? this.getPayload(competitionId).activeRunId;
       if (!runId) throw new ServiceError("NOT_FOUND", "请先创建测试运行", 404);
-      return automationView("test", this.startTestAutomation(competitionId, runId, input.readyInMs ?? 0), [simulatedCommand("automation-start")]);
+      const readyInMs = input.readyInMs ?? 0;
+      this.startTestAutomation(competitionId, runId, readyInMs);
+      if (readyInMs <= 0) this.advanceTestAutomation(competitionId, runId, this.getDraftConfig(competitionId).flow.readyBufferMs);
+      return this.getTestRunSnapshot(competitionId, runId).automation;
     }
     const runtime = this.workRuntimes.get(competitionId) ?? this.makeDetachedWorkRuntime(competitionId);
     runtime.controller.enable(runtime.controller.snapshot().plannedReadyAtMs ?? performance.now() + (input.readyInMs ?? 0));
@@ -695,8 +830,23 @@ export class CompetitionService {
       input.impactHash,
       `${input.playerId}:${input.stageId ?? "total"}`
     );
+    if (!input.stageId || !input.stage?.place) {
+      throw new ServiceError("VALIDATION_FAILED", "成绩页只允许按轮次修订名次", 400);
+    }
+    if (Object.keys(input.stage).some((key) => key !== "place")) {
+      throw new ServiceError("VALIDATION_FAILED", "成绩修订只接受名次；积分由比赛配置自动计算", 400);
+    }
+    if (input.totalPoints !== undefined || input.displayName !== undefined) {
+      throw new ServiceError("VALIDATION_FAILED", "积分和显示名不能在成绩页直接修订", 400);
+    }
+    const config = this.getPublishedConfig(competitionId) ?? this.getDraftConfig(competitionId);
+    const activeTestRunId = competition.mode === "test" ? this.getPayload(competitionId).activeRunId : undefined;
+    const testStages = activeTestRunId ? this.getTestRuntime(competitionId, activeTestRunId).definition.stages : [];
+    const stageConfig = config.stages.find((stage) => stage.id === input.stageId) ?? testStages.find((stage) => stage.id === input.stageId);
+    if (!stageConfig) throw new ServiceError("NOT_FOUND", "修订轮次不存在", 404);
+    const calculatedPoints = stageConfig.scoring[input.stage.place - 1] ?? 0;
     const base = this.getLatestScoreboard(competitionId);
-    const ledger = new ScoreboardRevisionLedger(base);
+    const ledger = new ScoreboardRevisionLedger(base, Object.fromEntries([...config.stages, ...testStages].map((stage) => [stage.id, stage.scoring])));
     let revised;
     try {
       revised = ledger.apply({
@@ -704,8 +854,8 @@ export class CompetitionService {
         ...(input.stageId === undefined ? {} : { stageId: input.stageId }),
         ...(input.displayName === undefined ? {} : { displayName: input.displayName }),
         ...(input.totalPoints === undefined ? {} : { totalPoints: input.totalPoints }),
-        ...(input.stage === undefined ? {} : { stage: input.stage }),
-        ...(input.rankPolicy === undefined ? {} : { rankPolicy: input.rankPolicy }),
+        stage: { ...input.stage, status: "finished", points: calculatedPoints },
+        rankPolicy: input.rankPolicy ?? "shift",
         actor: input.actor,
         reason: input.reason,
         ...(input.evidence === undefined ? {} : { evidence: input.evidence })
@@ -772,6 +922,86 @@ export class CompetitionService {
           archive.manifest.generatedAt
         );
     });
+    const current = this.get(competitionId);
+    if (current.status !== "finished" && current.status !== "archived") return;
+    const updated = { ...current, status: "archived" as const, stateVersion: current.stateVersion + 1, updatedAt: new Date().toISOString() };
+    this.competitions.set(competitionId, updated);
+    this.withDatabase((database) => {
+      database.sqlite.prepare("UPDATE competitions SET status=?,state_version=?,updated_at=? WHERE id=?")
+        .run(updated.status, updated.stateVersion, updated.updatedAt, competitionId);
+    });
+  }
+
+  public async finishCompetition(competitionId: string, input: {
+    expectedStateVersion: number;
+    idempotencyKey: string;
+    confirmationToken: string;
+    impactHash: string;
+    reason: string;
+  }): Promise<CompetitionRecord> {
+    const key = `${competitionId}:finish:${input.idempotencyKey}`;
+    const old = this.idempotency.get(key);
+    if (old) return old as CompetitionRecord;
+    const current = this.get(competitionId);
+    if (current.stateVersion !== input.expectedStateVersion) throw new ServiceError("STATE_CONFLICT", "状态版本已变化", 409, { latestStateVersion: current.stateVersion });
+    if (!input.reason.trim()) throw new ServiceError("VALIDATION_FAILED", "结束比赛必须填写裁判原因", 400);
+    this.consumeConfirmation(competitionId, "high-risk", input.confirmationToken, input.impactHash, competitionId);
+    const runtime = this.workRuntimes.get(competitionId);
+    runtime?.controller.pause();
+    if (runtime?.initialListTimer) clearTimeout(runtime.initialListTimer);
+    if (runtime?.listTimer) clearInterval(runtime.listTimer);
+    await runtime?.client?.stop().catch(() => undefined);
+    this.workRuntimes.delete(competitionId);
+    const updated = { ...current, status: "finished" as const, stateVersion: current.stateVersion + 1, updatedAt: new Date().toISOString() };
+    this.competitions.set(competitionId, updated);
+    this.withDatabase((database) => {
+      database.sqlite.prepare("UPDATE competitions SET status=?,state_version=?,updated_at=? WHERE id=?")
+        .run(updated.status, updated.stateVersion, updated.updatedAt, competitionId);
+    });
+    this.idempotency.set(key, updated);
+    this.journal.append({ type: "competition.finished", competitionId, stateVersion: updated.stateVersion, data: { reason: input.reason.trim() } });
+    return updated;
+  }
+
+  public async deleteCompetition(competitionId: string, input: {
+    expectedStateVersion: number;
+    idempotencyKey: string;
+    confirmationToken: string;
+    impactHash: string;
+    reason: string;
+  }): Promise<{ id: string }> {
+    const key = `${competitionId}:delete:${input.idempotencyKey}`;
+    const old = this.idempotency.get(key);
+    if (old) return old as { id: string };
+    const current = this.get(competitionId);
+    if (current.stateVersion !== input.expectedStateVersion) throw new ServiceError("STATE_CONFLICT", "状态版本已变化", 409, { latestStateVersion: current.stateVersion });
+    if (!input.reason.trim()) throw new ServiceError("VALIDATION_FAILED", "删除比赛必须填写原因", 400);
+    if (!(["draft", "finished", "archived"] as CompetitionLifecycleStatus[]).includes(current.status)) {
+      throw new ServiceError("STATE_CONFLICT", "进行中的比赛必须先结束，才能删除", 409);
+    }
+    this.consumeConfirmation(competitionId, "high-risk", input.confirmationToken, input.impactHash, competitionId);
+    const runtime = this.workRuntimes.get(competitionId);
+    await runtime?.client?.stop().catch(() => undefined);
+    this.workRuntimes.delete(competitionId);
+    for (const [runId, testRuntime] of this.testRuns) if (testRuntime.competitionId === competitionId) this.testRuns.delete(runId);
+    this.withDatabase((database) => {
+      database.sqlite.transaction(() => {
+        database.sqlite.prepare("DELETE FROM domain_events WHERE competition_id=?").run(competitionId);
+        database.sqlite.prepare("DELETE FROM raw_log_events WHERE competition_id=?").run(competitionId);
+        database.sqlite.prepare("DELETE FROM result_intake_windows WHERE attempt_id IN (SELECT id FROM attempts WHERE competition_id=?)").run(competitionId);
+        for (const table of ["connection_identities", "participants", "attempts", "scoreboard_versions", "command_audits", "incidents", "overrides", "recovery_audits", "observation_gaps", "archive_versions", "config_versions", "runtime_snapshots"]) {
+          database.sqlite.prepare(`DELETE FROM ${table} WHERE competition_id=?`).run(competitionId);
+        }
+        database.sqlite.prepare("DELETE FROM competitions WHERE id=?").run(competitionId);
+      })();
+    });
+    this.competitions.delete(competitionId);
+    this.rawLogs.delete(competitionId);
+    for (const mode of ["work", "test"] as const) this.removeCompetitionDirectory(competitionId, mode);
+    const result = { id: competitionId };
+    this.idempotency.set(key, result);
+    this.journal.append({ type: "competition.deleted", competitionId, data: { reason: input.reason.trim() } });
+    return result;
   }
 
   public close(): void {
@@ -890,21 +1120,24 @@ export class CompetitionService {
     const name = config.name.trim();
     if (!name) throw new ServiceError("VALIDATION_FAILED", "比赛名称不能为空", 400);
     const refereeName = normalizeRefereeName(config.refereeName);
+    const normalizedPoints = config.scoring.points.map((point) => {
+      if (!Number.isFinite(point)) throw new ServiceError("VALIDATION_FAILED", "积分必须是有限数字", 400);
+      if (point < 0 && !config.scoring.allowNegative) throw new ServiceError("VALIDATION_FAILED", "默认不允许负分", 400);
+      return point;
+    });
+    if (normalizedPoints.length === 0) throw new ServiceError("VALIDATION_FAILED", "积分表至少需要一个名次", 400);
     const scoring = {
       ...config.scoring,
-      points: config.scoring.points.map((point) => {
-        if (!Number.isFinite(point)) throw new ServiceError("VALIDATION_FAILED", "积分必须是有限数字", 400);
-        if (point < 0 && !config.scoring.allowNegative) throw new ServiceError("VALIDATION_FAILED", "默认不允许负分", 400);
-        return point;
-      })
+      points: normalizedPoints,
+      minimumScoringPlace: minimumScoringPlaceFor(normalizedPoints)
     };
     const stages = [...config.stages].sort((left, right) => left.order - right.order).map((stage, index) => ({
       ...stage,
       order: index + 1,
       scoring: stage.scoring.length > 0 ? stage.scoring : scoring.points,
-      minimumScoringPlace: stage.minimumScoringPlace || scoring.minimumScoringPlace
+      minimumScoringPlace: minimumScoringPlaceFor(stage.scoring.length > 0 ? stage.scoring : scoring.points)
     }));
-    return { ...config, name, refereeName, scoring, stages };
+    return { ...config, name, refereeName, contestType: scoring.contestType, scoring, stages };
   }
 
   private makeTestRuntime(competitionId: string, definition: ScenarioDefinition, id: string = randomUUID(), createdAt: string = new Date().toISOString()): TestRuntime {
@@ -936,6 +1169,57 @@ export class CompetitionService {
     };
   }
 
+  private connectTestPlayers(runtime: TestRuntime, writeLog: boolean): void {
+    for (const player of runtime.definition.players) {
+      runtime.automation.observeConnection(player.id, true);
+      if (writeLog) {
+        const event: ScenarioEvent = { atMs: runtime.automationClock.now(), sourceId: `agent-login:${runtime.id}:${player.id}`, type: "login", playerId: player.id, connectionId: player.connectionId };
+        this.appendRawLog(runtime.competitionId, "test-player", this.testEventLogLine(runtime, event), this.testOccurredAt(runtime, event.atMs));
+      }
+    }
+  }
+
+  private driveTestPlayers(runtime: TestRuntime): void {
+    const snapshot = runtime.automation.snapshot();
+    if (snapshot.phase !== "running" && snapshot.phase !== "tail-intake") return;
+    const stageId = snapshot.currentStageId;
+    const attempt = [...snapshot.attempts].reverse().find((candidate) => candidate.stageId === stageId && candidate.intakeOpen);
+    if (!attempt) return;
+    const completed = new Set(attempt.results.map((result) => result.playerId));
+    const ordered = [...runtime.definition.players].sort((left, right) =>
+      this.profileOrder(left.profile) - this.profileOrder(right.profile) || left.id.localeCompare(right.id));
+    let finishIndex = 0;
+    for (const player of ordered) {
+      if (completed.has(player.id)) continue;
+      const profile = player.profile ?? "normal";
+      const sourceId = `agent:${runtime.id}:${attempt.id}:${player.id}`;
+      if (profile === "struggler") {
+        this.applyTestEvent(runtime, { atMs: runtime.automationClock.now(), sourceId, type: "dnf", stageId, playerId: player.id, reason: "time-limit" }, false);
+        continue;
+      }
+      if (profile === "disruptor") {
+        this.applyTestEvent(runtime, { atMs: runtime.automationClock.now(), sourceId: `${sourceId}:cheat`, type: "cheat", playerId: player.id, enabled: true }, false);
+        this.applyTestEvent(runtime, { atMs: runtime.automationClock.now(), sourceId, type: "dnf", stageId, playerId: player.id, reason: "cheat-enabled" }, false);
+        continue;
+      }
+      finishIndex += 1;
+      const elapsedMs = (profile === "expert" ? 45_000 : 90_000) + finishIndex * 1_000;
+      const score = profile === "expert" ? 10_000 - finishIndex : 5_000 - finishIndex;
+      this.applyTestEvent(runtime, { atMs: runtime.automationClock.now(), sourceId, type: "finish", stageId, playerId: player.id, elapsedMs, score }, false);
+    }
+  }
+
+  private profileOrder(profile: ScenarioPlayerProfile | undefined): number {
+    return ({ expert: 0, normal: 1, struggler: 2, disruptor: 3 } as const)[profile ?? "normal"];
+  }
+
+  private scoringContestType(points: readonly number[]): CompetitionConfig["contestType"] {
+    const same = (expected: readonly number[]) => expected.length === points.length && expected.every((point, index) => point === points[index]);
+    if (same([20, 15, 12, 10, 8, 6, 5, 4, 3, 2, 1, 1])) return "small";
+    if (same([30, 24, 21, 18, 16, 14, 12, 10, 8, 6, 5, 4, 3, 2, 1])) return "large";
+    return "custom";
+  }
+
   private getTestRuntime(competitionId: string, runId: string): TestRuntime {
     const competition = this.get(competitionId);
     if (competition.mode !== "test") throw new ServiceError("CAPABILITY_UNSUPPORTED", "工作模式不支持测试运行", 409);
@@ -950,9 +1234,10 @@ export class CompetitionService {
 
   private restoreTestRuntime(competitionId: string, persisted: PersistedTestRun): TestRuntime {
     const runtime = this.makeTestRuntime(competitionId, persisted.definition, persisted.id, persisted.createdAt);
+    this.connectTestPlayers(runtime, false);
     for (let index = 0; index < persisted.playedEvents; index += 1) {
       const event = runtime.runner.next();
-      if (event) this.applyTestEvent(runtime, event, false);
+      if (event) this.applyTestEvent(runtime, event, false, false);
     }
     for (const operation of persisted.operations) {
       if (operation.kind === "automation-start") runtime.automation.enable(runtime.automationClock.now() + (operation.readyInMs ?? 0));
@@ -994,10 +1279,14 @@ export class CompetitionService {
     if (record) this.competitions.set(runtime.competitionId, { ...record, activeRunId: runtime.id });
   }
 
-  private applyTestEvent(runtime: TestRuntime, event: ScenarioEvent, countEvent: boolean): void {
+  private applyTestEvent(runtime: TestRuntime, event: ScenarioEvent, countEvent: boolean, writeLog = true): void {
     runtime.engine.apply(event);
     this.applyAutomationEvent(runtime, event);
     if (countEvent) runtime.playedEvents += 1;
+    if (writeLog) {
+      const source = event.type === "ready" || event.type === "go" ? "test-referee" : "test-player";
+      this.appendRawLog(runtime.competitionId, source, this.testEventLogLine(runtime, event), this.testOccurredAt(runtime, event.atMs));
+    }
     this.journal.append({ type: "test-run.event", competitionId: runtime.competitionId, data: event });
   }
 
@@ -1005,7 +1294,22 @@ export class CompetitionService {
     for (let iteration = 0; iteration < 8; iteration += 1) {
       const before = runtime.automation.snapshot().stateVersion;
       runtime.automation.tick();
-      runtime.automationRuntime.dispatch();
+      const actions = runtime.automationRuntime.dispatch();
+      for (const action of actions) {
+        for (const line of this.testAutomationActionLogLines(runtime, action)) {
+          this.appendRawLog(runtime.competitionId, "test-referee", line, this.testOccurredAt(runtime, action.createdAtMs));
+        }
+        if (action.kind === "go") {
+          runtime.engine.apply({
+            atMs: runtime.automationClock.now(),
+            sourceId: `automation-go:${action.id}`,
+            type: "go",
+            stageId: action.stageId,
+            refereeConnectionId: runtime.definition.refereeConnectionId
+          });
+        }
+      }
+      if (actions.some((action) => action.kind === "go")) this.driveTestPlayers(runtime);
       if (runtime.automation.snapshot().stateVersion === before) break;
     }
   }
@@ -1096,6 +1400,7 @@ export class CompetitionService {
   private ingestWorkLine(runtime: WorkRuntime, line: string): void {
     const config = this.getPublishedConfig(runtime.competitionId);
     if (!config) return;
+    this.appendRawLog(runtime.competitionId, "mock-client", line);
     const parsed = parseLogLine(line, { year: Number(config.date.slice(0, 4)), utcOffsetMinutes: utcOffsetMinutes(config.timezone) });
     if (parsed.event.type === "player-list-start") this.beginListReconciliation(runtime, parsed.event.count);
     const event = this.domainToScenarioEvent(runtime.competitionId, config, parsed.event);
@@ -1248,6 +1553,27 @@ export class CompetitionService {
     };
   }
 
+  private materializeBehaviorScenario(competitionId: string, behavior: ScenarioDefinition): ScenarioDefinition {
+    const config = this.getDraftConfig(competitionId);
+    return {
+      ...behavior,
+      year: Number(config.date.slice(0, 4)),
+      timezone: config.timezone,
+      refereeConnectionId: `test-referee:${competitionId}`,
+      stages: config.stages.map((stage) => ({
+        id: stage.id,
+        order: stage.order,
+        level: stage.level,
+        mode: stage.mode,
+        timeLimitMs: stage.timeLimitMs,
+        scoring: [...stage.scoring],
+        minimumScoringPlace: stage.minimumScoringPlace
+      })),
+      events: [],
+      expected: { attempts: config.stages.length, scoreboardVersions: config.stages.length * behavior.players.length }
+    };
+  }
+
   private saveWorkRuntimeSnapshot(runtime: WorkRuntime): void {
     const payload = this.getPayload(runtime.competitionId);
     this.savePayload(runtime.competitionId, { ...payload, work: { started: true, ...(runtime.mockClientVersion === undefined ? {} : { mockClientVersion: runtime.mockClientVersion }) } });
@@ -1339,14 +1665,25 @@ export class CompetitionService {
         const stageId = runtime.automation.snapshot().currentStageId;
         if (!stageId) throw new ServiceError("STATE_CONFLICT", "当前没有可发令的轮次", 409);
         runtime.automation.observeAuthoritativeGo(stageId);
-        runtime.engine.apply({
+        const event: ScenarioEvent = {
           atMs: runtime.automationClock.now(),
           sourceId: `manual-go:${randomUUID()}`,
           type: "go",
           stageId,
           refereeConnectionId: runtime.definition.refereeConnectionId
-        });
+        };
+        runtime.engine.apply(event);
+        this.appendRawLog(competitionId, "test-referee", this.testEventLogLine(runtime, event), this.testOccurredAt(runtime, event.atMs));
+        this.driveTestPlayers(runtime);
         this.persistTestRuntime(runtime);
+        break;
+      }
+      case "ready": {
+        if (competition.mode === "work") return false;
+        const runId = this.getPayload(competitionId).activeRunId as string;
+        const runtime = this.getTestRuntime(competitionId, runId);
+        if (!runtime.automation.snapshot().automationEnabled) runtime.automation.enable(runtime.automationClock.now());
+        this.settleTestAutomation(runtime);
         break;
       }
       case "reschedule":
@@ -1378,14 +1715,15 @@ export class CompetitionService {
         const stageId = action.stageId ?? controller().snapshot().currentStageId;
         if (!stageId) throw new ServiceError("STATE_CONFLICT", "当前没有可标记 DNF 的轮次", 409);
         const sourceId = `manual-dnf:${randomUUID()}`;
-        const event: ScenarioEvent = { atMs: Date.now(), sourceId, type: "dnf", stageId, playerId: action.participantId, reason: action.reason };
         if (competition.mode === "test") {
           const runId = this.getPayload(competitionId).activeRunId as string;
           const runtime = this.getTestRuntime(competitionId, runId);
+          const event: ScenarioEvent = { atMs: runtime.automationClock.now(), sourceId, type: "dnf", stageId, playerId: action.participantId, reason: action.reason };
           runtime.engine.apply(event);
           this.persistTestRuntime(runtime);
           this.saveScoreboards(competitionId, runtime.engine.snapshot().scoreboardVersions);
         } else {
+          const event: ScenarioEvent = { atMs: Date.now(), sourceId, type: "dnf", stageId, playerId: action.participantId, reason: action.reason };
           const accepted = controller().recordResult({ stageId, playerId: action.participantId, status: "dnf", sourceId, reason: action.reason });
           if (accepted !== "accepted") throw new ServiceError("STATE_CONFLICT", `DNF 未被接受：${accepted}`, 409);
           const runtime = this.workRuntimes.get(competitionId) as WorkRuntime;
@@ -1551,6 +1889,108 @@ export class CompetitionService {
       });
   }
 
+  private scoreboardOverrideHistory(competitionId: string): CompetitionSnapshot["scoreboardOverrides"] {
+    return rows<{
+      id: string; target_type: string; target_id: string; before_value: string | null; after_value: string;
+      reason: string; actor: string; created_at: string;
+    }>(this.options.database, "SELECT id,target_type,target_id,before_value,after_value,reason,actor,created_at FROM overrides WHERE competition_id=? ORDER BY created_at DESC", competitionId)
+      .map((item) => ({
+        id: item.id,
+        targetType: item.target_type,
+        targetId: item.target_id,
+        beforeValue: item.before_value ? JSON.parse(item.before_value) as unknown : null,
+        afterValue: JSON.parse(item.after_value) as unknown,
+        reason: item.reason,
+        actor: item.actor,
+        createdAt: item.created_at
+      }));
+  }
+
+  private appendRawLog(competitionId: string, source: RawClientLogLine["source"], rawLine: string, occurredAt = new Date().toISOString()): void {
+    const line: RawClientLogLine = { id: randomUUID(), source, occurredAt, rawLine };
+    if (this.options.database) {
+      this.options.database.sqlite.prepare("INSERT INTO raw_log_events(source_id,competition_id,source_file,byte_offset,occurred_at,raw_line,content_hash,created_at) VALUES (?,?,?,?,?,?,?,?)")
+        .run(line.id, competitionId, source, 0, occurredAt, rawLine, createHash("sha256").update(rawLine).digest("hex"), new Date().toISOString());
+    } else {
+      const logs = [...(this.rawLogs.get(competitionId) ?? []), line];
+      this.rawLogs.set(competitionId, logs.slice(-1_000));
+    }
+    this.journal.append({ type: "client.raw-log", competitionId, data: line });
+  }
+
+  private testEventLogLine(runtime: TestRuntime, event: ScenarioEvent): string {
+    const player = "playerId" in event ? runtime.definition.players.find((candidate) => candidate.id === event.playerId) : undefined;
+    const playerName = player?.displayName ?? ("playerId" in event ? event.playerId : "server");
+    const connectionId = player?.connectionId ?? ("connectionId" in event ? event.connectionId : "0");
+    const stage = "stageId" in event ? runtime.definition.stages.find((candidate) => candidate.id === event.stageId) : undefined;
+    const level = String(stage?.level ?? 0).padStart(2, "0");
+    const prefix = this.testLogPrefix(runtime, event.atMs);
+    switch (event.type) {
+      case "login": return `${prefix} ${playerName} (#${event.connectionId}) logged in with cheat mode off.`;
+      case "disconnect": return `${prefix} ${playerName} (#${event.connectionId}) disconnected.`;
+      case "finish": {
+        const result = runtime.engine.snapshot().currentScoreboard.find((entry) => entry.playerId === event.playerId)?.stages[event.stageId];
+        const place = result?.status === "finished" ? result.place : 1;
+        return `${prefix} (#${connectionId}, ${playerName}) finished Level ${level} in ${this.ordinal(place)} place (score: ${event.score}; real time: ${this.formatElapsed(event.elapsedMs)}).`;
+      }
+      case "dnf": return `${prefix} (#${connectionId}, ${playerName}) did not finish Level ${level} (furthest reach: sector 0).`;
+      case "cheat": return `${prefix} (${connectionId}, ${playerName}) turned cheat ${event.enabled ? "on" : "off"}.`;
+      case "ready": return `${prefix} [${event.refereeConnectionId}, *ContestConsole]: Level ${level} - Get ready`;
+      case "go": return `${prefix} [${event.refereeConnectionId}, *ContestConsole]: Level ${level} - Go!`;
+      case "warning": return `${prefix} Warning${event.playerId ? ` for ${playerName}` : ""}: ${event.message}`;
+      case "fault": return `${prefix} ${event.fault === "server-disconnect" ? "Disconnected from server." : `Fault: ${event.fault}${event.playerId ? ` (${playerName})` : ""}`}`;
+    }
+  }
+
+  private testAutomationActionLogLines(runtime: TestRuntime, action: AutomationAction): string[] {
+    const atMs = action.createdAtMs;
+    const prefix = this.testLogPrefix(runtime, atMs);
+    const stage = runtime.definition.stages.find((candidate) => candidate.id === action.stageId);
+    const level = String(stage?.level ?? 0).padStart(2, "0");
+    const referee = runtime.definition.refereeConnectionId;
+    switch (action.kind) {
+      case "ready": return [`${prefix} [${referee}, *ContestConsole]: Level ${level} - Get ready`];
+      case "go": return [`${prefix} [${referee}, *ContestConsole]: Level ${level} - Go!`];
+      case "announcement": return [`${prefix} [${referee}, *ContestConsole]: ${action.message ?? "比赛流程通知"}`];
+      case "cheat-off": return runtime.definition.players.map((player) => `${prefix} (${player.connectionId}, ${player.displayName}) turned cheat off.`);
+      case "force-next-restart": return [`${prefix} [${referee}, *ContestConsole]: The next countdown will restart the level.`];
+    }
+  }
+
+  private testOccurredAt(runtime: TestRuntime, atMs: number): string {
+    return new Date(Date.parse(runtime.createdAt) + atMs).toISOString();
+  }
+
+  private testLogPrefix(runtime: TestRuntime, atMs: number): string {
+    const shifted = new Date(Date.parse(runtime.createdAt) + atMs + utcOffsetMinutes(runtime.definition.timezone) * 60_000);
+    const part = (value: number) => String(value).padStart(2, "0");
+    return `[${part(shifted.getUTCMonth() + 1)}-${part(shifted.getUTCDate())} ${part(shifted.getUTCHours())}:${part(shifted.getUTCMinutes())}:${part(shifted.getUTCSeconds())}]`;
+  }
+
+  private ordinal(place: number): string {
+    const remainder = place % 100;
+    if (remainder >= 11 && remainder <= 13) return `${place}th`;
+    return `${place}${place % 10 === 1 ? "st" : place % 10 === 2 ? "nd" : place % 10 === 3 ? "rd" : "th"}`;
+  }
+
+  private formatElapsed(milliseconds: number): string {
+    const hours = Math.floor(milliseconds / 3_600_000);
+    const minutes = Math.floor(milliseconds % 3_600_000 / 60_000);
+    const seconds = Math.floor(milliseconds % 60_000 / 1_000);
+    const millis = Math.floor(milliseconds % 1_000);
+    return `${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}.${String(millis).padStart(3, "0")}`;
+  }
+
+  private removeCompetitionDirectory(competitionId: string, mode: CompetitionMode): void {
+    const base = resolve(this.options.dataRoot ?? process.cwd());
+    const target = resolve(this.competitionDataRoot(competitionId, mode));
+    const relativeTarget = relative(base, target);
+    if (!relativeTarget || relativeTarget.startsWith("..") || isAbsolute(relativeTarget)) {
+      throw new ServiceError("PATH_REJECTED", "比赛数据目录不在授权数据根目录内", 500);
+    }
+    rmSync(target, { recursive: true, force: true });
+  }
+
   private toCommandAction(competitionId: string, action: CompetitionAction): CommandAction {
     const runtime = this.workRuntimes.get(competitionId);
     const config = this.getPublishedConfig(competitionId) ?? this.getDraftConfig(competitionId);
@@ -1604,6 +2044,9 @@ export class CompetitionService {
       }
     }
     if (!loaded.some((scenario) => scenario.id === "three-stage-main")) loaded.push(builtinScenario());
+    for (const scenario of builtinBehaviorScenarios()) {
+      if (!loaded.some((candidate) => candidate.id === scenario.id)) loaded.push(scenario);
+    }
     return loaded.sort((left, right) => left.name.localeCompare(right.name));
   }
 }

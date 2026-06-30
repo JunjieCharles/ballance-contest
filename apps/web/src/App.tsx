@@ -1,5 +1,10 @@
 import { useEffect, useRef, useState } from "react";
-import { validateCompetitionConfigForPublish } from "@ballance/contracts";
+import {
+  LARGE_SCORING,
+  minimumScoringPlaceFor,
+  SMALL_SCORING,
+  validateCompetitionConfigForPublish
+} from "@ballance/contracts";
 import type {
   CompetitionAction,
   CompetitionConfig,
@@ -9,11 +14,13 @@ import type {
   ConfirmationKind,
   ConfirmationSummary,
   HealthResponse,
+  RawClientLogLine,
   RuntimeSnapshot,
   ScenarioDefinition,
   ScoreboardOverrideInput,
   TestScenarioSummary
 } from "@ballance/contracts";
+import { formatUtc8DateTime, toUtc8Input, utc8InputToIso } from "./time.js";
 
 interface Session { token: string; tabId: string; control: boolean }
 interface JournalMessage { sequence?: number; type: string; competitionId?: string }
@@ -95,13 +102,14 @@ export function App() {
   const [scenarioDetail, setScenarioDetail] = useState<ScenarioDefinition | null>(null);
   const [tab, setTab] = useState<"console" | "config" | "players" | "scoreboard" | "test" | "archive">("config");
   const [name, setName] = useState("小型比赛");
-  const [mode, setMode] = useState<CompetitionMode>("test");
+  const [mode, setMode] = useState<CompetitionMode>("work");
   const [aliasPlayerId, setAliasPlayerId] = useState("");
   const [aliasDisplayName, setAliasDisplayName] = useState("");
   const [announcement, setAnnouncement] = useState("比赛流程通知");
-  const [advancedJson, setAdvancedJson] = useState("");
   const [message, setMessage] = useState("正在连接本机服务...");
   const [realtimeConnected, setRealtimeConnected] = useState(false);
+  const [rawLogs, setRawLogs] = useState<RawClientLogLine[]>([]);
+  const [rawLogsMinimized, setRawLogsMinimized] = useState(false);
   const lastSequence = useRef(0);
 
   const canWrite = Boolean(session?.control && realtimeConnected);
@@ -112,6 +120,10 @@ export function App() {
     setSnapshot(next);
   };
 
+  const refreshRawLogs = async (current: Session, competitionId: string) => {
+    setRawLogs(await request<RawClientLogLine[]>(`/api/v1/competitions/${competitionId}/logs/raw?limit=250`, current));
+  };
+
   const selectCompetition = (competitionId: string) => {
     if (competitionId === selectedId) {
       if (session) void refreshSnapshot(session, competitionId)
@@ -120,7 +132,7 @@ export function App() {
     }
     setSnapshot(undefined);
     setScenarioDetail(null);
-    setAdvancedJson("");
+    setRawLogs([]);
     setSelectedId(competitionId);
   };
 
@@ -156,6 +168,16 @@ export function App() {
     void request<CompetitionSnapshot>(`/api/v1/competitions/${selectedId}/snapshot`, session)
       .then(setSnapshot)
       .catch((error: unknown) => setMessage(error instanceof Error ? error.message : "快照加载失败"));
+  }, [session, selectedId]);
+
+  useEffect(() => {
+    if (!session || !selectedId) return;
+    const initial = window.setTimeout(() => void refreshRawLogs(session, selectedId).catch(() => undefined), 0);
+    const timer = window.setInterval(() => void refreshRawLogs(session, selectedId).catch(() => undefined), 2_000);
+    return () => {
+      window.clearTimeout(initial);
+      window.clearInterval(timer);
+    };
   }, [session, selectedId]);
 
   useEffect(() => {
@@ -287,7 +309,6 @@ export function App() {
     if (!session) return;
     const detail = await request<ScenarioDefinition>(`/api/v1/test-scenarios/${scenarioId}`, session);
     setScenarioDetail(detail);
-    setAdvancedJson(JSON.stringify(detail, null, 2));
   };
 
   const createRunFromScenario = (scenarioId: string) => act(async () => {
@@ -298,20 +319,6 @@ export function App() {
     });
     if (result.run?.scenario.id) await loadScenario(result.run.scenario.id);
   }, "测试运行已创建");
-
-  const importScenarioJson = () => act(async () => {
-    if (!session || !snapshot) throw new Error("请选择测试比赛");
-    const result = await request<{ runId: string; run: CompetitionSnapshot["testRun"] }>(`/api/v1/competitions/${snapshot.competition.id}/test-runs`, session, {
-      method: "POST",
-      body: advancedJson
-    });
-    if (result.run?.scenario.id) await loadScenario(result.run.scenario.id);
-  }, "高级场景已导入");
-
-  const controlRun = (action: "step" | "play" | "reset") => act(async () => {
-    if (!session || !snapshot?.testRun) throw new Error("尚未创建测试运行");
-    await request<unknown>(`/api/v1/competitions/${snapshot.competition.id}/test-runs/${snapshot.testRun.runId}/${action}`, session, { method: "POST", body: "{}" });
-  }, action === "step" ? "已推进一个事件" : action === "play" ? "已播放到底" : "已重置");
 
   const advanceClock = (milliseconds: number) => act(async () => {
     if (!session || !snapshot?.testRun) throw new Error("尚未创建测试运行");
@@ -353,6 +360,58 @@ export function App() {
     });
   }, "归档已生成");
 
+  const finishCompetition = (archiveAfterFinish: boolean) => act(async () => {
+    if (!session || !snapshot) throw new Error("请选择比赛");
+    const reason = window.prompt("请输入结束比赛的裁判原因", "比赛流程结束，进入复核/归档")?.trim();
+    if (!reason) throw new Error("已取消：结束比赛必须填写原因");
+    const confirmation = await request<ConfirmationSummary>(`/api/v1/competitions/${snapshot.competition.id}/confirmations`, session, {
+      method: "POST",
+      body: JSON.stringify({ kind: "high-risk", target: snapshot.competition.id })
+    });
+    if (!window.confirm(`${confirmation.summary}\n\n结束后将停止当前工作运行。是否继续？`)) return;
+    await request<unknown>(`/api/v1/competitions/${snapshot.competition.id}/finish`, session, {
+      method: "POST",
+      body: JSON.stringify({
+        expectedStateVersion: snapshot.competition.stateVersion,
+        idempotencyKey: crypto.randomUUID(),
+        confirmationToken: confirmation.token,
+        impactHash: confirmation.impactHash,
+        reason
+      })
+    });
+    if (archiveAfterFinish) {
+      await request<unknown>(`/api/v1/competitions/${snapshot.competition.id}/archive`, session, {
+        method: "POST",
+        body: JSON.stringify({ version: snapshot.archives.length + 1 })
+      });
+    }
+  }, archiveAfterFinish ? "比赛已结束并归档" : "比赛已结束");
+
+  const deleteCompetition = () => act(async () => {
+    if (!session || !snapshot) throw new Error("请选择比赛");
+    const reason = window.prompt("删除会移除比赛业务记录和运行目录；已生成的归档包会保留。请输入原因", "删除不再需要的比赛")?.trim();
+    if (!reason) throw new Error("已取消：删除比赛必须填写原因");
+    const confirmation = await request<ConfirmationSummary>(`/api/v1/competitions/${snapshot.competition.id}/confirmations`, session, {
+      method: "POST",
+      body: JSON.stringify({ kind: "high-risk", target: snapshot.competition.id })
+    });
+    if (!window.confirm(`${confirmation.summary}\n\n此操作不可撤销。是否删除？`)) return;
+    await request<unknown>(`/api/v1/competitions/${snapshot.competition.id}`, session, {
+      method: "DELETE",
+      body: JSON.stringify({
+        expectedStateVersion: snapshot.competition.stateVersion,
+        idempotencyKey: crypto.randomUUID(),
+        confirmationToken: confirmation.token,
+        impactHash: confirmation.impactHash,
+        reason
+      })
+    });
+    setSnapshot(undefined);
+    setSelectedId(undefined);
+    setRawLogs([]);
+    return "";
+  }, "比赛已删除");
+
   const overrideScoreboard = (draft: ScoreboardOverrideDraft) => act(async () => {
     if (!session || !snapshot) throw new Error("请选择比赛");
     const confirmation = await request<ConfirmationSummary>(`/api/v1/competitions/${snapshot.competition.id}/confirmations`, session, {
@@ -391,7 +450,7 @@ export function App() {
           <section className="panel create-panel">
             <h2>比赛</h2>
             <label>名称<input value={name} onChange={(event) => setName(event.target.value)} /></label>
-            <label>模式<select value={mode} onChange={(event) => setMode(event.target.value as CompetitionMode)}><option value="test">测试模式</option><option value="work">工作模式</option></select></label>
+            <label>模式<select value={mode} onChange={(event) => setMode(event.target.value as CompetitionMode)}><option value="work">工作模式（默认）</option><option value="test">测试模式</option></select></label>
             <button disabled={!canWrite} onClick={() => void createCompetition()}>新建比赛</button>
           </section>
           <nav className="competition-list">
@@ -407,7 +466,7 @@ export function App() {
             <section className="status-strip">
               <div><span>阶段</span><strong>{phaseLabel[runtime?.phase ?? snapshot.competition.status] ?? runtime?.phase ?? snapshot.competition.status}</strong></div>
               <div><span>轮次</span><strong>{stageTitle(snapshot.config, runtime?.currentStageId)}</strong></div>
-              <div><span>榜单版本</span><strong>{snapshot.scoreboardVersions.at(-1)?.version ?? 0}</strong></div>
+              <div><span>本轮计划起跑（UTC+8）</span><strong>{formatUtc8DateTime(runtime?.plannedStageStartAt ?? snapshot.config.stages.find((stage) => stage.id === runtime?.currentStageId)?.plannedStartAt)}</strong></div>
               <div><span>自动化</span><strong>{runtime?.automationEnabled ? "启用" : "暂停"}</strong></div>
               <div><span>下一 Ready</span><strong>{formatMs(runtime?.plannedReadyAtMs)}</strong></div>
             </section>
@@ -419,7 +478,7 @@ export function App() {
               enableAutomation={() => void enableAutomation()} pauseAutomation={() => void pauseAutomation()} startWork={() => void startWork()} sendAnnouncement={() => void sendAnnouncement()}
               performAction={(action) => void performRefereeAction(action)}
               performConfirmedAction={(kind, target, build) => void performConfirmedAction(kind, target, build)} />}
-            {tab === "config" && <ConfigPanel snapshot={snapshot} canWrite={canWrite} saveDraft={(patch) => void saveDraft(patch)} publish={() => void publish()} advancedJson={advancedJson} setAdvancedJson={setAdvancedJson} importScenarioJson={() => void importScenarioJson()} />}
+            {tab === "config" && <ConfigPanel key={`${snapshot.competition.id}:${snapshot.competition.stateVersion}`} snapshot={snapshot} canWrite={canWrite} saveDraft={(patch) => void saveDraft(patch)} publish={() => void publish()} />}
             {tab === "players" && <PlayersPanel snapshot={snapshot} playerId={aliasPlayerId} displayName={aliasDisplayName}
               setPlayerId={setAliasPlayerId} setDisplayName={setAliasDisplayName} canWrite={canWrite} saveAlias={(playerId, displayName) => {
                 void performRefereeAction({ type: "player-alias-upsert", playerId, displayName, reason: "更新排行榜显示名" });
@@ -427,12 +486,13 @@ export function App() {
                 setAliasDisplayName("");
               }} />}
             {tab === "scoreboard" && <ScoreboardPanel snapshot={snapshot} canWrite={canWrite} downloadExport={(format) => void downloadExport(format)} overrideScoreboard={(draft) => void overrideScoreboard(draft)} />}
-            {tab === "test" && <TestPanel snapshot={snapshot} scenarios={scenarios} scenarioDetail={scenarioDetail} loadScenario={(id) => void loadScenario(id)} createRun={createRunFromScenario} controlRun={(action) => void controlRun(action)}
+            {tab === "test" && <TestPanel snapshot={snapshot} scenarios={scenarios} scenarioDetail={scenarioDetail} loadScenario={(id) => void loadScenario(id)} createRun={createRunFromScenario}
               enableAutomation={() => void enableAutomation()} advanceClock={(ms) => void advanceClock(ms)} injectFault={(fault, playerId) => void injectFault(fault, playerId)} canWrite={canWrite} />}
-            {tab === "archive" && <ArchivePanel snapshot={snapshot} archiveCompetition={() => void archiveCompetition()} canWrite={canWrite} />}
+            {tab === "archive" && <ArchivePanel snapshot={snapshot} archiveCompetition={() => void archiveCompetition()} finishCompetition={(archive) => void finishCompetition(archive)} deleteCompetition={() => void deleteCompetition()} canWrite={canWrite} />}
           </> : <section className="empty-state">请选择或新建比赛</section>}
         </section>
       </div>
+      {snapshot && <RawLogWindow logs={rawLogs} minimized={rawLogsMinimized} setMinimized={setRawLogsMinimized} refresh={() => session && selectedId ? void refreshRawLogs(session, selectedId) : undefined} mode={snapshot.competition.mode} />}
     </main>
   );
 }
@@ -461,7 +521,7 @@ function ConsolePanel({
   const [reason, setReason] = useState("现场裁判操作");
   const [participantId, setParticipantId] = useState(snapshot.config.participants[0]?.id ?? "");
   const [rawCommand, setRawCommand] = useState("");
-  const [plannedReadyAt, setPlannedReadyAt] = useState(() => new Date(Date.now() + 5 * 60_000).toISOString().slice(0, 16));
+  const [plannedReadyAt, setPlannedReadyAt] = useState(() => toUtc8Input(new Date(Date.now() + 5 * 60_000)));
   const effectiveParticipantId = participantId || snapshot.config.participants[0]?.id || "";
   const participant = snapshot.config.participants.find((candidate) => candidate.id === effectiveParticipantId);
   const incident = snapshot.runtime.incidents[0] as { id?: string } | undefined;
@@ -510,10 +570,10 @@ function ConsolePanel({
         }))}>提前结束本轮</button>
       </div>
       <div className="inline-form">
-        <input type="datetime-local" value={plannedReadyAt} onChange={(event) => setPlannedReadyAt(event.target.value)} />
+        <input aria-label="改期时间（UTC+8）" type="datetime-local" value={plannedReadyAt} onChange={(event) => setPlannedReadyAt(event.target.value)} />
         <button disabled={!canWrite || !runtimeReady} onClick={() => confirmed("manual-action", snapshot.competition.id, (confirmation) => ({
           type: "reschedule",
-          plannedReadyAt: new Date(plannedReadyAt).toISOString(),
+          plannedReadyAt: utc8InputToIso(plannedReadyAt),
           confirmationToken: confirmation.token,
           impactHash: confirmation.impactHash,
           reason
@@ -597,12 +657,28 @@ function ConsolePanel({
   </section>;
 }
 
-function ConfigPanel({ snapshot, canWrite, saveDraft, publish, advancedJson, setAdvancedJson, importScenarioJson }: {
+function ConfigPanel({ snapshot, canWrite, saveDraft, publish }: {
   snapshot: CompetitionSnapshot; canWrite: boolean; saveDraft(patch: Partial<CompetitionConfig>): void; publish(): void;
-  advancedJson: string; setAdvancedJson(value: string): void; importScenarioJson(): void;
 }) {
   const config = snapshot.config;
+  const [contestType, setContestType] = useState(config.scoring.contestType);
+  const [points, setPoints] = useState<number[]>([...config.scoring.points]);
   const publishIssues = validateCompetitionConfigForPublish(config);
+  const editable = canWrite && snapshot.competition.status === "draft";
+  const selectScoringPreset = (nextType: CompetitionConfig["scoring"]["contestType"]) => {
+    setContestType(nextType);
+    if (nextType === "small") setPoints([...SMALL_SCORING]);
+    if (nextType === "large") setPoints([...LARGE_SCORING]);
+  };
+  const lastScoringPlace = minimumScoringPlaceFor(points);
+  const saveScoring = () => {
+    const scoring = { ...config.scoring, contestType, points, minimumScoringPlace: lastScoringPlace };
+    saveDraft({
+      contestType,
+      scoring,
+      stages: config.stages.map((stage) => ({ ...stage, scoring: points, minimumScoringPlace: lastScoringPlace }))
+    });
+  };
   return <section className="grid two">
     <div className="panel">
       <h2>基本信息</h2>
@@ -627,15 +703,32 @@ function ConfigPanel({ snapshot, canWrite, saveDraft, publish, advancedJson, set
     </div>
     <div className="panel">
       <h2>轮次与计分</h2>
+      <p className="muted">积分方案默认统一应用到所有关卡；最后一个非零分对应“最后计分名次”，其后完赛仍有效但计 0 分。</p>
+      <div className="scoring-presets" role="group" aria-label="积分方案">
+        <button className={contestType === "small" ? "selected-preset" : "ghost"} disabled={!editable} onClick={() => selectScoringPreset("small")}>小型赛事</button>
+        <button className={contestType === "large" ? "selected-preset" : "ghost"} disabled={!editable} onClick={() => selectScoringPreset("large")}>大型赛事</button>
+        <button className={contestType === "custom" ? "selected-preset" : "ghost"} disabled={!editable} onClick={() => setContestType("custom")}>自定义</button>
+      </div>
+      <div className="points-editor">
+        {points.map((point, index) => <label key={index}>第 {index + 1} 名
+          <input aria-label={`第 ${index + 1} 名积分`} type="number" value={point} disabled={!editable || contestType !== "custom"} onChange={(event) => {
+            const next = [...points];
+            next[index] = Number(event.target.value);
+            setPoints(next);
+          }} />
+        </label>)}
+      </div>
+      {contestType === "custom" && <div className="button-row">
+        <button className="ghost" disabled={!editable} onClick={() => setPoints([...points, 0])}>增加名次</button>
+        <button className="ghost" disabled={!editable || points.length <= 1} onClick={() => setPoints(points.slice(0, -1))}>删除末位</button>
+      </div>}
+      <div className="scoring-summary"><strong>最后计分名次：第 {lastScoringPlace} 名</strong><span>第 {lastScoringPlace + 1} 名起为 0 分</span></div>
+      <button disabled={!editable || points.some((point) => !Number.isFinite(point))} onClick={saveScoring}>保存积分方案并应用全部关卡</button>
+      <h3>关卡配置</h3>
       <div className="stage-list">{config.stages.slice(0, 13).map((stage) => <div className="stage-row" key={stage.id}>
-        <strong>{stage.label}</strong><span>{stage.mode} · Level {stage.level} · {Math.round(stage.timeLimitMs / 60000)} 分钟 · 最低计分 {stage.minimumScoringPlace}</span>
+        <strong>{stage.label}</strong><span>{stage.mode} · Level {stage.level} · {Math.round(stage.timeLimitMs / 60000)} 分钟 · 计分至第 {stage.minimumScoringPlace} 名</span>
       </div>)}</div>
     </div>
-    {snapshot.competition.mode === "test" && <div className="panel wide">
-      <h2>高级 JSON 导入</h2>
-      <textarea value={advancedJson} onChange={(event) => setAdvancedJson(event.target.value)} spellCheck={false} />
-      <button disabled={!canWrite} onClick={importScenarioJson}>导入为测试运行</button>
-    </div>}
   </section>;
 }
 
@@ -675,12 +768,7 @@ function ScoreboardPanel({ snapshot, canWrite, downloadExport, overrideScoreboar
   downloadExport(format: "html" | "tsv" | "csv" | "xlsx"): void;
   overrideScoreboard(draft: ScoreboardOverrideDraft): void;
 }) {
-  const [playerId, setPlayerId] = useState(snapshot.currentScoreboard[0]?.playerId ?? "");
-  const [stageId, setStageId] = useState(snapshot.config.stages[0]?.id ?? "");
-  const [place, setPlace] = useState("1");
-  const [points, setPoints] = useState("0");
   const [reason, setReason] = useState("裁判复核修订");
-  const effectivePlayerId = playerId || snapshot.currentScoreboard[0]?.playerId || "";
   return <section className="panel">
     <div className="panel-title-row"><h2>实时成绩</h2><div className="button-row compact">
       <button onClick={() => downloadExport("xlsx")}>XLSX</button>
@@ -694,46 +782,62 @@ function ScoreboardPanel({ snapshot, canWrite, downloadExport, overrideScoreboar
         <td>{entry.rank}</td><td>{entry.points}</td><td>{entry.displayName}</td>
         {snapshot.config.stages.map((stage) => {
           const value = entry.stages[stage.id] as { status?: string; place?: number; points?: number; reason?: string } | undefined;
-          return <td className={value?.status === "dnf" ? "dnf" : value?.place === 1 ? "gold" : value?.place === 2 ? "silver" : value?.place === 3 ? "bronze" : ""} key={stage.id}>
-            {value ? value.status === "dnf" ? `DNF ${value.reason ?? ""}` : `#${value.place}/${value.points}` : "—"}
-          </td>;
+          return <EditableScoreCell key={stage.id} value={value} stage={stage} playerId={entry.playerId} playerName={entry.displayName}
+            canWrite={canWrite} reason={reason} save={(newPlace) => overrideScoreboard({
+              playerId: entry.playerId,
+              stageId: stage.id,
+              stage: { place: newPlace },
+              rankPolicy: "shift",
+              actor: "local-referee",
+              reason
+            })} />;
         })}
       </tr>)}
     </tbody></table>
     {snapshot.currentScoreboard.length === 0 && <p className="muted">暂无有效榜单版本。</p>}
     <div className="score-override">
-      <h3>人工修订</h3>
-      <div className="override-grid">
-        <label>选手<select value={effectivePlayerId} onChange={(event) => setPlayerId(event.target.value)}>
-          {snapshot.currentScoreboard.map((entry) => <option value={entry.playerId} key={entry.playerId}>{entry.displayName}</option>)}
-        </select></label>
-        <label>轮次<select value={stageId} onChange={(event) => setStageId(event.target.value)}>
-          <option value="">仅修订总分</option>
-          {snapshot.config.stages.map((stage) => <option value={stage.id} key={stage.id}>{stage.label}</option>)}
-        </select></label>
-        <label>名次<input type="number" min="1" value={place} onChange={(event) => setPlace(event.target.value)} disabled={!stageId} /></label>
-        <label>积分<input type="number" value={points} onChange={(event) => setPoints(event.target.value)} /></label>
-        <label className="wide-field">原因<input value={reason} onChange={(event) => setReason(event.target.value)} /></label>
-      </div>
-      <button disabled={!canWrite || !effectivePlayerId || !reason.trim()} onClick={() => overrideScoreboard({
-        playerId: effectivePlayerId,
-        ...(stageId
-          ? {
-              stageId,
-              stage: { place: Number(place), points: Number(points) },
-              rankPolicy: "tie" as const
-            }
-          : { totalPoints: Number(points) }),
-        actor: "local-referee",
-        reason
-      })}>生成修订版本</button>
+      <h3>名次修订</h3>
+      <p className="muted">直接点击关卡成绩单元格修改名次。积分按比赛配置自动重算，不能在成绩页单独修改。</p>
+      <label>本次修订原因<input value={reason} onChange={(event) => setReason(event.target.value)} /></label>
+      <h3>修订记录</h3>
+      <table><thead><tr><th>目标</th><th>修改前</th><th>修改后</th><th>原因</th><th>时间</th></tr></thead><tbody>
+        {snapshot.scoreboardOverrides.map((record) => <tr key={record.id}><td>{record.targetId}</td><td><code>{JSON.stringify(record.beforeValue)}</code></td><td><code>{JSON.stringify(record.afterValue)}</code></td><td>{record.reason}</td><td>{record.createdAt}</td></tr>)}
+      </tbody></table>
+      {snapshot.scoreboardOverrides.length === 0 && <p className="muted">暂无人工修订记录。</p>}
     </div>
   </section>;
 }
 
-function TestPanel({ snapshot, scenarios, scenarioDetail, loadScenario, createRun, controlRun, enableAutomation, advanceClock, injectFault, canWrite }: {
+function EditableScoreCell({ value, stage, playerId, playerName, canWrite, reason, save }: {
+  value: { status?: string; place?: number; points?: number; reason?: string } | undefined;
+  stage: CompetitionConfig["stages"][number];
+  playerId: string;
+  playerName: string;
+  canWrite: boolean;
+  reason: string;
+  save(place: number): void;
+}) {
+  const [editing, setEditing] = useState(false);
+  const [place, setPlace] = useState(String(value?.place ?? 1));
+  const numericPlace = Number(place);
+  const calculatedPoints = Number.isInteger(numericPlace) && numericPlace > 0 ? stage.scoring[numericPlace - 1] ?? 0 : 0;
+  const className = value?.status === "dnf" ? "dnf" : value?.place === 1 ? "gold" : value?.place === 2 ? "silver" : value?.place === 3 ? "bronze" : "";
+  if (!editing) return <td className={`${className} editable-score-cell`}>
+    <button className="cell-button" disabled={!canWrite || !value} title={`修改 ${playerName} 的 ${stage.label} 名次`} onClick={() => {
+      setPlace(String(value?.place ?? 1));
+      setEditing(true);
+    }}>{value ? value.status === "dnf" ? `DNF ${value.reason ?? ""}` : `#${value.place} / ${value.points} 分` : "—"}</button>
+  </td>;
+  return <td className="score-cell-editor">
+    <label>新名次<input aria-label={`${playerId} ${stage.label} 新名次`} type="number" min="1" step="1" value={place} onChange={(event) => setPlace(event.target.value)} /></label>
+    <small>自动计 {calculatedPoints} 分</small>
+    <div className="cell-actions"><button disabled={!reason.trim() || !Number.isInteger(numericPlace) || numericPlace < 1} onClick={() => { save(numericPlace); setEditing(false); }}>保存</button><button className="ghost" onClick={() => setEditing(false)}>取消</button></div>
+  </td>;
+}
+
+function TestPanel({ snapshot, scenarios, scenarioDetail, loadScenario, createRun, enableAutomation, advanceClock, injectFault, canWrite }: {
   snapshot: CompetitionSnapshot; scenarios: readonly TestScenarioSummary[]; scenarioDetail: ScenarioDefinition | null;
-  loadScenario(id: string): void; createRun(id: string): void; controlRun(action: "step" | "play" | "reset"): void; enableAutomation(): void; advanceClock(ms: number): void; injectFault(fault: string, playerId?: string): void; canWrite: boolean;
+  loadScenario(id: string): void; createRun(id: string): void; enableAutomation(): void; advanceClock(ms: number): void; injectFault(fault: string, playerId?: string): void; canWrite: boolean;
 }) {
   const run = snapshot.testRun;
   const playerId = scenarioDetail?.players[0]?.id;
@@ -741,24 +845,22 @@ function TestPanel({ snapshot, scenarios, scenarioDetail, loadScenario, createRu
   return <section className="grid two">
     <div className="panel">
       <h2>场景库</h2>
+      <p className="muted">场景只定义玩家的行为模型；Ready、Go、轮次切换和结束始终由裁判状态机按当前比赛配置推进。</p>
       <div className="scenario-grid">{scenarios.map((scenario) => <button className={run?.scenario.id === scenario.id ? "scenario selected-card" : "scenario"} key={scenario.id} onClick={() => loadScenario(scenario.id)}>
-        <strong>{scenario.name}</strong><span>{scenario.players} 人 · {scenario.stages} 轮 · {scenario.events} 事件 · 期望 {scenario.expectedScoreboardVersions} 版</span>
+        <strong>{scenario.name}</strong><span>{scenario.players} 名独立玩家 · 比赛流程沿用当前配置</span>
+        <small>玩家类型：{scenario.playerProfiles.map(profileLabel).join("、")}</small>
         <small>点击查看时间线</small>
       </button>)}</div>
       {scenarioDetail && <button disabled={!canWrite} onClick={() => createRun(scenarioDetail.id)}>创建测试运行</button>}
     </div>
     <div className="panel">
-      <h2>播放控制</h2>
-      <div className="button-row">
-        <button disabled={!canWrite || !run} onClick={() => controlRun("step")}>逐事件</button>
-        <button disabled={!canWrite || !run} onClick={() => controlRun("play")}>播放到底</button>
-        <button disabled={!canWrite || !run} className="secondary" onClick={() => controlRun("reset")}>重置</button>
-      </div>
+      <h2>裁判流程控制</h2>
       <div className="button-row">
         <button disabled={!canWrite || !run} onClick={enableAutomation}>启用自动化</button>
         <button disabled={!canWrite || !run} onClick={() => advanceClock(15_000)}>+15 秒</button>
         <button disabled={!canWrite || !run} onClick={() => advanceClock(180_000)}>+3 分钟</button>
       </div>
+      <p className="muted">自动或手动 Go 一旦由裁判系统确认，测试玩家会自行完成、超时或触发违规，无需由场景替裁判发令。</p>
       <h3>故障注入</h3>
       <div className="button-row wrap">
         <button disabled={!canWrite || !run} onClick={() => injectFault("server-disconnect")}>服务器断线</button>
@@ -769,22 +871,86 @@ function TestPanel({ snapshot, scenarios, scenarioDetail, loadScenario, createRu
       </div>
     </div>
     <div className="panel wide">
-      <h2>事件时间线</h2>
-      <div className="timeline">{(scenarioDetail?.events ?? []).map((event, index) => <div className={run && index < run.nextEventIndex ? "timeline-row played" : "timeline-row"} key={event.sourceId}>
-        <span>{formatMs(event.atMs)}</span><strong>{eventLabel(event)}</strong><small>{event.sourceId}</small>
-      </div>)}</div>
+      <h2>{scenarioDetail?.kind === "player-behavior" ? "玩家行为" : "高级回放时间线"}</h2>
+      {scenarioDetail?.kind === "player-behavior"
+        ? <div className="behavior-grid">{scenarioDetail.players.map((player) => <div className="behavior-card" key={player.id}><strong>{player.displayName}</strong><span>{profileLabel(player.profile ?? "normal")}</span><small>{player.profile === "expert" ? "快速稳定完赛" : player.profile === "struggler" ? "通常超时或 DNF" : player.profile === "disruptor" ? "比赛中开启 cheat 并触发处置" : "按正常水平完赛"}</small></div>)}</div>
+        : <div className="timeline">{(scenarioDetail?.events ?? []).map((event, index) => <div className={run && index < run.nextEventIndex ? "timeline-row played" : "timeline-row"} key={event.sourceId}>
+          <span>{formatMs(event.atMs)}</span><strong>{eventLabel(event)}</strong><small>{event.sourceId}</small>
+        </div>)}</div>}
     </div>
   </section>;
 }
 
-function ArchivePanel({ snapshot, archiveCompetition, canWrite }: { snapshot: CompetitionSnapshot; archiveCompetition(): void; canWrite: boolean }) {
+const profileLabel = (profile: string): string => ({ normal: "普通玩家", expert: "游戏高手", struggler: "游戏低手", disruptor: "捣乱分子" })[profile] ?? profile;
+
+function ArchivePanel({ snapshot, archiveCompetition, finishCompetition, deleteCompetition, canWrite }: {
+  snapshot: CompetitionSnapshot;
+  archiveCompetition(): void;
+  finishCompetition(archive: boolean): void;
+  deleteCompetition(): void;
+  canWrite: boolean;
+}) {
+  const canDelete = ["draft", "finished", "archived"].includes(snapshot.competition.status);
   return <section className="panel">
-    <div className="panel-title-row"><h2>归档</h2><button disabled={!canWrite || snapshot.currentScoreboard.length === 0} onClick={archiveCompetition}>生成归档</button></div>
+    <div className="panel-title-row"><h2>结束与归档</h2><div className="button-row compact">
+      <button disabled={!canWrite || snapshot.competition.status === "finished" || snapshot.competition.status === "archived"} onClick={() => finishCompetition(false)}>结束比赛</button>
+      <button disabled={!canWrite || snapshot.currentScoreboard.length === 0 || snapshot.competition.status === "finished" || snapshot.competition.status === "archived"} onClick={() => finishCompetition(true)}>结束并生成归档</button>
+      <button disabled={!canWrite || snapshot.currentScoreboard.length === 0 || !["finished", "archived"].includes(snapshot.competition.status)} onClick={archiveCompetition}>仅生成归档</button>
+      <button className="danger" disabled={!canWrite || !canDelete} onClick={deleteCompetition}>删除比赛</button>
+    </div></div>
+    <p className="muted">结束比赛会停止当前工作运行并进入只读复核状态；删除仅允许用于草稿、已结束或已归档比赛，已生成的独立归档包不会随比赛记录删除。</p>
     <table><thead><tr><th>版本</th><th>目录</th><th>Manifest Hash</th><th>时间</th></tr></thead><tbody>
       {snapshot.archives.map((archive) => <tr key={`${archive.version}:${archive.manifestHash}`}><td>v{archive.version}</td><td>{archive.directory}</td><td><code>{archive.manifestHash}</code></td><td>{archive.createdAt}</td></tr>)}
     </tbody></table>
     {snapshot.archives.length === 0 && <p className="muted">暂无归档版本。</p>}
   </section>;
+}
+
+function RawLogWindow({ logs, minimized, setMinimized, refresh, mode }: {
+  logs: readonly RawClientLogLine[];
+  minimized: boolean;
+  setMinimized(value: boolean): void;
+  refresh(): void;
+  mode: CompetitionMode;
+}) {
+  const bodyRef = useRef<HTMLDivElement>(null);
+  const dragRef = useRef<{ pointerId: number; offsetX: number; offsetY: number } | null>(null);
+  const [position, setPosition] = useState<{ x: number; y: number } | null>(null);
+  useEffect(() => {
+    if (!minimized) bodyRef.current?.scrollTo({ top: bodyRef.current.scrollHeight });
+  }, [logs, minimized]);
+  return <aside className={minimized ? "raw-log-window minimized" : "raw-log-window"} aria-label="原始客户端日志"
+    style={position ? { left: position.x, top: position.y, right: "auto", bottom: "auto" } : undefined}>
+    <div className="raw-log-title" onPointerDown={(event) => {
+      if ((event.target as HTMLElement).closest("button")) return;
+      const bounds = event.currentTarget.parentElement?.getBoundingClientRect();
+      if (!bounds) return;
+      dragRef.current = { pointerId: event.pointerId, offsetX: event.clientX - bounds.left, offsetY: event.clientY - bounds.top };
+      event.currentTarget.setPointerCapture(event.pointerId);
+      event.preventDefault();
+    }} onPointerMove={(event) => {
+      const drag = dragRef.current;
+      if (!drag || drag.pointerId !== event.pointerId) return;
+      const windowElement = event.currentTarget.parentElement;
+      if (!windowElement) return;
+      setPosition({
+        x: Math.max(0, Math.min(window.innerWidth - windowElement.offsetWidth, event.clientX - drag.offsetX)),
+        y: Math.max(0, Math.min(window.innerHeight - windowElement.offsetHeight, event.clientY - drag.offsetY))
+      });
+    }} onPointerUp={(event) => {
+      if (dragRef.current?.pointerId === event.pointerId) dragRef.current = null;
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }}>
+      <strong>原始 Client 日志</strong>
+      <span>{mode === "work" ? "真实 MockClient" : "模拟玩家/裁判"} · {logs.length} 行</span>
+      <button className="ghost" onClick={refresh}>刷新</button>
+      <button onClick={() => setMinimized(!minimized)}>{minimized ? "展开" : "最小化"}</button>
+    </div>
+    {!minimized && <div className="raw-log-body" ref={bodyRef}>
+      {logs.map((line) => <div className="raw-log-line" key={line.id}><time>{new Date(line.occurredAt).toLocaleTimeString()}</time><span>{line.source}</span><code>{line.rawLine}</code></div>)}
+      {logs.length === 0 && <p>当前尚无客户端日志。工作模式启动 MockClient、或测试玩家开始行动后会实时显示。</p>}
+    </div>}
+  </aside>;
 }
 
 function CommandTable({ commands }: { commands: RuntimeSnapshot["commands"] }) {

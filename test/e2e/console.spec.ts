@@ -29,8 +29,8 @@ test("opens the authenticated two-mode console without external requests", async
   await expect(page.getByText("Ballance 比赛控制台")).toBeVisible();
   await expect(page.getByText(/服务 0\.1\.0-dev/)).toBeVisible();
   await expect(page.locator(".mode-badge")).toHaveText(/未选择比赛|测试模式|工作模式/);
-  await expect(page.getByLabel("模式")).toHaveValue("test");
-  await expect(page.getByLabel("模式").locator("option")).toHaveText(["测试模式", "工作模式"]);
+  await expect(page.getByLabel("模式")).toHaveValue("work");
+  await expect(page.getByLabel("模式").locator("option")).toHaveText(["工作模式（默认）", "测试模式"]);
   await expect(page.getByText(/已取得控制权|只读标签页/)).toBeVisible();
   expect(externalRequests).toEqual([]);
 });
@@ -51,6 +51,14 @@ test("keeps the current competition selected and publishes without preregistrati
   await expect(page.getByLabel("MockClient 登录名")).toHaveCount(0);
   await expect(page.getByText("MockClient 会自动强制使用旁观模式登录，无需单独配置登录名。")).toBeVisible();
   await expect(page.getByText("参赛者无需预登记，系统会根据玩家上下线和 MockClient 列表自动登记。")).toBeVisible();
+  await expect(page.getByRole("button", { name: "小型赛事" })).toBeVisible();
+  await expect(page.locator(".raw-log-body")).toBeVisible();
+  await page.getByRole("button", { name: "最小化" }).click();
+  await page.getByRole("button", { name: "大型赛事" }).click();
+  await page.getByRole("button", { name: "保存积分方案并应用全部关卡" }).click();
+  await expect(page.locator("header")).toContainText("草稿已保存");
+  await expect(page.getByLabel("第 1 名积分")).toHaveValue("30");
+  await expect(page.getByText("最后计分名次：第 15 名")).toBeVisible();
 
   const selectedCompetition = page.locator(".competition-list button").filter({ hasText: competitionName });
   await selectedCompetition.click();
@@ -87,19 +95,47 @@ test("creates a visual test run, plays the scenario, exports, and keeps work mod
   await expect(page.getByLabel("比赛名称")).toHaveValue("E2E 测试模式");
   await expect(page.locator(".mode-badge")).toHaveText("测试模式");
   await expect(page.locator(".watermark")).toHaveText("测试数据");
+  await expect(page.locator(".raw-log-body")).toBeVisible();
+  await expect(page.locator(".raw-log-window")).toHaveCSS("resize", "both");
+  await page.getByRole("button", { name: "最小化" }).click();
 
   await page.getByRole("button", { name: "测试", exact: true }).click();
-  await page.getByRole("button", { name: /三轮混合模式主回归/ }).click();
-  await expect(page.getByText("go-1")).toBeVisible();
+  await page.getByRole("button", { name: /独立测试玩家沙盒/ }).click();
+  await expect(page.locator(".behavior-card").filter({ hasText: "游戏高手" }).first()).toBeVisible();
+  await expect(page.getByText("场景只定义玩家的行为模型")).toBeVisible();
   await page.getByRole("button", { name: "创建测试运行" }).click();
-  const scoreboardVersion = page.getByText("榜单版本").locator("..");
-  await expect(scoreboardVersion).toContainText("0");
-  await page.getByRole("button", { name: "播放到底" }).click();
-  await expect(scoreboardVersion).toContainText("15");
+  await page.getByRole("button", { name: "启用自动化" }).click();
+  await expect(page.getByText("阶段").locator("..")).toContainText("成绩接收中");
+  await expect(page.getByText("本轮计划起跑（UTC+8）").locator("..")).not.toContainText("未设置");
+
+  await page.getByRole("button", { name: "展开" }).click();
+  await expect(page.locator(".raw-log-body")).toContainText("游戏高手");
+  await expect(page.locator(".raw-log-body")).toContainText("did not finish Level 01");
+  await expect(page.locator(".raw-log-body")).toContainText("Level 01 - Go!");
+
+  const logWindow = page.locator(".raw-log-window");
+  const logTitle = page.locator(".raw-log-title");
+  const beforeDrag = await logWindow.boundingBox();
+  const titleBounds = await logTitle.boundingBox();
+  expect(beforeDrag).not.toBeNull();
+  expect(titleBounds).not.toBeNull();
+  await page.mouse.move(titleBounds!.x + 20, titleBounds!.y + 20);
+  await page.mouse.down();
+  await page.mouse.move(titleBounds!.x - 60, titleBounds!.y - 30);
+  await page.mouse.up();
+  const afterDrag = await logWindow.boundingBox();
+  expect(afterDrag!.x).toBeLessThan(beforeDrag!.x);
+  expect(afterDrag!.y).toBeLessThan(beforeDrag!.y);
+  await page.getByRole("button", { name: "最小化" }).click();
 
   await page.getByRole("button", { name: "成绩", exact: true }).click();
-  await expect(page.getByRole("cell", { name: "Alpha" })).toBeVisible();
-  await expect(page.getByRole("cell", { name: "55" })).toBeVisible();
+  await expect(page.getByRole("cell", { name: "游戏高手" })).toBeVisible();
+  await page.getByTitle("修改 游戏高手 的 SR 1 名次").click();
+  await page.getByLabel("expert SR 1 新名次").fill("2");
+  page.once("dialog", (dialog) => dialog.accept());
+  await page.getByRole("button", { name: "保存", exact: true }).click();
+  await expect(page.getByText("榜单修订版本已生成")).toBeVisible();
+  await expect(page.getByText("expert:sr-1")).toBeVisible();
   const download = page.waitForEvent("download");
   await page.getByRole("button", { name: "CSV" }).click();
   await expect.poll(async () => (await download).suggestedFilename()).toContain(".csv");

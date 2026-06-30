@@ -111,7 +111,9 @@ describe("P0 API mode isolation and test run regression", () => {
       headers: auth(token),
       payload: { milliseconds: 15_000 }
     });
-    expect(running.json()).toMatchObject({ data: { phase: "running", attempts: [expect.objectContaining({ attemptNumber: 1 })] } });
+    const runningSnapshot = running.json<{ data: { phase: string; attempts: Array<{ attemptNumber: number; results: unknown[] }> } }>().data;
+    expect(runningSnapshot).toMatchObject({ phase: "tail-intake", attempts: [expect.objectContaining({ attemptNumber: 1 })] });
+    expect(runningSnapshot.attempts[0]?.results).toHaveLength(5);
     const fault = await app.inject({
       method: "POST",
       url: `/api/v1/competitions/${competitionId}/test-runs/${runId}/faults`,
@@ -126,5 +128,89 @@ describe("P0 API mode isolation and test run regression", () => {
         blockers: [expect.objectContaining({ code: "AUTOMATION_PAUSED" })]
       }
     });
+  });
+
+  it("drives independent player profiles, exposes raw logs, then finishes and deletes safely", async () => {
+    const created = await app.inject({
+      method: "POST",
+      url: "/api/v1/competitions",
+      headers: auth(token),
+      payload: { name: "独立玩家闭环", mode: "test", idempotencyKey: "independent-player-lifecycle" }
+    });
+    const competitionId = created.json<{ data: { id: string } }>().data.id;
+    const scenarios = await app.inject({ method: "GET", url: "/api/v1/test-scenarios", headers: auth(token) });
+    expect(scenarios.json()).toMatchObject({ data: expect.arrayContaining([expect.objectContaining({
+      id: "independent-player-sandbox",
+      playerProfiles: ["expert", "normal", "struggler", "disruptor"]
+    })]) });
+    const run = await app.inject({
+      method: "POST",
+      url: `/api/v1/competitions/${competitionId}/test-runs/from-scenario`,
+      headers: auth(token),
+      payload: { scenarioId: "independent-player-sandbox" }
+    });
+    const runId = run.json<{ data: { runId: string } }>().data.runId;
+    const automaticStart = await app.inject({
+      method: "POST",
+      url: `/api/v1/competitions/${competitionId}/automation/enable`,
+      headers: auth(token),
+      payload: { runId, readyInMs: 0 }
+    });
+    expect(automaticStart.json()).toMatchObject({ data: { phase: "tail-intake", attempts: [expect.objectContaining({ results: expect.any(Array) })] } });
+    await app.inject({ method: "POST", url: `/api/v1/competitions/${competitionId}/test-runs/${runId}/reset`, headers: auth(token), payload: {} });
+    const ready = await app.inject({
+      method: "POST",
+      url: `/api/v1/competitions/${competitionId}/actions`,
+      headers: auth(token),
+      payload: { expectedStateVersion: 0, idempotencyKey: "manual-ready", action: { type: "ready" } }
+    });
+    expect(ready.statusCode).toBe(200);
+    const goConfirmationResponse = await app.inject({ method: "POST", url: `/api/v1/competitions/${competitionId}/confirmations`, headers: auth(token), payload: { kind: "manual-go", target: competitionId } });
+    const goConfirmation = goConfirmationResponse.json<{ data: { token: string; impactHash: string } }>().data;
+    const manualGo = await app.inject({
+      method: "POST",
+      url: `/api/v1/competitions/${competitionId}/actions`,
+      headers: auth(token),
+      payload: {
+        expectedStateVersion: 1,
+        idempotencyKey: "manual-go",
+        action: { type: "manual-go", confirmationToken: goConfirmation.token, impactHash: goConfirmation.impactHash, reason: "手动流程验证" }
+      }
+    });
+    expect(manualGo.statusCode).toBe(200);
+    const snapshot = await app.inject({ method: "GET", url: `/api/v1/competitions/${competitionId}/snapshot`, headers: auth(token) });
+    const snapshotData = snapshot.json<{ data: { runtime: { phase: string }; currentScoreboard: unknown[]; competition: { stateVersion: number } } }>().data;
+    expect(snapshotData.runtime.phase).toBe("tail-intake");
+    expect(snapshotData.currentScoreboard).toHaveLength(4);
+
+    const logs = await app.inject({ method: "GET", url: `/api/v1/competitions/${competitionId}/logs/raw`, headers: auth(token) });
+    expect(logs.json()).toMatchObject({ data: expect.arrayContaining([
+      expect.objectContaining({ source: "test-player", rawLine: expect.stringContaining("游戏高手") }),
+      expect.objectContaining({ source: "test-player", rawLine: expect.stringContaining("did not finish Level") }),
+      expect.objectContaining({ source: "test-referee", rawLine: expect.stringContaining(" - Go!") })
+    ]) });
+    expect(logs.json<{ data: Array<{ rawLine: string }> }>().data.every((line) => line.rawLine.startsWith("["))).toBe(true);
+    expect(logs.json<{ data: Array<{ rawLine: string }> }>().data.some((line) => line.rawLine.includes("[模拟裁判]"))).toBe(false);
+
+    const finishConfirmation = await app.inject({ method: "POST", url: `/api/v1/competitions/${competitionId}/confirmations`, headers: auth(token), payload: { kind: "high-risk", target: competitionId } });
+    const finishToken = finishConfirmation.json<{ data: { token: string; impactHash: string } }>().data;
+    const finished = await app.inject({
+      method: "POST",
+      url: `/api/v1/competitions/${competitionId}/finish`,
+      headers: auth(token),
+      payload: { expectedStateVersion: snapshotData.competition.stateVersion, idempotencyKey: "finish", confirmationToken: finishToken.token, impactHash: finishToken.impactHash, reason: "测试闭环完成" }
+    });
+    expect(finished.json()).toMatchObject({ data: { status: "finished" } });
+    const finishedRecord = finished.json<{ data: { stateVersion: number } }>().data;
+    const deleteConfirmation = await app.inject({ method: "POST", url: `/api/v1/competitions/${competitionId}/confirmations`, headers: auth(token), payload: { kind: "high-risk", target: competitionId } });
+    const deleteToken = deleteConfirmation.json<{ data: { token: string; impactHash: string } }>().data;
+    const deleted = await app.inject({
+      method: "DELETE",
+      url: `/api/v1/competitions/${competitionId}`,
+      headers: auth(token),
+      payload: { expectedStateVersion: finishedRecord.stateVersion, idempotencyKey: "delete", confirmationToken: deleteToken.token, impactHash: deleteToken.impactHash, reason: "删除测试比赛" }
+    });
+    expect(deleted.json()).toMatchObject({ data: { id: competitionId } });
+    expect((await app.inject({ method: "GET", url: `/api/v1/competitions/${competitionId}`, headers: auth(token) })).statusCode).toBe(404);
   });
 });

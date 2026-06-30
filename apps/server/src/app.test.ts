@@ -30,6 +30,8 @@ describe("local API", () => {
   });
 
   it("creates both modes idempotently and enforces state versions", async () => {
+    const defaultCreated = await app.inject({ method: "POST", url: "/api/v1/competitions", headers: auth(token), payload: { name: "Default Work", idempotencyKey: "default-work" } });
+    expect(defaultCreated.json()).toMatchObject({ data: { mode: "work" } });
     const payload = { name: "Test", mode: "test", idempotencyKey: "create-1" };
     const created = await app.inject({ method: "POST", url: "/api/v1/competitions", headers: auth(token), payload });
     const record = created.json<{ data: { id: string; stateVersion: number } }>().data;
@@ -75,7 +77,7 @@ describe("local API", () => {
     const started = await app.inject({ method: "POST", url: `/api/v1/competitions/${competitionId}/test-runs/${runId}/automation/start`, headers: auth(token), payload: {} });
     expect(started.json()).toMatchObject({ data: { phase: "ready", actions: expect.any(Array) } });
     const advanced = await app.inject({ method: "POST", url: `/api/v1/competitions/${competitionId}/test-runs/${runId}/automation/advance`, headers: auth(token), payload: { milliseconds: 15_000 } });
-    expect(advanced.json()).toMatchObject({ data: { phase: "running", attempts: [{ attemptNumber: 1 }] } });
+    expect(advanced.json()).toMatchObject({ data: { phase: "tail-intake", attempts: [{ attemptNumber: 1, results: { length: 5 } }] } });
     const fault = await app.inject({ method: "POST", url: `/api/v1/competitions/${competitionId}/test-runs/${runId}/faults`, headers: auth(token), payload: { fault: "player-crash", playerId: "p1" } });
     expect(fault.json()).toMatchObject({ data: { phase: "incident", incidents: [{ type: "protected-crash", recommendedRestart: true }] } });
   });
@@ -119,8 +121,8 @@ describe("local API", () => {
       idempotencyKey: "override-p4",
       playerId: "p4",
       stageId: "s3",
-      stage: { place: 1, points: 70 },
-      rankPolicy: "tie",
+      stage: { place: 1 },
+      rankPolicy: "shift",
       actor: "referee",
       reason: "录像复核"
     };
@@ -138,9 +140,31 @@ describe("local API", () => {
       headers: auth(token),
       payload: { ...basePayload, confirmationToken: confirmation.token, impactHash: confirmation.impactHash }
     });
-    const revision = revised.json<{ data: { version: number; entries: Array<{ playerId: string; rank: number }> } }>().data;
+    expect(revised.json()).toMatchObject({ data: { version: 16 } });
+    const revision = revised.json<{ data: { version: number; entries: Array<{ playerId: string; rank: number; stages: Record<string, { place: number; points: number }> }> } }>().data;
     expect(revision.version).toBe(16);
-    expect(revision.entries[0]).toMatchObject({ playerId: "p4", rank: 1 });
+    expect(revision.entries.find((entry) => entry.playerId === "p4")?.stages.s3).toMatchObject({ place: 1, points: 20 });
+    const pointsConfirmationResponse = await app.inject({
+      method: "POST",
+      url: `/api/v1/competitions/${competitionId}/confirmations`,
+      headers: auth(token),
+      payload: { kind: "scoreboard-override", target: "p4:s3" }
+    });
+    const pointsConfirmation = pointsConfirmationResponse.json<{ data: { token: string; impactHash: string } }>().data;
+    const directPointsEdit = await app.inject({
+      method: "POST",
+      url: `/api/v1/competitions/${competitionId}/scoreboard/overrides`,
+      headers: auth(token),
+      payload: {
+        ...basePayload,
+        expectedStateVersion: 1,
+        idempotencyKey: "forbidden-points-edit",
+        stage: { place: 1, points: 999 },
+        confirmationToken: pointsConfirmation.token,
+        impactHash: pointsConfirmation.impactHash
+      }
+    });
+    expect(directPointsEdit.json()).toMatchObject({ error: { code: "VALIDATION_FAILED", message: expect.stringContaining("积分由比赛配置自动计算") } });
     const fixedExport = await app.inject({
       method: "POST",
       url: `/api/v1/competitions/${competitionId}/exports/csv`,

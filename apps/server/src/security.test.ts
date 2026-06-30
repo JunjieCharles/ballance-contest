@@ -37,9 +37,12 @@ describe("local security and process ownership", () => {
 
   it("fails on fixed port occupation and never falls back to a random port", async () => {
     const blocker = createServer();
-    await new Promise<void>((resolve, reject) => {
+    const ownsBlocker = await new Promise<boolean>((resolve, reject) => {
       blocker.once("error", reject);
-      blocker.listen(32113, "127.0.0.1", resolve);
+      blocker.listen(32113, "127.0.0.1", () => resolve(true));
+    }).catch((error: unknown) => {
+      if (error && typeof error === "object" && "code" in error && error.code === "EADDRINUSE") return false;
+      throw error;
     });
     const app = await buildApp({ bootstrapToken: "bootstrap", serveStatic: false });
     try {
@@ -47,7 +50,7 @@ describe("local security and process ownership", () => {
       expect(app.server.address()).toBeNull();
     } finally {
       await app.close();
-      await new Promise<void>((resolve, reject) => blocker.close((error) => error ? reject(error) : resolve()));
+      if (ownsBlocker) await new Promise<void>((resolve, reject) => blocker.close((error) => error ? reject(error) : resolve()));
     }
   });
 

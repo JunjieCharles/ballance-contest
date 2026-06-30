@@ -24,6 +24,7 @@ export interface BuildAppOptions {
   service?: CompetitionService;
   dataRoot?: string;
   devShutdown?: { token: string; onShutdown: () => void | Promise<void> };
+  trustedOrigins?: readonly string[];
 }
 
 const bearer = (request: FastifyRequest): string | undefined => {
@@ -45,7 +46,8 @@ export const buildApp = async (options: BuildAppOptions): Promise<FastifyInstanc
 
   const requireSession = (request: FastifyRequest, control = false): LocalSession => {
     const origin = request.headers.origin;
-    if (origin && origin !== "http://127.0.0.1:32113" && origin !== "http://localhost:32113") throw new ServiceError("ORIGIN_REJECTED", "请求来源不受信任", 403);
+    const trustedOrigins = new Set(["http://127.0.0.1:32113", "http://localhost:32113", ...(options.trustedOrigins ?? [])]);
+    if (origin && !trustedOrigins.has(origin)) throw new ServiceError("ORIGIN_REJECTED", "请求来源不受信任", 403);
     const session = sessions.get(bearer(request));
     if (!session) throw new ServiceError("UNAUTHORIZED", "缺少有效本机会话", 401);
     if (control && !session.control) throw new ServiceError("READ_ONLY_SESSION", "当前标签页没有控制权", 403);
@@ -113,7 +115,7 @@ export const buildApp = async (options: BuildAppOptions): Promise<FastifyInstanc
   app.post("/api/v1/sessions/control", async (request) => sessions.acquire(requireSession(request).token));
 
   app.get("/api/v1/competitions", async (request) => { requireSession(request); return { data: service.list() }; });
-  app.post<{ Body: { name: string; mode: "work" | "test"; idempotencyKey: string } }>("/api/v1/competitions", async (request) => {
+  app.post<{ Body: { name: string; mode?: "work" | "test"; idempotencyKey: string } }>("/api/v1/competitions", async (request) => {
     requireSession(request, true);
     return { data: service.create(request.body) };
   });
@@ -132,6 +134,12 @@ export const buildApp = async (options: BuildAppOptions): Promise<FastifyInstanc
   app.get<{ Params: { competitionId: string } }>("/api/v1/competitions/:competitionId/snapshot", async (request) => {
     requireSession(request);
     return { data: service.snapshot(request.params.competitionId) };
+  });
+  app.get<{ Params: { competitionId: string }; Querystring: { limit?: string } }>("/api/v1/competitions/:competitionId/logs/raw", async (request) => {
+    requireSession(request);
+    const limit = request.query.limit === undefined ? 200 : Number(request.query.limit);
+    if (!Number.isFinite(limit)) throw new ServiceError("VALIDATION_FAILED", "日志条数必须是数字", 400);
+    return { data: service.getRawClientLogs(request.params.competitionId, limit) };
   });
   app.patch<{ Params: { competitionId: string }; Body: Partial<CompetitionConfig> & { expectedStateVersion: number; idempotencyKey: string } }>("/api/v1/competitions/:competitionId/draft", async (request) => {
     requireSession(request, true);
@@ -193,6 +201,10 @@ export const buildApp = async (options: BuildAppOptions): Promise<FastifyInstanc
   app.post<{ Params: { competitionId: string; runId: string } }>("/api/v1/competitions/:competitionId/test-runs/:runId/reset", async (request) => {
     requireSession(request, true);
     return { data: service.resetTestRun(request.params.competitionId, request.params.runId) };
+  });
+  app.post<{ Params: { competitionId: string; runId: string } }>("/api/v1/competitions/:competitionId/test-runs/:runId/players/act", async (request) => {
+    requireSession(request, true);
+    return { data: service.actTestPlayers(request.params.competitionId, request.params.runId) };
   });
   app.get<{ Params: { competitionId: string; runId: string } }>("/api/v1/competitions/:competitionId/test-runs/:runId/automation", async (request) => {
     requireSession(request, false);
@@ -305,6 +317,20 @@ export const buildApp = async (options: BuildAppOptions): Promise<FastifyInstanc
     service.recordArchive(competition.id, archive);
     service.journal.append({ type: "competition.archived", competitionId: competition.id, data: { version: request.body.version, manifestHash: archive.manifestHash } });
     return { data: { directory: archive.directory, packagePath: archive.packagePath, manifestHash: archive.manifestHash } };
+  });
+  app.post<{
+    Params: { competitionId: string };
+    Body: { expectedStateVersion: number; idempotencyKey: string; confirmationToken: string; impactHash: string; reason: string };
+  }>("/api/v1/competitions/:competitionId/finish", async (request) => {
+    requireSession(request, true);
+    return { data: await service.finishCompetition(request.params.competitionId, request.body) };
+  });
+  app.delete<{
+    Params: { competitionId: string };
+    Body: { expectedStateVersion: number; idempotencyKey: string; confirmationToken: string; impactHash: string; reason: string };
+  }>("/api/v1/competitions/:competitionId", async (request) => {
+    requireSession(request, true);
+    return { data: await service.deleteCompetition(request.params.competitionId, request.body) };
   });
 
   type WebSocketRequest = FastifyRequest<{ Querystring: { token?: string; after?: string } }>;

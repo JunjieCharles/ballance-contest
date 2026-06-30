@@ -57,6 +57,10 @@ describe("CompetitionService dynamic participants", () => {
     internals.ingestWorkLine(runtime, "[06-30 12:00:01] [7, *ContestConsole]: Level 01 - Go!");
     internals.ingestWorkLine(runtime, "[06-30 12:00:02] (#42, Silent_Snow) finished Level 01 in 1st place (score: 100; real time: 00:00:01.000).");
 
+    expect(service.getRawClientLogs(record.id)).toEqual(expect.arrayContaining([
+      expect.objectContaining({ source: "mock-client", rawLine: expect.stringContaining("Silent_Snow") })
+    ]));
+
     expect(service.snapshot(record.id).currentScoreboard).toMatchObject([{
       playerId: "Silent_Snow",
       displayName: "渴望新地图",

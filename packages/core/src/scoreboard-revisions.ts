@@ -83,7 +83,10 @@ export class ScoreboardRevisionLedger {
   private readonly records: ScoreboardOverrideRecord[] = [];
   private readonly versions: RevisedScoreboardVersion[] = [];
 
-  public constructor(private readonly base: ScoreboardVersion) {
+  public constructor(
+    private readonly base: ScoreboardVersion,
+    private readonly scoringByStage: Readonly<Record<string, readonly number[]>> = {}
+  ) {
     this.baseEntries = base.entries.map(copyEntry);
   }
 
@@ -146,21 +149,40 @@ export class ScoreboardRevisionLedger {
       const current = entry.stages[request.stageId];
       if (!current) throw new Error("OVERRIDE_STAGE_RESULT_NOT_FOUND");
       const patch = request.stage;
+      if (patch.place !== undefined && (!Number.isInteger(patch.place) || patch.place < 1)) throw new Error("OVERRIDE_PLACE_INVALID");
       if (patch.place !== undefined && patch.place !== current.place && request.rankPolicy === "shift") {
+        const oldPlace = current.place;
         for (const candidate of entries) {
           const result = candidate.stages[request.stageId];
-          if (result && candidate.playerId !== entry.playerId && result.place >= patch.place) {
-            (candidate.stages as Record<string, StageResult>)[request.stageId] = { ...result, place: result.place + 1 };
+          if (!result || result.status !== "finished" || candidate.playerId === entry.playerId) continue;
+          const movesDown = patch.place < oldPlace && result.place >= patch.place && result.place < oldPlace;
+          const movesUp = patch.place > oldPlace && result.place > oldPlace && result.place <= patch.place;
+          if (movesDown || movesUp) {
+            const place = result.place + (movesDown ? 1 : -1);
+            (candidate.stages as Record<string, StageResult>)[request.stageId] = {
+              ...result,
+              place,
+              points: this.pointsFor(request.stageId, place, result.points)
+            };
+            this.recalculate(candidate);
           }
         }
       }
       const merged = { ...current, ...patch } as StageResult & { includeInTotal?: boolean };
+      if (merged.status === "finished" && patch.place !== undefined) {
+        merged.points = this.pointsFor(request.stageId, patch.place, merged.points);
+      }
       delete merged.includeInTotal;
       if (patch.includeInTotal === false) merged.points = 0;
       (entry.stages as Record<string, StageResult>)[request.stageId] = merged;
       this.recalculate(entry);
     }
     if (request.totalPoints !== undefined) (entry as { points: number }).points = request.totalPoints;
+  }
+
+  private pointsFor(stageId: string, place: number, fallback: number): number {
+    const scoring = this.scoringByStage[stageId];
+    return scoring ? scoring[place - 1] ?? 0 : fallback;
   }
 
   private recalculate(entry: ScoreboardEntry): void {

@@ -18,6 +18,7 @@ button {
 }
 button.secondary { background: #5a6675; }
 button.ghost { color: #293646; background: #e8edf2; }
+button.danger { background: #9f2935; }
 button:disabled { opacity: .45; cursor: not-allowed; }
 input, select, textarea {
   width: 100%;
@@ -249,6 +250,29 @@ header > span:last-of-type { margin-left: auto; font-size: 13px; }
   background: #f6f8fb;
 }
 .stage-row span { color: #657382; font-size: 12px; }
+.scoring-presets {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+.scoring-presets .selected-preset { background: #1769a6; }
+.points-editor {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(92px, 1fr));
+  gap: 8px;
+  margin-bottom: 10px;
+}
+.points-editor label { margin: 0; }
+.scoring-summary {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 12px 0;
+  padding: 10px;
+  border-radius: 6px;
+  background: #edf5fb;
+  color: #31536d;
+}
 
 .scoreboard {
   min-width: 860px;
@@ -259,6 +283,21 @@ header > span:last-of-type { margin-left: auto; font-size: 13px; }
 .gold { background: #ffb700; }
 .silver { background: #ffe1b2; }
 .bronze { background: #fff2cc; }
+.editable-score-cell { padding: 0; }
+.cell-button {
+  width: 100%;
+  min-height: 48px;
+  border-radius: 0;
+  color: inherit;
+  background: transparent;
+  text-align: left;
+}
+.cell-button:disabled { opacity: 1; }
+.score-cell-editor { min-width: 180px; background: #edf5fb; }
+.score-cell-editor label { margin-bottom: 4px; }
+.score-cell-editor small { color: #536170; }
+.cell-actions { display: flex; gap: 5px; margin-top: 6px; }
+.cell-actions button { min-height: 30px; padding: 4px 8px; }
 
 .score-override {
   margin-top: 18px;
@@ -314,6 +353,21 @@ header > span:last-of-type { margin-left: auto; font-size: 13px; }
 }
 .timeline-row span,
 .timeline-row small { color: #657382; font-size: 12px; }
+.behavior-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+  gap: 9px;
+}
+.behavior-card {
+  display: grid;
+  gap: 5px;
+  padding: 12px;
+  border: 1px solid #d6dee7;
+  border-radius: 7px;
+  background: #f6f8fb;
+}
+.behavior-card span { color: #70455f; font-weight: 700; }
+.behavior-card small { color: #657382; }
 .empty-state {
   min-height: 260px;
   display: grid;
@@ -323,6 +377,49 @@ header > span:last-of-type { margin-left: auto; font-size: 13px; }
   border-radius: 8px;
   background: #ffffff;
 }
+
+.raw-log-window {
+  position: fixed;
+  right: 16px;
+  bottom: 16px;
+  z-index: 10;
+  width: min(560px, calc(100vw - 32px));
+  height: min(320px, calc(100vh - 90px));
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  overflow: hidden;
+  border: 1px solid #536170;
+  border-radius: 9px;
+  color: #e7edf3;
+  background: #18212c;
+  box-shadow: 0 12px 38px rgb(0 0 0 / 35%);
+  resize: both;
+  min-width: 420px;
+  min-height: 220px;
+  max-width: calc(100vw - 8px);
+  max-height: calc(100vh - 8px);
+}
+.raw-log-window.minimized { width: min(560px, calc(100vw - 32px)); height: auto; min-height: 0; resize: none; }
+.raw-log-title {
+  min-height: 48px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 9px 7px 13px;
+  background: #273442;
+  cursor: move;
+  touch-action: none;
+  user-select: none;
+}
+.raw-log-title span { margin-right: auto; color: #b8c4d0; font-size: 12px; }
+.raw-log-title button { min-height: 32px; padding: 4px 9px; }
+.raw-log-title .ghost { color: #dfe7ee; background: #3b4a59; }
+.raw-log-body { overflow: auto; padding: 8px 0; font-family: Consolas, "Cascadia Mono", monospace; font-size: 12px; }
+.raw-log-line { display: grid; grid-template-columns: 78px 88px minmax(0, 1fr); gap: 8px; padding: 3px 12px; }
+.raw-log-line:hover { background: #24303c; }
+.raw-log-line time, .raw-log-line span { color: #8da1b4; }
+.raw-log-line code { color: #e7edf3; white-space: pre-wrap; }
+.raw-log-body p { padding: 12px; color: #aebdca; }
 
 @media (max-width: 960px) {
   header {
@@ -351,4 +448,8 @@ header > span:last-of-type { margin-left: auto; font-size: 13px; }
   .alias-form { grid-template-columns: 1fr; }
   .timeline-row { grid-template-columns: 68px minmax(0, 1fr); }
   .timeline-row small { grid-column: 2; }
+  .scoring-summary { display: grid; }
+  .raw-log-window { right: 8px; bottom: 8px; width: calc(100vw - 16px); min-width: 300px; }
+  .raw-log-line { grid-template-columns: 68px minmax(0, 1fr); }
+  .raw-log-line code { grid-column: 1 / -1; }
 }

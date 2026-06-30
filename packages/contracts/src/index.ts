@@ -155,6 +155,9 @@ export const validateCompetitionConfigForPublish = (config: CompetitionConfig): 
     issues.push("bmmo.win 预设服务器不得填写端口");
   }
   if (config.stages.length === 0) issues.push("至少需要一个轮次");
+  if (config.scoring.points.length === 0) issues.push("积分表至少需要一个名次");
+  if (config.scoring.points.some((point) => !Number.isFinite(point))) issues.push("积分必须是有限数字");
+  if (!config.scoring.allowNegative && config.scoring.points.some((point) => point < 0)) issues.push("当前配置不允许负分");
   for (const stage of config.stages) {
     if (stage.level < 0 || stage.level > 13) issues.push(`${stage.label} 关卡号必须在 0..13`);
     if (stage.scoring.length === 0) issues.push(`${stage.label} 缺少积分规则`);
@@ -191,6 +194,7 @@ export interface RuntimeSnapshot {
   automationEnabled: boolean;
   currentStageId?: string;
   plannedReadyAtMs?: number;
+  plannedStageStartAt?: string;
   blockers: readonly { code: string; severity: "warning" | "critical"; suggestion: string; autoRecoverable: boolean; participantId?: string }[];
   waitingParticipants: readonly string[];
   attempts: readonly unknown[];
@@ -215,13 +219,33 @@ export interface ScoreboardVersionView {
   deterministicHash: string;
 }
 
+export interface ScoreboardOverrideView {
+  id: string;
+  targetType: string;
+  targetId: string;
+  beforeValue: unknown;
+  afterValue: unknown;
+  reason: string;
+  actor: string;
+  createdAt: string;
+}
+
+export interface RawClientLogLine {
+  id: string;
+  source: "mock-client" | "test-player" | "test-referee";
+  occurredAt: string;
+  rawLine: string;
+}
+
 export interface TestScenarioSummary {
   id: string;
   name: string;
+  kind: "player-behavior" | "scripted-replay";
   players: number;
   stages: number;
   events: number;
   expectedScoreboardVersions: number;
+  playerProfiles: readonly ScenarioPlayerProfile[];
 }
 
 export interface TestRunSnapshot {
@@ -245,6 +269,7 @@ export interface CompetitionSnapshot {
   runtime: RuntimeSnapshot;
   scoreboardVersions: readonly ScoreboardVersionView[];
   currentScoreboard: ScoreboardVersionView["entries"];
+  scoreboardOverrides: readonly ScoreboardOverrideView[];
   testRun?: TestRunSnapshot;
   archives: readonly { version: number; directory: string; packagePath: string; manifestHash: string; createdAt: string }[];
 }
@@ -304,8 +329,13 @@ export type CompetitionAction =
   | { type: "crash"; playerName: string; confirmationToken: string; impactHash: string; reason: string }
   | { type: "raw-command"; command: string; confirmationToken: string; impactHash: string; reason: string };
 
-export const SMALL_SCORING = [20, 15, 12, 10, 8, 6, 5, 4, 3, 2, 1, 1, 1, 1, 1] as const;
+export const SMALL_SCORING = [20, 15, 12, 10, 8, 6, 5, 4, 3, 2, 1, 1] as const;
 export const LARGE_SCORING = [30, 24, 21, 18, 16, 14, 12, 10, 8, 6, 5, 4, 3, 2, 1] as const;
+
+export const minimumScoringPlaceFor = (points: readonly number[]): number => {
+  const lastScoringIndex = points.findLastIndex((point) => point !== 0);
+  return Math.max(1, lastScoringIndex + 1);
+};
 
 export const defaultFlowPolicy = (): FlowPolicy => ({
   announcementLeadMs: 5 * 60_000,
@@ -327,7 +357,7 @@ export const defaultNotifications = (): NotificationTemplates => ({
   competitionComplete: "比赛结束，成绩进入复核。"
 });
 
-export const defaultSrStages = (scoring: readonly number[] = SMALL_SCORING, minimumScoringPlace = 15): StageConfig[] =>
+export const defaultSrStages = (scoring: readonly number[] = SMALL_SCORING, minimumScoringPlace = minimumScoringPlaceFor(scoring)): StageConfig[] =>
   Array.from({ length: 13 }, (_unused, index) => {
     const level = index + 1;
     return {
@@ -343,7 +373,7 @@ export const defaultSrStages = (scoring: readonly number[] = SMALL_SCORING, mini
   });
 
 export const createDefaultCompetitionConfig = (name: string): CompetitionConfig => {
-  const scoring: ScoringConfig = { contestType: "small", points: SMALL_SCORING, minimumScoringPlace: 15, allowNegative: false };
+  const scoring: ScoringConfig = { contestType: "small", points: SMALL_SCORING, minimumScoringPlace: minimumScoringPlaceFor(SMALL_SCORING), allowNegative: false };
   const now = new Date();
   return {
     name,
@@ -361,10 +391,19 @@ export const createDefaultCompetitionConfig = (name: string): CompetitionConfig 
   };
 };
 
+export const ScenarioPlayerProfileSchema = Type.Union([
+  Type.Literal("normal"),
+  Type.Literal("expert"),
+  Type.Literal("struggler"),
+  Type.Literal("disruptor")
+]);
+export type ScenarioPlayerProfile = Static<typeof ScenarioPlayerProfileSchema>;
+
 export const ScenarioPlayerSchema = Type.Object({
   id: Type.String({ minLength: 1 }),
   displayName: Type.String({ minLength: 1 }),
-  connectionId: Type.String({ minLength: 1 })
+  connectionId: Type.String({ minLength: 1 }),
+  profile: Type.Optional(ScenarioPlayerProfileSchema)
 });
 
 export const ScenarioStageSchema = Type.Object({
@@ -407,13 +446,14 @@ export type ScenarioEvent = Static<typeof ScenarioEventSchema>;
 
 export const ScenarioDefinitionSchema = Type.Object({
   schemaVersion: Type.Literal(1),
+  kind: Type.Optional(Type.Union([Type.Literal("player-behavior"), Type.Literal("scripted-replay")])),
   id: Type.String({ minLength: 1 }),
   name: Type.String({ minLength: 1 }),
   year: Type.Integer({ minimum: 2000, maximum: 9999 }),
   timezone: Type.String({ minLength: 1 }),
   refereeConnectionId: Type.String({ minLength: 1 }),
   players: Type.Array(ScenarioPlayerSchema, { minItems: 1 }),
-  stages: Type.Array(ScenarioStageSchema, { minItems: 1 }),
+  stages: Type.Array(ScenarioStageSchema),
   events: Type.Array(ScenarioEventSchema),
   expected: Type.Object({
     attempts: Type.Integer({ minimum: 0 }),
