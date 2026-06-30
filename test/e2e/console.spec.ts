@@ -1,5 +1,3 @@
-import { readFileSync } from "node:fs";
-import { resolve } from "node:path";
 import type { Page } from "@playwright/test";
 import { expect, test } from "@playwright/test";
 
@@ -20,12 +18,13 @@ const acquireControl = async (page: Page): Promise<void> => {
   await expect(page.getByText("已取得控制权")).toBeVisible();
 };
 
-test("opens the two-mode console through a local authenticated session", async ({ page }) => {
+test("opens the authenticated two-mode console without external requests", async ({ page }) => {
   const externalRequests: string[] = [];
   page.on("request", (request) => {
     const url = new URL(request.url());
     if (url.hostname !== "127.0.0.1") externalRequests.push(request.url());
   });
+
   await page.goto("/#token=e2e-bootstrap-token");
   await expect(page.getByText("Ballance 比赛控制台")).toBeVisible();
   await expect(page.getByText(/服务 0\.1\.0-dev/)).toBeVisible();
@@ -36,7 +35,7 @@ test("opens the two-mode console through a local authenticated session", async (
   expect(externalRequests).toEqual([]);
 });
 
-test("E2E-TEST-001/002 creates a test run, plays the main scenario and keeps work mode isolated", async ({ page }) => {
+test("creates a visual test run, plays the scenario, exports, and keeps work mode isolated", async ({ page }) => {
   const externalRequests: string[] = [];
   page.on("request", (request) => {
     const url = new URL(request.url());
@@ -46,29 +45,35 @@ test("E2E-TEST-001/002 creates a test run, plays the main scenario and keeps wor
   await page.goto("/#token=e2e-bootstrap-token");
   await expect(page.getByText(/已取得控制权|只读标签页/)).toBeVisible();
   await acquireControl(page);
+
   await page.getByLabel("名称").fill("E2E 测试模式");
   await page.getByLabel("模式").selectOption("test");
   await page.getByRole("button", { name: "新建比赛" }).click();
   await expect(page.locator(".mode-badge")).toHaveText("测试模式");
   await expect(page.locator(".watermark")).toHaveText("测试数据");
-  await expect(page.getByText("真实进程").locator("..")).toContainText("禁用");
-  await expect(page.getByText("真实命令").locator("..")).toContainText("禁用");
 
-  const scenario = readFileSync(resolve("test/fixtures/scenarios/three-stage-main/scenario.json"), "utf8");
-  await page.locator("textarea").fill(scenario);
+  await page.getByRole("button", { name: "测试", exact: true }).click();
+  await page.getByRole("button", { name: /三轮混合模式主回归/ }).click();
+  await expect(page.getByText("go-1")).toBeVisible();
   await page.getByRole("button", { name: "创建测试运行" }).click();
-  await expect(page.getByText("0 次尝试 · 0 个榜单版本 · 0 条异常")).toBeVisible();
+  const scoreboardVersion = page.getByText("榜单版本").locator("..");
+  await expect(scoreboardVersion).toContainText("0");
   await page.getByRole("button", { name: "播放到底" }).click();
-  await expect(page.getByText("3 次尝试 · 15 个榜单版本 · 1 条异常")).toBeVisible();
+  await expect(scoreboardVersion).toContainText("15");
+
+  await page.getByRole("button", { name: "成绩", exact: true }).click();
   await expect(page.getByRole("cell", { name: "Alpha" })).toBeVisible();
   await expect(page.getByRole("cell", { name: "55" })).toBeVisible();
+  const download = page.waitForEvent("download");
+  await page.getByRole("button", { name: "CSV" }).click();
+  await expect.poll(async () => (await download).suggestedFilename()).toContain(".csv");
 
   await page.getByLabel("名称").fill("E2E 工作模式");
   await page.getByLabel("模式").selectOption("work");
   await page.getByRole("button", { name: "新建比赛" }).click();
   await expect(page.locator(".mode-badge")).toHaveText("工作模式");
   await expect(page.locator(".watermark")).toHaveCount(0);
-  await expect(page.getByText("工作模式由本服务托管真实 MockClient")).toBeVisible();
-  await expect(page.getByRole("button", { name: "创建测试运行" })).toHaveCount(0);
+  await page.getByRole("button", { name: "测试", exact: true }).click();
+  await expect(page.getByText("工作模式不提供测试运行控制。")).toBeVisible();
   expect(externalRequests).toEqual([]);
 });

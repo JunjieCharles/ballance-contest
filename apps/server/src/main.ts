@@ -7,6 +7,7 @@ const bootstrapToken = randomBytes(32).toString("base64url");
 const effectiveBootstrapToken = process.env.BALLANCE_BOOTSTRAP_TOKEN ?? bootstrapToken;
 const appPromise = buildApp({
   bootstrapToken: effectiveBootstrapToken,
+  ...(process.env.BALLANCE_DATA_ROOT ? { dataRoot: process.env.BALLANCE_DATA_ROOT } : {}),
   ...(process.env.BALLANCE_DEV_SHUTDOWN_TOKEN
     ? { devShutdown: { token: process.env.BALLANCE_DEV_SHUTDOWN_TOKEN, onShutdown: async () => (await appPromise).close() } }
     : {})
@@ -24,5 +25,10 @@ try {
   }
 } catch (error) {
   app.log.error(error);
+  if (error && typeof error === "object" && "code" in error && error.code === "EADDRINUSE") {
+    console.error("启动失败：本机端口 32113 已被占用。请关闭已经运行的控制台或占用该端口的程序后重试。");
+  } else {
+    console.error("启动失败：", error);
+  }
   process.exitCode = 1;
 }

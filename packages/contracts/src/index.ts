@@ -57,6 +57,284 @@ export type HealthResponse = Static<typeof HealthResponseSchema>;
 export const StageModeSchema = Type.Union([Type.Literal("SR"), Type.Literal("HS")]);
 export type StageMode = Static<typeof StageModeSchema>;
 
+export type CompetitionLifecycleStatus =
+  | "draft"
+  | "published"
+  | "lobby"
+  | "preparing"
+  | "ready"
+  | "countdown"
+  | "running"
+  | "tail-intake"
+  | "review"
+  | "finished"
+  | "archived"
+  | "paused";
+
+export type ContestType = "small" | "large" | "custom";
+
+export interface ParticipantView {
+  id: string;
+  displayName: string;
+  role: "participant" | "staff" | "observer";
+  connectionIds: readonly string[];
+  online: boolean;
+  currentStageStatus: "not-started" | "practice" | "waiting" | "running" | "finished" | "dnf" | "review";
+  notes?: string;
+}
+
+export interface ScoringConfig {
+  contestType: ContestType;
+  points: readonly number[];
+  minimumScoringPlace: number;
+  allowNegative: boolean;
+}
+
+export interface StageConfig {
+  id: string;
+  order: number;
+  label: string;
+  level: number;
+  mode: StageMode;
+  timeLimitMs: number;
+  scoring: readonly number[];
+  minimumScoringPlace: number;
+  plannedStartAt?: string;
+}
+
+export interface FlowPolicy {
+  announcementLeadMs: number;
+  delayLimitMs: number;
+  reconnectStableMs: number;
+  readyBufferMs: number;
+  protectionWindowMs: number;
+  intermissionMs: number;
+  groupDisconnectThreshold: number;
+}
+
+export interface NotificationTemplates {
+  bulletin: string;
+  ready: string;
+  delay: string;
+  restart: string;
+  stageComplete: string;
+  nextStage: string;
+  competitionComplete: string;
+}
+
+export interface CompetitionConfig {
+  name: string;
+  date: string;
+  timezone: string;
+  refereeName: string;
+  loginName: string;
+  server: string;
+  contestType: ContestType;
+  scoring: ScoringConfig;
+  flow: FlowPolicy;
+  notifications: NotificationTemplates;
+  stages: readonly StageConfig[];
+  participants: readonly ParticipantView[];
+}
+
+export interface CompetitionRecordView {
+  id: string;
+  name: string;
+  mode: CompetitionMode;
+  status: CompetitionLifecycleStatus;
+  stateVersion: number;
+  capabilities: Capabilities;
+  updatedAt: string;
+  activeRunId?: string;
+}
+
+export interface CommandRecordView {
+  id: string;
+  actionType: string;
+  status: "queued" | "sent" | "acknowledged" | "failed" | "timed_out" | "uncertain" | "simulated";
+  createdAt: string;
+  updatedAt: string;
+  command?: string;
+  responseLine?: string;
+  simulated?: boolean;
+}
+
+export interface RuntimeSnapshot {
+  phase: string;
+  stateVersion: number;
+  mode: CompetitionMode;
+  automationEnabled: boolean;
+  currentStageId?: string;
+  plannedReadyAtMs?: number;
+  blockers: readonly { code: string; severity: "warning" | "critical"; suggestion: string; autoRecoverable: boolean; participantId?: string }[];
+  waitingParticipants: readonly string[];
+  attempts: readonly unknown[];
+  incidents: readonly unknown[];
+  rejectedResults: readonly unknown[];
+  commands: readonly CommandRecordView[];
+}
+
+export interface ScoreboardVersionView {
+  id: string;
+  version: number;
+  triggerSourceId: string;
+  stageId: string;
+  entries: readonly {
+    rank: number;
+    playerId: string;
+    displayName: string;
+    points: number;
+    change: number | null;
+    stages: Readonly<Record<string, unknown>>;
+  }[];
+  deterministicHash: string;
+}
+
+export interface TestScenarioSummary {
+  id: string;
+  name: string;
+  players: number;
+  stages: number;
+  events: number;
+  expectedScoreboardVersions: number;
+}
+
+export interface TestRunSnapshot {
+  runId: string;
+  scenario: TestScenarioSummary;
+  nextEventIndex: number;
+  totalEvents: number;
+  engine: {
+    attempts: readonly unknown[];
+    scoreboardVersions: readonly ScoreboardVersionView[];
+    anomalies: readonly unknown[];
+    currentScoreboard: ScoreboardVersionView["entries"];
+  };
+  automation: RuntimeSnapshot;
+}
+
+export interface CompetitionSnapshot {
+  competition: CompetitionRecordView;
+  config: CompetitionConfig;
+  publishedConfig?: CompetitionConfig;
+  runtime: RuntimeSnapshot;
+  scoreboardVersions: readonly ScoreboardVersionView[];
+  currentScoreboard: ScoreboardVersionView["entries"];
+  testRun?: TestRunSnapshot;
+  archives: readonly { version: number; directory: string; packagePath: string; manifestHash: string; createdAt: string }[];
+}
+
+export type ConfirmationKind = "restart" | "manual-action" | "manual-go" | "scoreboard-override" | "high-risk";
+
+export interface ConfirmationSummary {
+  token: string;
+  kind: ConfirmationKind;
+  expiresAt: string;
+  target: string;
+  stateVersion: number;
+  impactHash: string;
+  summary: string;
+}
+
+export interface ScoreboardOverrideInput {
+  playerId: string;
+  stageId?: string;
+  displayName?: string;
+  totalPoints?: number;
+  stage?: {
+    status?: "finished" | "dnf";
+    place?: number;
+    points?: number;
+    score?: number;
+    elapsedMs?: number;
+    reason?: string;
+    includeInTotal?: boolean;
+  };
+  rankPolicy?: "tie" | "shift";
+  actor: string;
+  reason: string;
+  evidence?: string;
+  confirmationToken: string;
+  impactHash: string;
+}
+
+export type CompetitionAction =
+  | { type: "announcement"; text: string }
+  | { type: "ready" }
+  | { type: "cheat-off" }
+  | { type: "manual-go"; confirmationToken: string; impactHash: string; reason: string }
+  | { type: "reschedule"; plannedReadyAt: string; confirmationToken: string; impactHash: string; reason: string }
+  | { type: "extend-wait"; milliseconds: number; confirmationToken: string; impactHash: string; reason: string }
+  | { type: "end-stage"; confirmationToken: string; impactHash: string; reason: string }
+  | { type: "restart"; incidentId: string; confirmationToken: string; impactHash: string; reason: string }
+  | { type: "void-attempt"; attemptId: string; confirmationToken: string; impactHash: string; reason: string }
+  | { type: "restore-attempt"; attemptId: string; confirmationToken: string; impactHash: string; reason: string }
+  | { type: "mark-dnf"; participantId: string; stageId?: string; confirmationToken: string; impactHash: string; reason: string }
+  | { type: "participant-associate"; participantId: string; connectionId: string; reason: string }
+  | { type: "participant-split"; connectionId: string; reason: string }
+  | { type: "participant-edit"; participantId: string; displayName?: string; notes?: string; reason: string }
+  | ({ type: "scoreboard-override" } & ScoreboardOverrideInput)
+  | { type: "kick"; playerName: string; confirmationToken: string; impactHash: string; reason: string }
+  | { type: "crash"; playerName: string; confirmationToken: string; impactHash: string; reason: string }
+  | { type: "raw-command"; command: string; confirmationToken: string; impactHash: string; reason: string };
+
+export const SMALL_SCORING = [20, 15, 12, 10, 8, 6, 5, 4, 3, 2, 1, 1, 1, 1, 1] as const;
+export const LARGE_SCORING = [30, 24, 21, 18, 16, 14, 12, 10, 8, 6, 5, 4, 3, 2, 1] as const;
+
+export const defaultFlowPolicy = (): FlowPolicy => ({
+  announcementLeadMs: 5 * 60_000,
+  delayLimitMs: 5 * 60_000,
+  reconnectStableMs: 15_000,
+  readyBufferMs: 15_000,
+  protectionWindowMs: 15_000,
+  intermissionMs: 3 * 60_000,
+  groupDisconnectThreshold: 2
+});
+
+export const defaultNotifications = (): NotificationTemplates => ({
+  bulletin: "{stage} {mode} 将于 {time} 开始，请选手准备。",
+  ready: "{stage} {mode} Ready，请关闭 cheat 并回到起点。",
+  delay: "等待 {player} 重连，剩余 {remaining}。",
+  restart: "本轮因 {reason} 重赛，请等待裁判重新发令。",
+  stageComplete: "{stage} 已进入成绩接收/结算。",
+  nextStage: "下一轮 {stage} Ready 计划于 {time}。",
+  competitionComplete: "比赛结束，成绩进入复核。"
+});
+
+export const defaultSrStages = (scoring: readonly number[] = SMALL_SCORING, minimumScoringPlace = 15): StageConfig[] =>
+  Array.from({ length: 13 }, (_unused, index) => {
+    const level = index + 1;
+    return {
+      id: `sr-${level}`,
+      order: level,
+      label: `SR ${level}`,
+      level,
+      mode: "SR" as const,
+      timeLimitMs: level === 13 ? 15 * 60_000 : 10 * 60_000,
+      scoring,
+      minimumScoringPlace
+    };
+  });
+
+export const createDefaultCompetitionConfig = (name: string): CompetitionConfig => {
+  const scoring: ScoringConfig = { contestType: "small", points: SMALL_SCORING, minimumScoringPlace: 15, allowNegative: false };
+  const now = new Date();
+  return {
+    name,
+    date: now.toISOString().slice(0, 10),
+    timezone: "Asia/Shanghai",
+    refereeName: "ContestConsole",
+    loginName: "*ContestConsole",
+    server: "1.bmmo.win",
+    contestType: "small",
+    scoring,
+    flow: defaultFlowPolicy(),
+    notifications: defaultNotifications(),
+    stages: defaultSrStages(scoring.points, scoring.minimumScoringPlace),
+    participants: []
+  };
+};
+
 export const ScenarioPlayerSchema = Type.Object({
   id: Type.String({ minLength: 1 }),
   displayName: Type.String({ minLength: 1 }),

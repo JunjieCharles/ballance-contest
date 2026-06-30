@@ -1,16 +1,22 @@
 import { existsSync, mkdirSync } from "node:fs";
-import { resolve } from "node:path";
+import { join, resolve } from "node:path";
 import staticPlugin from "@fastify/static";
 import websocket from "@fastify/websocket";
-import { HealthResponseSchema, type HealthResponse } from "@ballance/contracts";
+import {
+  HealthResponseSchema,
+  type CompetitionAction,
+  type CompetitionConfig,
+  type HealthResponse,
+  type ScoreboardOverrideInput
+} from "@ballance/contracts";
 import { APPLICATION_VERSION } from "@ballance/core";
-import Fastify, { type FastifyInstance, type FastifyRequest } from "fastify";
+import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from "fastify";
 import type { WebSocket } from "ws";
 import { CompetitionService, ServiceError } from "./competition-service.js";
 import { createCompetitionArchive } from "./archive.js";
 import { createScoreboardExports } from "./scoreboard-export.js";
 import { SessionManager, type LocalSession } from "./session.js";
-import { defaultDataRoot } from "./storage/database.js";
+import { defaultDataRoot, openDatabase } from "./storage/database.js";
 
 export interface BuildAppOptions {
   bootstrapToken: string;
@@ -27,10 +33,15 @@ const bearer = (request: FastifyRequest): string | undefined => {
 
 export const buildApp = async (options: BuildAppOptions): Promise<FastifyInstance> => {
   const app = Fastify({ logger: false });
-  const service = options.service ?? new CompetitionService();
   const dataRoot = resolve(options.dataRoot ?? defaultDataRoot());
+  const database = options.service ? undefined : openDatabase(join(dataRoot, "console.sqlite"));
+  const service = options.service ?? new CompetitionService(undefined, { ...(database ? { database } : {}), dataRoot });
   const sessions = new SessionManager(options.bootstrapToken);
   await app.register(websocket);
+  app.addHook("onClose", async () => {
+    service.close();
+    database?.close();
+  });
 
   const requireSession = (request: FastifyRequest, control = false): LocalSession => {
     const origin = request.headers.origin;
@@ -52,6 +63,37 @@ export const buildApp = async (options: BuildAppOptions): Promise<FastifyInstanc
     }
     void reply.status(500).send({ error: { code: "INTERNAL_ERROR", message: "内部错误" } });
   });
+
+  const sendCompetitionExport = (
+    competitionId: string,
+    format: string,
+    requestedVersion: number | undefined,
+    reply: FastifyReply
+  ) => {
+    const fixed = service.getLatestScoreboard(competitionId, requestedVersion);
+    const competition = service.get(competitionId);
+    const snapshot = service.snapshot(competitionId);
+    const bundle = createScoreboardExports({
+      competitionName: competition.name,
+      mode: competition.mode,
+      version: fixed.version,
+      generatedAt: new Date().toISOString(),
+      entries: fixed.entries,
+      scoringRules: snapshot.config.stages.map((stage) => ({ stage: stage.label, rule: stage.scoring.join("/") }))
+    });
+    const formats = {
+      html: { contentType: "text/html; charset=utf-8", body: bundle.html },
+      tsv: { contentType: "text/tab-separated-values; charset=utf-8", body: bundle.tsv },
+      csv: { contentType: "text/csv; charset=utf-8", body: bundle.csv },
+      xlsx: { contentType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", body: bundle.xlsx }
+    } as const;
+    const selected = formats[format as keyof typeof formats];
+    if (!selected) throw new ServiceError("VALIDATION_FAILED", "不支持的导出格式", 400);
+    const encodedName = encodeURIComponent(`${bundle.basename}.${format}`);
+    return reply.header("Content-Type", selected.contentType)
+      .header("Content-Disposition", `attachment; filename="scoreboard-v${fixed.version}.${format}"; filename*=UTF-8''${encodedName}`)
+      .send(selected.body);
+  };
 
   app.get<{ Reply: HealthResponse }>("/api/v1/health", { schema: { response: { 200: HealthResponseSchema } } }, async () => ({
     status: "ok", version: APPLICATION_VERSION, now: new Date().toISOString(), modes: ["work", "test"]
@@ -75,18 +117,70 @@ export const buildApp = async (options: BuildAppOptions): Promise<FastifyInstanc
     requireSession(request, true);
     return { data: service.create(request.body) };
   });
+  app.get("/api/v1/test-scenarios", async (request) => {
+    requireSession(request);
+    return { data: service.listTestScenarios() };
+  });
+  app.get<{ Params: { scenarioId: string } }>("/api/v1/test-scenarios/:scenarioId", async (request) => {
+    requireSession(request);
+    return { data: service.getTestScenario(request.params.scenarioId) };
+  });
   app.get<{ Params: { competitionId: string } }>("/api/v1/competitions/:competitionId", async (request) => {
     requireSession(request);
     return { data: service.get(request.params.competitionId) };
+  });
+  app.get<{ Params: { competitionId: string } }>("/api/v1/competitions/:competitionId/snapshot", async (request) => {
+    requireSession(request);
+    return { data: service.snapshot(request.params.competitionId) };
+  });
+  app.patch<{ Params: { competitionId: string }; Body: Partial<CompetitionConfig> & { expectedStateVersion: number; idempotencyKey: string } }>("/api/v1/competitions/:competitionId/draft", async (request) => {
+    requireSession(request, true);
+    return { data: service.updateDraft(request.params.competitionId, request.body) };
   });
   app.post<{ Params: { competitionId: string }; Body: { expectedStateVersion: number; idempotencyKey: string } }>("/api/v1/competitions/:competitionId/publish", async (request) => {
     requireSession(request, true);
     return { data: service.publish(request.params.competitionId, request.body.expectedStateVersion, request.body.idempotencyKey) };
   });
+  app.post<{ Params: { competitionId: string } }>("/api/v1/competitions/:competitionId/work/start", async (request) => {
+    requireSession(request, true);
+    return { data: service.startWorkMode(request.params.competitionId) };
+  });
+  app.post<{ Params: { competitionId: string }; Body: { runId?: string; readyInMs?: number } }>("/api/v1/competitions/:competitionId/automation/enable", async (request) => {
+    requireSession(request, true);
+    return { data: await service.enableAutomation(request.params.competitionId, request.body ?? {}) };
+  });
+  app.post<{ Params: { competitionId: string } }>("/api/v1/competitions/:competitionId/automation/pause", async (request) => {
+    requireSession(request, true);
+    return { data: service.pauseAutomation(request.params.competitionId) };
+  });
+  app.post<{ Params: { competitionId: string }; Body: { kind: "restart" | "manual-action" | "manual-go" | "scoreboard-override" | "high-risk"; target?: string } }>("/api/v1/competitions/:competitionId/confirmations", async (request) => {
+    requireSession(request, true);
+    return { data: service.createConfirmation(request.params.competitionId, request.body) };
+  });
+  app.post<{ Params: { competitionId: string }; Body: { expectedStateVersion: number; idempotencyKey: string; action: CompetitionAction } }>("/api/v1/competitions/:competitionId/actions", async (request) => {
+    requireSession(request, true);
+    return { data: await service.performAction(request.params.competitionId, request.body) };
+  });
+  app.get<{ Params: { competitionId: string }; Querystring: { version?: string } }>("/api/v1/competitions/:competitionId/scoreboard", async (request) => {
+    requireSession(request);
+    const version = request.query.version === undefined ? undefined : Number(request.query.version);
+    return { data: service.getLatestScoreboard(request.params.competitionId, version) };
+  });
+  app.post<{
+    Params: { competitionId: string };
+    Body: ScoreboardOverrideInput & { expectedStateVersion: number; idempotencyKey: string };
+  }>("/api/v1/competitions/:competitionId/scoreboard/overrides", async (request) => {
+    requireSession(request, true);
+    return { data: service.applyScoreboardOverride(request.params.competitionId, request.body) };
+  });
 
   app.post<{ Params: { competitionId: string }; Body: unknown }>("/api/v1/competitions/:competitionId/test-runs", async (request) => {
     requireSession(request, true);
     return { data: service.createTestRun(request.params.competitionId, request.body) };
+  });
+  app.post<{ Params: { competitionId: string }; Body: { scenarioId: string } }>("/api/v1/competitions/:competitionId/test-runs/from-scenario", async (request) => {
+    requireSession(request, true);
+    return { data: service.createTestRunFromScenario(request.params.competitionId, request.body.scenarioId) };
   });
   app.post<{ Params: { competitionId: string; runId: string } }>("/api/v1/competitions/:competitionId/test-runs/:runId/step", async (request) => {
     requireSession(request, true);
@@ -167,6 +261,49 @@ export const buildApp = async (options: BuildAppOptions): Promise<FastifyInstanc
       exports
     });
     service.journal.append({ type: "test-run.archived", competitionId: fixed.competition.id, data: { runId: request.params.runId, version: request.body.version, manifestHash: archive.manifestHash } });
+    service.recordArchive(fixed.competition.id, archive);
+    return { data: { directory: archive.directory, packagePath: archive.packagePath, manifestHash: archive.manifestHash } };
+  });
+  app.get<{ Params: { competitionId: string; format: string }; Querystring: { version?: string } }>("/api/v1/competitions/:competitionId/exports/:format", async (request, reply) => {
+    requireSession(request, false);
+    const requestedVersion = request.query.version === undefined ? undefined : Number(request.query.version);
+    return sendCompetitionExport(request.params.competitionId, request.params.format, requestedVersion, reply);
+  });
+  app.post<{
+    Params: { competitionId: string; format: string };
+    Body: { version?: number };
+  }>("/api/v1/competitions/:competitionId/exports/:format", async (request, reply) => {
+    requireSession(request, true);
+    return sendCompetitionExport(request.params.competitionId, request.params.format, request.body.version, reply);
+  });
+  app.post<{ Params: { competitionId: string }; Body: { version: number } }>("/api/v1/competitions/:competitionId/archive", async (request) => {
+    requireSession(request, true);
+    const competition = service.get(request.params.competitionId);
+    const snapshot = service.snapshot(request.params.competitionId);
+    const fixed = service.getLatestScoreboard(request.params.competitionId);
+    const generatedAt = new Date().toISOString();
+    const exports = createScoreboardExports({
+      competitionName: competition.name, mode: competition.mode, version: fixed.version, generatedAt, entries: fixed.entries,
+      scoringRules: snapshot.config.stages.map((stage) => ({ stage: stage.label, rule: stage.scoring.join("/") }))
+    });
+    mkdirSync(dataRoot, { recursive: true });
+    const archive = createCompetitionArchive({
+      dataRoot, sourceRoot: dataRoot,
+      competition: { id: competition.id, name: competition.name, mode: competition.mode, timezone: snapshot.config.timezone },
+      version: request.body.version, generatedAt, applicationVersion: APPLICATION_VERSION, parserVersion: "1",
+      mockClientVersion: competition.mode === "test" ? "test-double" : "managed-mockclient",
+      sourceFiles: [],
+      records: {
+        "config/config.json": snapshot.config,
+        "runtime/snapshot.json": snapshot.runtime,
+        "results/scoreboard.json": fixed,
+        "audit/commands.json": snapshot.runtime.commands,
+        "audit/incidents.json": snapshot.runtime.incidents
+      },
+      exports
+    });
+    service.recordArchive(competition.id, archive);
+    service.journal.append({ type: "competition.archived", competitionId: competition.id, data: { version: request.body.version, manifestHash: archive.manifestHash } });
     return { data: { directory: archive.directory, packagePath: archive.packagePath, manifestHash: archive.manifestHash } };
   });
 

@@ -23,6 +23,7 @@ export class EventJournal {
   }
 
   public after(sequence: number): readonly JournalEvent[] | null {
+    if (sequence > this.sequence) return null;
     const first = this.events[0]?.sequence ?? this.sequence + 1;
     if (sequence < first - 1) return null;
     return this.events.filter((event) => event.sequence > sequence);

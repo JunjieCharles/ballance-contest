@@ -390,7 +390,18 @@ export class CompetitionController {
       this.bump();
       return;
     }
-    if (action.kind === "go") this.startAttempt();
+    if (action.kind === "go" && this.phase !== "running") this.startAttempt();
+    this.bump();
+  }
+
+  public observeAuthoritativeGo(stageId = this.stage.id): void {
+    const stageIndex = this.stages.findIndex((stage) => stage.id === stageId);
+    if (stageIndex < 0) throw new Error("UNKNOWN_STAGE");
+    const current = this.currentAttempt;
+    if (current?.stageId === stageId && current.intakeOpen && this.phase === "running") return;
+    if (current?.intakeOpen) this.closeIntake(current);
+    this.stageIndex = stageIndex;
+    this.startAttempt();
     this.bump();
   }
 
@@ -414,6 +425,69 @@ export class CompetitionController {
     });
     this.bump();
     return "accepted";
+  }
+
+  public reschedule(plannedReadyAtMs: number): void {
+    if (!Number.isFinite(plannedReadyAtMs)) throw new Error("INVALID_READY_TIME");
+    if (this.phase === "running" || this.phase === "tail-intake" || this.phase === "review") throw new Error("RESCHEDULE_NOT_AVAILABLE");
+    this.automationEnabled = true;
+    this.phase = this.restartPending ? "restart-preparing" : "preparing";
+    this.plannedReadyAtMs = plannedReadyAtMs;
+    this.bump();
+  }
+
+  public extendWait(milliseconds: number): void {
+    if (!Number.isFinite(milliseconds) || milliseconds <= 0) throw new Error("INVALID_WAIT_EXTENSION");
+    if (this.phase === "pre-start-wait" && this.waitDeadlineAtMs !== undefined) this.waitDeadlineAtMs += milliseconds;
+    else if (this.plannedReadyAtMs !== undefined) this.plannedReadyAtMs += milliseconds;
+    else throw new Error("WAIT_EXTENSION_NOT_AVAILABLE");
+    this.bump();
+  }
+
+  public endStage(reason: string): void {
+    if (!reason.trim()) throw new Error("END_STAGE_REASON_REQUIRED");
+    const attempt = this.currentAttempt;
+    if (!attempt?.intakeOpen) throw new Error("END_STAGE_NOT_AVAILABLE");
+    for (const participantId of this.participantIds) {
+      if (!this.absent.has(participantId) && !attempt.results.some((result) => result.playerId === participantId)) {
+        attempt.results.push({
+          playerId: participantId,
+          status: "dnf",
+          sourceId: `manual-end:${attempt.id}:${participantId}`,
+          receivedAtMs: this.clock.now(),
+          reason: reason.trim()
+        });
+      }
+    }
+    this.closeIntake(attempt);
+    if (this.stageIndex === this.stages.length - 1) this.phase = "review";
+    else {
+      this.nextStagePending = true;
+      this.plannedReadyAtMs = this.clock.now() + this.policy.intermissionMs;
+      this.phase = "tail-intake";
+    }
+    this.bump();
+  }
+
+  public voidAttempt(attemptId: string): void {
+    const attempt = this.attempts.find((candidate) => candidate.id === attemptId && !candidate.voided);
+    if (!attempt) throw new Error("ATTEMPT_NOT_FOUND");
+    attempt.voided = true;
+    this.closeIntake(attempt);
+    this.automationEnabled = false;
+    this.phase = "paused";
+    this.bump();
+  }
+
+  public restoreAttempt(attemptId: string): void {
+    const attempt = this.attempts.find((candidate) => candidate.id === attemptId && candidate.voided);
+    if (!attempt) throw new Error("ATTEMPT_NOT_FOUND");
+    if (this.attempts.some((candidate) => candidate.id !== attemptId && candidate.stageId === attempt.stageId && !candidate.voided)) {
+      throw new Error("ATTEMPT_RESTORE_CONFLICT");
+    }
+    attempt.voided = false;
+    this.phase = "review";
+    this.bump();
   }
 
   public issueRestartConfirmation(incidentId: string, ttlMs = 60_000): { token: string; impactHash: string; expiresAtMs: number } {

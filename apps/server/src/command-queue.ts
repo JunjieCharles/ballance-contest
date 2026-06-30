@@ -10,7 +10,9 @@ export type CommandAction =
   | { type: "go"; map: string; mode: "sr" | "hs" }
   | { type: "force-next-restart" }
   | { type: "scores"; map: string; mode: "sr" | "hs" }
-  | { type: "kick"; playerName: string; reason: string };
+  | { type: "kick"; playerName: string; reason: string }
+  | { type: "crash"; playerName: string; reason: string }
+  | { type: "raw"; command: string };
 
 export interface CommandRecord {
   id: string;
@@ -38,6 +40,8 @@ const encode = (action: CommandAction): { command: string; critical: boolean; ac
     case "force-next-restart": return { command: "forcenextrestart", critical: true, acknowledge: (line) => /force.*restart|success/i.test(line) };
     case "scores": return { command: `scores ${action.mode} ${cleanText(action.map)}`, critical: false, acknowledge: (line) => /place|score|ranking/i.test(line) };
     case "kick": return { command: `kick ${cleanText(action.playerName)} ${cleanText(action.reason)}`, critical: true, acknowledge: (line) => /kick|disconnect|success/i.test(line) };
+    case "crash": return { command: `crash ${cleanText(action.playerName)} ${cleanText(action.reason)}`, critical: true, acknowledge: (line) => /crash|disconnect|success/i.test(line) };
+    case "raw": return { command: cleanText(action.command), critical: true, acknowledge: (line) => /success|error|warning|ready|go|disconnect/i.test(line) };
   }
 };
 

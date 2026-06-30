@@ -16,4 +16,10 @@ describe("EventJournal", () => {
     journal.append({ type: "three", data: 3 });
     expect(journal.after(0)).toBeNull();
   });
+
+  it("requires a snapshot when the client cursor is ahead after a server restart", () => {
+    const journal = new EventJournal();
+    journal.append({ type: "fresh-server", data: 1 });
+    expect(journal.after(20)).toBeNull();
+  });
 });

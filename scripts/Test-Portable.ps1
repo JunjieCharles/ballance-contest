@@ -66,13 +66,24 @@ try {
     $artifact | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $artifactFullPath -Encoding utf8
     Write-Host "Portable smoke test passed with bundled $($artifact.bundledNode)"
 } finally {
-    if ($null -ne $process -and -not $process.HasExited) { Stop-Process -Id $process.Id -Force }
+    if ($null -ne $process -and -not $process.HasExited) {
+        Stop-Process -Id $process.Id -Force
+        Wait-Process -Id $process.Id -Timeout 10 -ErrorAction SilentlyContinue
+    }
     $env:Path = $oldPath
     $env:LOCALAPPDATA = $oldLocalAppData
     $env:BALLANCE_BOOTSTRAP_TOKEN = $oldBootstrap
     $resolvedTemp = [IO.Path]::GetFullPath($temporaryRoot)
     $systemTemp = [IO.Path]::GetFullPath([IO.Path]::GetTempPath())
     if ($resolvedTemp.StartsWith($systemTemp, [StringComparison]::OrdinalIgnoreCase) -and (Test-Path -LiteralPath $resolvedTemp)) {
-        Remove-Item -LiteralPath $resolvedTemp -Recurse -Force
+        for ($attempt = 0; $attempt -lt 20; $attempt += 1) {
+            try {
+                Remove-Item -LiteralPath $resolvedTemp -Recurse -Force
+                break
+            } catch {
+                if ($attempt -eq 19) { throw }
+                Start-Sleep -Milliseconds 100
+            }
+        }
     }
 }
