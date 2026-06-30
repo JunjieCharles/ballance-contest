@@ -83,6 +83,11 @@ export interface ParticipantView {
   notes?: string;
 }
 
+export interface PlayerAlias {
+  playerId: string;
+  displayName: string;
+}
+
 export interface ScoringConfig {
   contestType: ContestType;
   points: readonly number[];
@@ -133,6 +138,7 @@ export interface CompetitionConfig {
   flow: FlowPolicy;
   notifications: NotificationTemplates;
   stages: readonly StageConfig[];
+  playerAliases: readonly PlayerAlias[];
   participants: readonly ParticipantView[];
 }
 
@@ -152,9 +158,6 @@ export const validateCompetitionConfigForPublish = (config: CompetitionConfig): 
   for (const stage of config.stages) {
     if (stage.level < 0 || stage.level > 13) issues.push(`${stage.label} 关卡号必须在 0..13`);
     if (stage.scoring.length === 0) issues.push(`${stage.label} 缺少积分规则`);
-  }
-  if (config.participants.filter((participant) => participant.role === "participant").length === 0) {
-    issues.push("至少需要一名参赛者");
   }
   return issues;
 };
@@ -295,6 +298,7 @@ export type CompetitionAction =
   | { type: "participant-associate"; participantId: string; connectionId: string; reason: string }
   | { type: "participant-split"; connectionId: string; reason: string }
   | { type: "participant-edit"; participantId: string; displayName?: string; notes?: string; reason: string }
+  | { type: "player-alias-upsert"; playerId: string; displayName: string; reason: string }
   | ({ type: "scoreboard-override" } & ScoreboardOverrideInput)
   | { type: "kick"; playerName: string; confirmationToken: string; impactHash: string; reason: string }
   | { type: "crash"; playerName: string; confirmationToken: string; impactHash: string; reason: string }
@@ -352,6 +356,7 @@ export const createDefaultCompetitionConfig = (name: string): CompetitionConfig 
     flow: defaultFlowPolicy(),
     notifications: defaultNotifications(),
     stages: defaultSrStages(scoring.points, scoring.minimumScoringPlace),
+    playerAliases: [],
     participants: []
   };
 };

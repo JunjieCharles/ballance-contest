@@ -11,12 +11,16 @@ describe("parseLogLine", () => {
   });
 
   it("parses finishes, DNF, login, disconnect and cheat", () => {
+    expect(parseLogLine("[06-29 11:21:00] 2 player(s) online:", context).event)
+      .toMatchObject({ type: "player-list-start", count: 2 });
     expect(parseLogLine("[06-29 11:21:00] (#12, Player) finished Level 01 in 2nd place (score: 1234; real time: 00:01:02.345).", context).event)
       .toMatchObject({ type: "finish", connectionId: "12", playerName: "Player", level: 1, serverPlace: 2, score: 1234, elapsedMs: 62_345 });
     expect(parseLogLine("[06-29 11:21:01] (#12, Player) did not finish Level 01 (furthest reach: sector 4).", context).event)
       .toMatchObject({ type: "dnf", furthestSector: 4 });
     expect(parseLogLine("[06-29 11:21:02] Player (#12) logged in with cheat mode off.", context).event)
       .toMatchObject({ type: "player-login", cheat: false });
+    expect(parseLogLine("[06-29 11:21:02] Silent_Snow (#42) [CHEAT]", context).event)
+      .toMatchObject({ type: "player-listed", connectionId: "42", playerName: "Silent_Snow", cheat: true });
     expect(parseLogLine("[06-29 11:21:03] Player (#12) disconnected.", context).event.type).toBe("player-disconnect");
     expect(parseLogLine("[06-29 11:21:04] (12, Player) turned cheat on.", context).event)
       .toMatchObject({ type: "cheat-changed", enabled: true });

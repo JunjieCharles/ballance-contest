@@ -39,6 +39,7 @@ export interface AutomationPolicy {
 export interface AutomationConfiguration {
   competitionId: string;
   participants: readonly string[];
+  dynamicParticipants?: boolean;
   stages: readonly AutomationStage[];
   policy?: Partial<AutomationPolicy>;
   confirmationSecret?: string;
@@ -219,7 +220,7 @@ export class CompetitionController {
 
   public constructor(private readonly configuration: AutomationConfiguration, private readonly clock: MonotonicClock) {
     if (configuration.stages.length === 0) throw new Error("At least one stage is required");
-    if (configuration.participants.length === 0) throw new Error("At least one participant is required");
+    if (configuration.participants.length === 0 && !configuration.dynamicParticipants) throw new Error("At least one participant is required");
     this.stages = configuration.stages.map((stage) => ({ ...stage }));
     this.participantIds = new Set(configuration.participants);
     if (this.participantIds.size !== configuration.participants.length) throw new Error("Participant IDs must be unique");
@@ -238,6 +239,19 @@ export class CompetitionController {
 
   private get currentAttempt(): MutableAttempt | undefined {
     return [...this.attempts].reverse().find((attempt) => attempt.stageId === this.stage.id && !attempt.voided);
+  }
+
+  public registerParticipant(participantId: string): boolean {
+    const normalized = participantId.trim();
+    if (!normalized) throw new Error("PARTICIPANT_ID_REQUIRED");
+    if (this.participantIds.has(normalized)) return false;
+    if (!this.configuration.dynamicParticipants) throw new Error("DYNAMIC_PARTICIPANTS_DISABLED");
+    this.participantIds.add(normalized);
+    this.online.set(normalized, true);
+    this.cheat.set(normalized, false);
+    this.stableSince.set(normalized, this.clock.now());
+    this.bump();
+    return true;
   }
 
   public observeConnection(participantId: string, online: boolean): void {
@@ -582,13 +596,14 @@ export class CompetitionController {
     const finished = attempt.results.filter((candidate) => candidate.status === "finished").length;
     const activeCount = this.participantIds.size - this.absent.size;
     if (this.stageIndex === this.stages.length - 1) {
-      if (attempt.results.length >= activeCount) {
+      if (!this.configuration.dynamicParticipants && attempt.results.length >= activeCount) {
         this.closeIntake(attempt);
         this.phase = "review";
       }
       return;
     }
-    if (!this.nextStagePending && (finished >= this.stage.minimumScoringPlace || attempt.results.length >= activeCount)) {
+    const allKnownParticipantsCompleted = !this.configuration.dynamicParticipants && attempt.results.length >= activeCount;
+    if (!this.nextStagePending && (finished >= this.stage.minimumScoringPlace || allKnownParticipantsCompleted)) {
       this.nextStagePending = true;
       this.plannedReadyAtMs = this.clock.now() + this.policy.intermissionMs;
       this.phase = "tail-intake";

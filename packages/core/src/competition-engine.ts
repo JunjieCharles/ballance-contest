@@ -90,6 +90,11 @@ export class CompetitionEngine {
     for (const player of scenario.players) this.playerNames.set(player.id, player.displayName);
   }
 
+  public registerPlayer(playerId: string, displayName = playerId): void {
+    if (!playerId.trim()) throw new Error("PLAYER_ID_REQUIRED");
+    this.playerNames.set(playerId, displayName.trim() || playerId);
+  }
+
   public apply(event: ScenarioEvent): void {
     if (this.seenSources.has(event.sourceId)) {
       this.anomalies.push({ sourceId: event.sourceId, code: "duplicate-event", detail: "Duplicate source event ignored" });
@@ -143,6 +148,7 @@ export class CompetitionEngine {
       this.anomalies.push({ sourceId: event.sourceId, code: "post-completion-result", detail: `${event.stageId}:${event.playerId}` });
       return;
     }
+    if (!this.playerNames.has(event.playerId)) this.registerPlayer(event.playerId);
     this.finishSequence += 1;
     stageResults.set(event.playerId, event.type === "finish"
       ? { playerId: event.playerId, status: "finished", score: event.score, elapsedMs: event.elapsedMs, sourceId: event.sourceId, finishSequence: this.finishSequence }
@@ -177,7 +183,7 @@ export class CompetitionEngine {
       playerId,
       displayName,
       points: 0,
-      placeCounts: Array.from({ length: this.scenario.players.length }, () => 0),
+      placeCounts: Array.from({ length: this.playerNames.size }, () => 0),
       stages: {} as Record<string, StageResult>
     }));
     const byPlayer = new Map(aggregate.map((entry) => [entry.playerId, entry]));

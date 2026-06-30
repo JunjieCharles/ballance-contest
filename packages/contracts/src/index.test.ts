@@ -38,7 +38,7 @@ describe("competition configuration", () => {
 
   it("returns actionable publish issues", () => {
     const config = createDefaultCompetitionConfig("Small Contest");
-    expect(validateCompetitionConfigForPublish(config)).toEqual(["至少需要一名参赛者"]);
+    expect(validateCompetitionConfigForPublish(config)).toEqual([]);
     expect(validateCompetitionConfigForPublish({
       ...config,
       refereeName: "",

@@ -105,6 +105,9 @@ interface WorkRuntime {
   runtime: WorkAutomationRuntime;
   client?: ManagedMockClient;
   mockClientVersion?: string;
+  initialListTimer?: ReturnType<typeof setTimeout>;
+  listTimer?: ReturnType<typeof setInterval>;
+  listReconciliation?: { expected: number; seen: number; onlinePlayerIds: Set<string> };
 }
 
 interface ConfirmationRecord {
@@ -349,18 +352,19 @@ export class CompetitionService {
   public snapshot(id: string): CompetitionSnapshot {
     const competition = this.toRecordView(this.get(id));
     const payload = this.getPayload(id);
+    const config = this.getDraftConfig(id);
     const activeRunId = competition.activeRunId ?? payload.activeRunId;
     const testRun = activeRunId ? this.getTestRunSnapshot(id, activeRunId) : undefined;
     const workRuntime = this.workRuntimes.get(id);
     const workScoreboard = workRuntime?.engine.snapshot().scoreboardVersions.map(scoreboardView) ?? [];
     const testScoreboard = testRun?.engine.scoreboardVersions ?? [];
-    const scoreboardVersions = [
+    const scoreboardVersions = this.applyPlayerAliases(config, [
       ...(competition.mode === "test" ? testScoreboard : workScoreboard),
       ...(payload.scoreboardRevisions ?? [])
-    ];
+    ]);
     return {
       competition,
-      config: this.getDraftConfig(id),
+      config,
       ...(this.getPublishedConfig(id) === undefined ? {} : { publishedConfig: this.getPublishedConfig(id) as CompetitionConfig }),
       runtime: competition.mode === "test"
         ? testRun?.automation ?? automationView("test")
@@ -529,11 +533,7 @@ export class CompetitionService {
   public startWorkMode(competitionId: string): RuntimeSnapshot {
     const competition = this.get(competitionId);
     if (competition.mode !== "work") throw new ServiceError("CAPABILITY_UNSUPPORTED", "测试模式不支持真实 MockClient", 409);
-    const config = this.getPublishedConfig(competitionId);
-    if (!config) throw new ServiceError("STATE_CONFLICT", "请先发布比赛配置", 409);
-    if (config.participants.filter((participant) => participant.role === "participant").length === 0) {
-      throw new ServiceError("VALIDATION_FAILED", "工作模式至少需要一名参赛者", 400);
-    }
+    const config = this.getOperationalWorkConfig(competitionId);
     const existing = this.workRuntimes.get(competitionId);
     if (existing) return automationView("work", existing.controller.snapshot(), this.commandHistory(competitionId));
 
@@ -558,6 +558,7 @@ export class CompetitionService {
     });
     client.start();
     this.workRuntimes.set(competitionId, runtime);
+    this.startParticipantReconciliation(runtime);
     const payload = this.getPayload(competitionId);
     this.savePayload(competitionId, { ...payload, work: { started: true, mockClientVersion } });
     this.journal.append({ type: "work.started", competitionId, data: { mockClientVersion } });
@@ -775,6 +776,8 @@ export class CompetitionService {
 
   public close(): void {
     for (const runtime of this.workRuntimes.values()) {
+      if (runtime.initialListTimer) clearTimeout(runtime.initialListTimer);
+      if (runtime.listTimer) clearInterval(runtime.listTimer);
       void runtime.client?.stop().catch(() => undefined);
     }
   }
@@ -848,11 +851,38 @@ export class CompetitionService {
     return stored ? this.parseStoredConfig(stored.payload) : undefined;
   }
 
+  private getOperationalWorkConfig(competitionId: string): CompetitionConfig {
+    const published = this.getPublishedConfig(competitionId);
+    if (!published) throw new ServiceError("STATE_CONFLICT", "请先发布比赛配置", 409);
+    const operational = this.getDraftConfig(competitionId);
+    return {
+      ...published,
+      playerAliases: operational.playerAliases,
+      participants: operational.participants
+    };
+  }
+
+  private applyPlayerAliases(
+    config: CompetitionConfig,
+    versions: readonly ScoreboardVersionView[]
+  ): ScoreboardVersionView[] {
+    const aliases = new Map(config.playerAliases.map((alias) => [alias.playerId.toLocaleLowerCase("en-US"), alias.displayName]));
+    if (aliases.size === 0) return [...versions];
+    return versions.map((version) => ({
+      ...version,
+      entries: version.entries.map((entry) => ({
+        ...entry,
+        displayName: aliases.get(entry.playerId.toLocaleLowerCase("en-US")) ?? entry.displayName
+      }))
+    }));
+  }
+
   private parseStoredConfig(payload: string): CompetitionConfig {
     const { loginName, ...config } = JSON.parse(payload) as CompetitionConfig & { loginName?: string };
     return {
       ...config,
-      refereeName: normalizeRefereeName(config.refereeName || loginName || "ContestConsole")
+      refereeName: normalizeRefereeName(config.refereeName || loginName || "ContestConsole"),
+      playerAliases: config.playerAliases ?? []
     };
   }
 
@@ -1019,6 +1049,7 @@ export class CompetitionService {
     const controller = new CompetitionController({
       competitionId,
       participants: definition.players.map((player) => player.id),
+      dynamicParticipants: true,
       stages: definition.stages.map((stage) => ({
         id: stage.id,
         map: String(stage.level),
@@ -1041,20 +1072,39 @@ export class CompetitionService {
   }
 
   private makeDetachedWorkRuntime(competitionId: string): WorkRuntime {
-    const config = this.getPublishedConfig(competitionId);
-    if (!config) throw new ServiceError("STATE_CONFLICT", "请先发布比赛配置", 409);
+    const config = this.getOperationalWorkConfig(competitionId);
     const transport: CommandTransport = { write: async () => { throw new Error("MockClient is not running"); } };
     const runtime = this.makeWorkRuntime(competitionId, config, transport);
     this.workRuntimes.set(competitionId, runtime);
     return runtime;
   }
 
+  private startParticipantReconciliation(runtime: WorkRuntime): void {
+    let sequence = 0;
+    const requestList = () => {
+      const phase = runtime.controller.snapshot().phase;
+      if (phase !== "lobby" && phase !== "paused" && phase !== "review") return;
+      sequence += 1;
+      void runtime.commands.enqueue({ type: "list" }, `${runtime.competitionId}:participant-list:${Date.now()}:${sequence}`);
+    };
+    runtime.initialListTimer = setTimeout(requestList, 1_000);
+    runtime.initialListTimer.unref?.();
+    runtime.listTimer = setInterval(requestList, 30_000);
+    runtime.listTimer.unref?.();
+  }
+
   private ingestWorkLine(runtime: WorkRuntime, line: string): void {
     const config = this.getPublishedConfig(runtime.competitionId);
     if (!config) return;
     const parsed = parseLogLine(line, { year: Number(config.date.slice(0, 4)), utcOffsetMinutes: utcOffsetMinutes(config.timezone) });
-    const event = this.domainToScenarioEvent(config, parsed.event);
+    if (parsed.event.type === "player-list-start") this.beginListReconciliation(runtime, parsed.event.count);
+    const event = this.domainToScenarioEvent(runtime.competitionId, config, parsed.event);
     if (event) {
+      if ("playerId" in event) {
+        runtime.controller.registerParticipant(event.playerId);
+        const participant = this.getDraftConfig(runtime.competitionId).participants.find((candidate) => candidate.id === event.playerId);
+        runtime.engine.registerPlayer(event.playerId, participant?.displayName ?? event.playerId);
+      }
       runtime.engine.apply(event);
       if (event.type === "login") runtime.controller.observeConnection(event.playerId, true);
       else if (event.type === "disconnect") runtime.controller.observeConnection(event.playerId, false);
@@ -1062,41 +1112,116 @@ export class CompetitionService {
       else if (event.type === "finish") runtime.controller.recordResult({ stageId: event.stageId, playerId: event.playerId, status: "finished", sourceId: event.sourceId, receivedAtMs: performance.now() });
       else if (event.type === "dnf") runtime.controller.recordResult({ stageId: event.stageId, playerId: event.playerId, status: "dnf", sourceId: event.sourceId, reason: event.reason, receivedAtMs: performance.now() });
       else if (event.type === "cheat") runtime.controller.observeCheat(event.playerId, event.enabled, event.sourceId);
+      if (event.type === "login" && (parsed.event.type === "player-login" || parsed.event.type === "player-listed") && parsed.event.cheat) {
+        runtime.controller.observeCheat(event.playerId, true, event.sourceId);
+      }
       this.saveScoreboards(runtime.competitionId, runtime.engine.snapshot().scoreboardVersions);
     }
+    if (parsed.event.type === "player-listed") this.recordListParticipant(runtime, parsed.event.playerName);
     this.journal.append({ type: "work.log", competitionId: runtime.competitionId, data: parsed });
     this.saveWorkRuntimeSnapshot(runtime);
   }
 
-  private domainToScenarioEvent(config: CompetitionConfig, event: DomainEvent): ScenarioEvent | undefined {
+  private domainToScenarioEvent(competitionId: string, config: CompetitionConfig, event: DomainEvent): ScenarioEvent | undefined {
     const stage = config.stages.find((candidate) => candidate.level === ("level" in event ? event.level : -1));
-    const participant = "connectionId" in event ? this.matchParticipant(config, event.connectionId, "playerName" in event ? event.playerName : "") : undefined;
     switch (event.type) {
       case "player-login":
+      case "player-listed": {
+        const participant = this.observeWorkParticipant(competitionId, event.playerName, event.connectionId, true);
         return participant ? { atMs: Date.parse(event.occurredAt), sourceId: event.sourceId, type: "login", playerId: participant.id, connectionId: event.connectionId } : undefined;
-      case "player-disconnect":
+      }
+      case "player-disconnect": {
+        const participant = this.observeWorkParticipant(competitionId, event.playerName, event.connectionId, false);
         return participant ? { atMs: Date.parse(event.occurredAt), sourceId: event.sourceId, type: "disconnect", playerId: participant.id, connectionId: event.connectionId } : undefined;
+      }
       case "go":
         if (!stage || normalizeRefereeName(event.refereeName) !== normalizeRefereeName(config.refereeName)) return undefined;
         return { atMs: Date.parse(event.occurredAt), sourceId: event.sourceId, type: "go", stageId: stage.id, refereeConnectionId: "work-referee" };
-      case "finish":
+      case "finish": {
+        const participant = this.observeWorkParticipant(competitionId, event.playerName, event.connectionId, true, "finished");
         return stage && participant ? { atMs: Date.parse(event.occurredAt), sourceId: event.sourceId, type: "finish", stageId: stage.id, playerId: participant.id, score: event.score, elapsedMs: event.elapsedMs } : undefined;
-      case "dnf":
+      }
+      case "dnf": {
+        const participant = this.observeWorkParticipant(competitionId, event.playerName, event.connectionId, true, "dnf");
         return stage && participant ? { atMs: Date.parse(event.occurredAt), sourceId: event.sourceId, type: "dnf", stageId: stage.id, playerId: participant.id, reason: event.cheat ? "cheat" : "dnf" } : undefined;
-      case "cheat-changed":
+      }
+      case "cheat-changed": {
+        const participant = this.observeWorkParticipant(competitionId, event.playerName, event.connectionId, true);
         return participant ? { atMs: Date.parse(event.occurredAt), sourceId: event.sourceId, type: "cheat", playerId: participant.id, enabled: event.enabled } : undefined;
+      }
       default:
         return undefined;
     }
   }
 
-  private matchParticipant(config: CompetitionConfig, connectionId: string, rawName: string): ParticipantView | undefined {
-    return config.participants.find((participant) => participant.connectionIds.includes(connectionId))
-      ?? config.participants.find((participant) => participant.displayName.toLocaleLowerCase("en-US") === rawName.toLocaleLowerCase("en-US"));
+  private beginListReconciliation(runtime: WorkRuntime, expected: number): void {
+    runtime.listReconciliation = { expected, seen: 0, onlinePlayerIds: new Set<string>() };
+    if (expected === 0) this.finishListReconciliation(runtime);
+  }
+
+  private recordListParticipant(runtime: WorkRuntime, rawName: string): void {
+    const reconciliation = runtime.listReconciliation;
+    if (!reconciliation) return;
+    reconciliation.seen += 1;
+    const playerId = rawName.trim();
+    if (playerId && !playerId.startsWith("*")) reconciliation.onlinePlayerIds.add(playerId.toLocaleLowerCase("en-US"));
+    if (reconciliation.seen >= reconciliation.expected) this.finishListReconciliation(runtime);
+  }
+
+  private finishListReconciliation(runtime: WorkRuntime): void {
+    const reconciliation = runtime.listReconciliation;
+    if (!reconciliation) return;
+    const config = this.getDraftConfig(runtime.competitionId);
+    const participants = config.participants.map((participant) => {
+      const online = reconciliation.onlinePlayerIds.has(participant.id.toLocaleLowerCase("en-US"));
+      if (participant.online !== online) runtime.controller.observeConnection(participant.id, online);
+      return participant.online === online ? participant : { ...participant, online };
+    });
+    this.upsertConfig(runtime.competitionId, 0, false, { ...config, participants });
+    delete runtime.listReconciliation;
+    this.journal.append({ type: "participants.reconciled", competitionId: runtime.competitionId, data: { online: [...reconciliation.onlinePlayerIds] } });
+  }
+
+  private observeWorkParticipant(
+    competitionId: string,
+    rawName: string,
+    connectionId: string,
+    online: boolean,
+    stageStatus?: ParticipantView["currentStageStatus"]
+  ): ParticipantView | undefined {
+    const playerId = rawName.trim();
+    if (!playerId || playerId.startsWith("*")) return undefined;
+    const config = this.getDraftConfig(competitionId);
+    const normalizedPlayerId = playerId.toLocaleLowerCase("en-US");
+    const existing = config.participants.find((participant) => participant.id.toLocaleLowerCase("en-US") === normalizedPlayerId);
+    const alias = config.playerAliases.find((candidate) => candidate.playerId.toLocaleLowerCase("en-US") === normalizedPlayerId);
+    const participant: ParticipantView = existing
+      ? {
+          ...existing,
+          displayName: alias?.displayName ?? existing.displayName,
+          connectionIds: [...new Set([...existing.connectionIds, connectionId])],
+          online,
+          ...(stageStatus === undefined ? {} : { currentStageStatus: stageStatus })
+        }
+      : {
+          id: playerId,
+          displayName: alias?.displayName ?? playerId,
+          role: "participant",
+          connectionIds: [connectionId],
+          online,
+          currentStageStatus: stageStatus ?? (online ? "waiting" : "not-started")
+        };
+    const participants = existing
+      ? config.participants.map((candidate) => candidate.id === existing.id ? participant : candidate)
+      : [...config.participants, participant];
+    this.upsertConfig(competitionId, 0, false, { ...config, participants });
+    if (!existing) this.journal.append({ type: "participant.registered", competitionId, data: participant });
+    return participant;
   }
 
   private configToScenarioDefinition(config: CompetitionConfig): ScenarioDefinition {
     const participants = config.participants.filter((participant) => participant.role === "participant");
+    const aliases = new Map(config.playerAliases.map((alias) => [alias.playerId.toLocaleLowerCase("en-US"), alias.displayName]));
     return {
       schemaVersion: 1,
       id: `work-${config.name}`,
@@ -1104,7 +1229,11 @@ export class CompetitionService {
       year: Number(config.date.slice(0, 4)),
       timezone: config.timezone,
       refereeConnectionId: "work-referee",
-      players: participants.map((participant) => ({ id: participant.id, displayName: participant.displayName, connectionId: participant.connectionIds[0] ?? participant.id })),
+      players: participants.map((participant) => ({
+        id: participant.id,
+        displayName: aliases.get(participant.id.toLocaleLowerCase("en-US")) ?? participant.displayName,
+        connectionId: participant.connectionIds[0] ?? participant.id
+      })),
       stages: config.stages.map((stage) => ({
         id: stage.id,
         order: stage.order,
@@ -1276,6 +1405,9 @@ export class CompetitionService {
       case "participant-edit":
         this.editParticipant(competitionId, action);
         break;
+      case "player-alias-upsert":
+        this.upsertPlayerAlias(competitionId, action.playerId, action.displayName);
+        break;
       case "scoreboard-override":
         throw new ServiceError("CAPABILITY_UNSUPPORTED", "请使用榜单修订接口提交该动作", 409);
       default:
@@ -1327,6 +1459,30 @@ export class CompetitionService {
     });
     if (!found) throw new ServiceError("NOT_FOUND", "参赛者不存在", 404);
     this.upsertConfig(competitionId, 0, false, { ...config, participants });
+  }
+
+  private upsertPlayerAlias(competitionId: string, rawPlayerId: string, rawDisplayName: string): void {
+    const playerId = rawPlayerId.trim();
+    const displayName = rawDisplayName.trim();
+    if (!playerId || playerId.startsWith("*")) throw new ServiceError("VALIDATION_FAILED", "玩家 ID 必须是非旁观模式的游戏内名称", 400);
+    if (!displayName) throw new ServiceError("VALIDATION_FAILED", "排行榜显示名不能为空", 400);
+    const config = this.getDraftConfig(competitionId);
+    const normalizedPlayerId = playerId.toLocaleLowerCase("en-US");
+    const aliases = [
+      ...config.playerAliases.filter((alias) => alias.playerId.toLocaleLowerCase("en-US") !== normalizedPlayerId),
+      { playerId, displayName }
+    ];
+    const participants = config.participants.map((participant) =>
+      participant.id.toLocaleLowerCase("en-US") === normalizedPlayerId ? { ...participant, displayName } : participant);
+    this.upsertConfig(competitionId, 0, false, { ...config, playerAliases: aliases, participants });
+
+    const workRuntime = this.workRuntimes.get(competitionId);
+    const participant = participants.find((candidate) => candidate.id.toLocaleLowerCase("en-US") === normalizedPlayerId);
+    if (workRuntime && participant) workRuntime.engine.registerPlayer(participant.id, displayName);
+    const runId = this.getPayload(competitionId).activeRunId;
+    if (runId && this.get(competitionId).mode === "test" && participant) {
+      this.getTestRuntime(competitionId, runId).engine.registerPlayer(participant.id, displayName);
+    }
   }
 
   private localActionRecord(actionType: string, command: string, simulated: boolean): CommandRecordView {
@@ -1422,6 +1578,7 @@ export class CompetitionService {
       case "participant-associate": return `${action.participantId} <- ${action.connectionId}`;
       case "participant-split": return action.connectionId;
       case "participant-edit": return action.participantId;
+      case "player-alias-upsert": return `${action.playerId} -> ${action.displayName}`;
       case "scoreboard-override": return `${action.playerId}:${action.stageId ?? "total"}`;
       default: return action.type;
     }

@@ -37,17 +37,23 @@ export const parseLogLine = (input: string, context: ParseContext): ParsedLogLin
   if (body === "Connected to server OK") {
     event = { ...metadata, type: "connected" };
   } else {
+    const listStart = /^(\d+) player\(s\) online:$/.exec(body);
     const login = /^(.*?) \(#(\d+)\) logged in with cheat mode (on|off)\.$/.exec(body);
     const disconnect = /^(.*?) \(#(\d+)\) disconnected\.$/.exec(body);
+    const listed = /^(.*?) \(#(\d+)\)( \[CHEAT\])?$/.exec(body);
     const readyOrGo = /^\[(\d+), (.*?)\]: Level (\d{2}) - (Get ready|Go!)$/.exec(body);
     const finish = /^(\[CHEAT\] )?\(#(\d+), (.*?)\) finished Level (\d{2}) in (\d+)(?:st|nd|rd|th) place \(score: (-?\d+); real time: (\d+):(\d+):(\d+)\.(\d+)\)\.$/.exec(body);
     const dnf = /^(\[CHEAT\] )?\(#(\d+), (.*?)\) did not finish Level (\d{2}) \(furthest reach: sector (-?\d+)\)\.$/.exec(body);
     const cheat = /^\(?#?(\d+), (.*?)\)? turned cheat (on|off)\.$/.exec(body);
 
-    if (login) {
+    if (listStart) {
+      event = { ...metadata, type: "player-list-start", count: Number(listStart[1]) };
+    } else if (login) {
       event = { ...metadata, type: "player-login", playerName: login[1] ?? "", connectionId: login[2] ?? "", cheat: login[3] === "on" };
     } else if (disconnect) {
       event = { ...metadata, type: "player-disconnect", playerName: disconnect[1] ?? "", connectionId: disconnect[2] ?? "" };
+    } else if (listed) {
+      event = { ...metadata, type: "player-listed", playerName: listed[1] ?? "", connectionId: listed[2] ?? "", cheat: Boolean(listed[3]) };
     } else if (readyOrGo) {
       event = {
         ...metadata,

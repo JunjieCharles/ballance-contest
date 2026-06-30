@@ -35,26 +35,18 @@ describe("local API", () => {
     const record = created.json<{ data: { id: string; stateVersion: number } }>().data;
     const duplicate = await app.inject({ method: "POST", url: "/api/v1/competitions", headers: auth(token), payload });
     expect(duplicate.json<{ data: { id: string } }>().data.id).toBe(record.id);
-    const rejectedPublish = await app.inject({
-      method: "POST",
-      url: `/api/v1/competitions/${record.id}/publish`,
-      headers: auth(token),
-      payload: { expectedStateVersion: 0, idempotencyKey: "publish-without-participant" }
-    });
-    expect(rejectedPublish.statusCode).toBe(400);
-    expect(rejectedPublish.json()).toMatchObject({
-      error: { code: "VALIDATION_FAILED", message: "发布检查未通过", details: { issues: ["至少需要一名参赛者"] } }
-    });
     const patched = await app.inject({
       method: "PATCH", url: `/api/v1/competitions/${record.id}/draft`, headers: auth(token),
       payload: {
         expectedStateVersion: 0,
-        idempotencyKey: "add-participant",
-        participants: [{ id: "p1", displayName: "Alpha", role: "participant", connectionIds: [], online: false, currentStageStatus: "not-started" }]
+        idempotencyKey: "rename-draft",
+        name: "Test Updated"
       }
     });
     const version = patched.json<{ data: { stateVersion: number } }>().data.stateVersion;
     expect((await app.inject({ method: "POST", url: `/api/v1/competitions/${record.id}/publish`, headers: auth(token), payload: { expectedStateVersion: version, idempotencyKey: "publish" } })).statusCode).toBe(200);
+    const publishedSnapshot = await app.inject({ method: "GET", url: `/api/v1/competitions/${record.id}/snapshot`, headers: auth(token) });
+    expect(publishedSnapshot.json()).toMatchObject({ data: { config: { participants: [], playerAliases: [] } } });
     const conflict = await app.inject({ method: "POST", url: `/api/v1/competitions/${record.id}/publish`, headers: auth(token), payload: { expectedStateVersion: version, idempotencyKey: "different" } });
     expect(conflict.json()).toMatchObject({ error: { code: "STATE_CONFLICT", details: { latestStateVersion: version + 1 } } });
   });

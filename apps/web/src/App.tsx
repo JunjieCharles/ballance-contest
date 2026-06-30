@@ -9,7 +9,6 @@ import type {
   ConfirmationKind,
   ConfirmationSummary,
   HealthResponse,
-  ParticipantView,
   RuntimeSnapshot,
   ScenarioDefinition,
   ScoreboardOverrideInput,
@@ -97,7 +96,8 @@ export function App() {
   const [tab, setTab] = useState<"console" | "config" | "players" | "scoreboard" | "test" | "archive">("config");
   const [name, setName] = useState("小型比赛");
   const [mode, setMode] = useState<CompetitionMode>("test");
-  const [newParticipant, setNewParticipant] = useState("");
+  const [aliasPlayerId, setAliasPlayerId] = useState("");
+  const [aliasDisplayName, setAliasDisplayName] = useState("");
   const [announcement, setAnnouncement] = useState("比赛流程通知");
   const [advancedJson, setAdvancedJson] = useState("");
   const [message, setMessage] = useState("正在连接本机服务...");
@@ -224,20 +224,6 @@ export function App() {
       body: JSON.stringify({ ...patch, expectedStateVersion: snapshot.competition.stateVersion, idempotencyKey: crypto.randomUUID() })
     });
   }, "草稿已保存");
-
-  const addParticipant = () => {
-    if (!snapshot || !newParticipant.trim()) return;
-    const participant: ParticipantView = {
-      id: crypto.randomUUID(),
-      displayName: newParticipant.trim(),
-      role: "participant",
-      connectionIds: [],
-      online: false,
-      currentStageStatus: "not-started"
-    };
-    void saveDraft({ participants: [...snapshot.config.participants, participant] });
-    setNewParticipant("");
-  };
 
   const publish = () => act(async () => {
     if (!session || !snapshot) throw new Error("请选择比赛");
@@ -434,7 +420,12 @@ export function App() {
               performAction={(action) => void performRefereeAction(action)}
               performConfirmedAction={(kind, target, build) => void performConfirmedAction(kind, target, build)} />}
             {tab === "config" && <ConfigPanel snapshot={snapshot} canWrite={canWrite} saveDraft={(patch) => void saveDraft(patch)} publish={() => void publish()} advancedJson={advancedJson} setAdvancedJson={setAdvancedJson} importScenarioJson={() => void importScenarioJson()} />}
-            {tab === "players" && <PlayersPanel snapshot={snapshot} newParticipant={newParticipant} setNewParticipant={setNewParticipant} addParticipant={addParticipant} canWrite={canWrite} />}
+            {tab === "players" && <PlayersPanel snapshot={snapshot} playerId={aliasPlayerId} displayName={aliasDisplayName}
+              setPlayerId={setAliasPlayerId} setDisplayName={setAliasDisplayName} canWrite={canWrite} saveAlias={(playerId, displayName) => {
+                void performRefereeAction({ type: "player-alias-upsert", playerId, displayName, reason: "更新排行榜显示名" });
+                setAliasPlayerId("");
+                setAliasDisplayName("");
+              }} />}
             {tab === "scoreboard" && <ScoreboardPanel snapshot={snapshot} canWrite={canWrite} downloadExport={(format) => void downloadExport(format)} overrideScoreboard={(draft) => void overrideScoreboard(draft)} />}
             {tab === "test" && <TestPanel snapshot={snapshot} scenarios={scenarios} scenarioDetail={scenarioDetail} loadScenario={(id) => void loadScenario(id)} createRun={createRunFromScenario} controlRun={(action) => void controlRun(action)}
               enableAutomation={() => void enableAutomation()} advanceClock={(ms) => void advanceClock(ms)} injectFault={(fault, playerId) => void injectFault(fault, playerId)} canWrite={canWrite} />}
@@ -625,6 +616,7 @@ function ConfigPanel({ snapshot, canWrite, saveDraft, publish, advancedJson, set
         if (event.target.value !== config.refereeName) saveDraft({ refereeName: event.target.value });
       }} disabled={!canWrite || snapshot.competition.status !== "draft"} /></label>
       <p className="muted">MockClient 会自动强制使用旁观模式登录，无需单独配置登录名。</p>
+      <p className="muted">参赛者无需预登记，系统会根据玩家上下线和 MockClient 列表自动登记。</p>
       <div className={publishIssues.length > 0 ? "validation-summary invalid" : "validation-summary valid"} aria-live="polite">
         <strong>发布检查</strong>
         {publishIssues.length > 0
@@ -647,18 +639,33 @@ function ConfigPanel({ snapshot, canWrite, saveDraft, publish, advancedJson, set
   </section>;
 }
 
-function PlayersPanel({ snapshot, newParticipant, setNewParticipant, addParticipant, canWrite }: {
-  snapshot: CompetitionSnapshot; newParticipant: string; setNewParticipant(value: string): void; addParticipant(): void; canWrite: boolean;
+function PlayersPanel({ snapshot, playerId, displayName, setPlayerId, setDisplayName, saveAlias, canWrite }: {
+  snapshot: CompetitionSnapshot;
+  playerId: string;
+  displayName: string;
+  setPlayerId(value: string): void;
+  setDisplayName(value: string): void;
+  saveAlias(playerId: string, displayName: string): void;
+  canWrite: boolean;
 }) {
   return <section className="panel">
-    <h2>参赛者</h2>
-    <div className="inline-form">
-      <input placeholder="选手显示名" value={newParticipant} onChange={(event) => setNewParticipant(event.target.value)} />
-      <button disabled={!canWrite || snapshot.competition.status !== "draft"} onClick={addParticipant}>加入名单</button>
+    <h2>玩家与显示名</h2>
+    <p className="muted">普通玩家首次出现在上线、下线或 MockClient 列表中时自动登记；数字连接 ID 只用于现场追踪。</p>
+    <h3>排行榜显示名映射（可选）</h3>
+    <div className="alias-form">
+      <label>玩家 ID（游戏内名称）<input placeholder="Silent_Snow" value={playerId} onChange={(event) => setPlayerId(event.target.value)} /></label>
+      <label>排行榜显示名<input placeholder="渴望新地图" value={displayName} onChange={(event) => setDisplayName(event.target.value)} /></label>
+      <button disabled={!canWrite || !playerId.trim() || !displayName.trim()} onClick={() => saveAlias(playerId.trim(), displayName.trim())}>保存映射</button>
     </div>
-    <table><thead><tr><th>选手</th><th>角色</th><th>在线</th><th>连接 ID</th><th>状态</th></tr></thead><tbody>
-      {snapshot.config.participants.map((participant) => <tr key={participant.id}><td>{participant.displayName}</td><td>{participant.role}</td><td>{participant.online ? "在线" : "离线"}</td><td>{participant.connectionIds.join(", ") || "—"}</td><td>{participant.currentStageStatus}</td></tr>)}
+    <table><thead><tr><th>玩家 ID</th><th>排行榜显示名</th><th>登记状态</th></tr></thead><tbody>
+      {snapshot.config.playerAliases.map((alias) => <tr key={alias.playerId}><td>{alias.playerId}</td><td>{alias.displayName}</td><td>{snapshot.config.participants.some((participant) => participant.id.toLocaleLowerCase("en-US") === alias.playerId.toLocaleLowerCase("en-US")) ? "已登记" : "等待上线"}</td></tr>)}
     </tbody></table>
+    {snapshot.config.playerAliases.length === 0 && <p className="muted">未设置显示名映射，排行榜将直接显示玩家 ID。</p>}
+    <h3>自动登记的参赛者</h3>
+    <table><thead><tr><th>玩家 ID</th><th>排行榜显示名</th><th>在线</th><th>数字连接记录</th><th>状态</th></tr></thead><tbody>
+      {snapshot.config.participants.map((participant) => <tr key={participant.id}><td>{participant.id}</td><td>{participant.displayName}</td><td>{participant.online ? "在线" : "离线"}</td><td>{participant.connectionIds.join(", ") || "—"}</td><td>{participant.currentStageStatus}</td></tr>)}
+    </tbody></table>
+    {snapshot.config.participants.length === 0 && <p className="muted">尚未观察到普通玩家；无需在比赛开始前手工登记。</p>}
   </section>;
 }
 

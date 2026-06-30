@@ -7,6 +7,18 @@ import { CompetitionEngine } from "./competition-engine.js";
 const loadMain = (): ScenarioDefinition => assertScenarioDefinition(JSON.parse(readFileSync(resolve("test/fixtures/scenarios/three-stage-main/scenario.json"), "utf8")) as unknown);
 
 describe("CompetitionEngine", () => {
+  it("adds an unknown player only when an effective result is accepted", () => {
+    const base = loadMain();
+    const stage = base.stages[0];
+    if (!stage) throw new Error("missing stage fixture");
+    const engine = new CompetitionEngine({ ...base, players: [], stages: [stage], events: [] });
+    engine.apply({ atMs: 0, sourceId: "practice", type: "finish", stageId: "s1", playerId: "PracticeOnly", score: 1, elapsedMs: 1 });
+    expect(engine.snapshot().currentScoreboard).toEqual([]);
+    engine.apply({ atMs: 10, sourceId: "go", type: "go", stageId: "s1", refereeConnectionId: base.refereeConnectionId });
+    engine.apply({ atMs: 20, sourceId: "finish", type: "finish", stageId: "s1", playerId: "Silent_Snow", score: 1, elapsedMs: 10 });
+    expect(engine.snapshot().currentScoreboard).toMatchObject([{ playerId: "Silent_Snow", displayName: "Silent_Snow" }]);
+  });
+
   it("runs the three-stage mixed scenario and versions every effective result", () => {
     const definition = loadMain();
     const engine = new CompetitionEngine(definition);

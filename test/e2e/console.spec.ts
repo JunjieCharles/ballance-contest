@@ -35,20 +35,22 @@ test("opens the authenticated two-mode console without external requests", async
   expect(externalRequests).toEqual([]);
 });
 
-test("keeps the current competition selected and explains publish blockers", async ({ page }, testInfo) => {
+test("keeps the current competition selected and publishes without preregistration", async ({ page }, testInfo) => {
   await page.goto("/#token=e2e-bootstrap-token");
   await expect(page.getByText(/已取得控制权|只读标签页/)).toBeVisible();
   await acquireControl(page);
 
-  const competitionName = `E2E 发布检查 ${testInfo.project.name}`;
+  const competitionName = `E2E 自动登记 ${testInfo.project.name}`;
   await page.getByLabel("名称", { exact: true }).fill(competitionName);
   await page.getByLabel("模式").selectOption("test");
   await page.getByRole("button", { name: "新建比赛" }).click();
 
+  await expect(page.getByLabel("比赛名称")).toHaveValue(competitionName);
   await expect(page.locator(".tabs button.active")).toHaveText("比赛配置");
-  await expect(page.getByText("至少需要一名参赛者")).toBeVisible();
+  await expect(page.getByText("配置完整，可以发布。")).toBeVisible();
   await expect(page.getByLabel("MockClient 登录名")).toHaveCount(0);
   await expect(page.getByText("MockClient 会自动强制使用旁观模式登录，无需单独配置登录名。")).toBeVisible();
+  await expect(page.getByText("参赛者无需预登记，系统会根据玩家上下线和 MockClient 列表自动登记。")).toBeVisible();
 
   const selectedCompetition = page.locator(".competition-list button").filter({ hasText: competitionName });
   await selectedCompetition.click();
@@ -56,16 +58,16 @@ test("keeps the current competition selected and explains publish blockers", asy
   await expect(page.getByText("请选择或新建比赛")).toHaveCount(0);
 
   await page.getByRole("button", { name: "发布比赛" }).click();
-  await expect(page.locator("header")).toContainText("发布检查未通过：至少需要一名参赛者");
+  await expect(page.locator("header")).toContainText("发布检查通过，比赛已发布");
 
   await page.getByRole("button", { name: "玩家", exact: true }).click();
-  await page.getByPlaceholder("选手显示名").fill("Alpha");
-  await page.getByRole("button", { name: "加入名单" }).click();
-  await expect(page.getByRole("cell", { name: "Alpha" })).toBeVisible();
-  await page.getByRole("button", { name: "比赛配置", exact: true }).click();
-  await expect(page.getByText("配置完整，可以发布。")).toBeVisible();
-  await page.getByRole("button", { name: "发布比赛" }).click();
-  await expect(page.locator("header")).toContainText("发布检查通过，比赛已发布");
+  await expect(page.getByText("尚未观察到普通玩家；无需在比赛开始前手工登记。")).toBeVisible();
+  await page.getByLabel("玩家 ID（游戏内名称）").fill("Silent_Snow");
+  await page.getByLabel("排行榜显示名").fill("渴望新地图");
+  await page.getByRole("button", { name: "保存映射" }).click();
+  await expect(page.getByRole("cell", { name: "Silent_Snow" })).toBeVisible();
+  await expect(page.getByRole("cell", { name: "渴望新地图" })).toBeVisible();
+  await expect(page.getByRole("cell", { name: "等待上线" })).toBeVisible();
 });
 
 test("creates a visual test run, plays the scenario, exports, and keeps work mode isolated", async ({ page }) => {
@@ -82,6 +84,7 @@ test("creates a visual test run, plays the scenario, exports, and keeps work mod
   await page.getByLabel("名称", { exact: true }).fill("E2E 测试模式");
   await page.getByLabel("模式").selectOption("test");
   await page.getByRole("button", { name: "新建比赛" }).click();
+  await expect(page.getByLabel("比赛名称")).toHaveValue("E2E 测试模式");
   await expect(page.locator(".mode-badge")).toHaveText("测试模式");
   await expect(page.locator(".watermark")).toHaveText("测试数据");
 
@@ -104,6 +107,7 @@ test("creates a visual test run, plays the scenario, exports, and keeps work mod
   await page.getByLabel("名称", { exact: true }).fill("E2E 工作模式");
   await page.getByLabel("模式").selectOption("work");
   await page.getByRole("button", { name: "新建比赛" }).click();
+  await expect(page.getByLabel("比赛名称")).toHaveValue("E2E 工作模式");
   await expect(page.locator(".mode-badge")).toHaveText("工作模式");
   await expect(page.locator(".watermark")).toHaveCount(0);
   await page.getByRole("button", { name: "测试", exact: true }).click();

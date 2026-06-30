@@ -44,6 +44,19 @@ const enterRunning = (controller: CompetitionController, clock: FakeClock): void
 };
 
 describe("CompetitionController", () => {
+  it("registers observed players dynamically without treating the known set as a closed roster", () => {
+    const clock = new FakeClock();
+    const controller = new CompetitionController(configuration({
+      participants: [],
+      dynamicParticipants: true,
+      stages: [{ id: "s1", map: "1", mode: "sr", timeLimitMs: 20_000, minimumScoringPlace: 3 }]
+    }), clock);
+    controller.observeAuthoritativeGo("s1");
+    expect(controller.registerParticipant("Silent_Snow")).toBe(true);
+    expect(controller.recordResult({ stageId: "s1", playerId: "Silent_Snow", status: "finished", sourceId: "finish" })).toBe("accepted");
+    expect(controller.snapshot()).toMatchObject({ phase: "running", attempts: [{ intakeOpen: true, results: [{ playerId: "Silent_Snow" }] }] });
+  });
+
   it("runs the normal flow and closes tail intake atomically at the next actual Ready", () => {
     const clock = new FakeClock();
     const controller = new CompetitionController(configuration(), clock);
