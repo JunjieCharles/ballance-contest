@@ -184,6 +184,26 @@ header > span:last-of-type { margin-left: auto; font-size: 13px; }
   margin-bottom: 12px;
 }
 .muted { color: #657382; }
+.validation-summary {
+  display: grid;
+  gap: 5px;
+  margin: 14px 0 12px;
+  padding: 10px 12px;
+  border: 1px solid;
+  border-radius: 6px;
+  font-size: 13px;
+}
+.validation-summary.invalid {
+  color: #74212a;
+  background: #fff0f0;
+  border-color: #e2aeb4;
+}
+.validation-summary.valid {
+  color: #215f3c;
+  background: #edf8f1;
+  border-color: #aed5bd;
+}
+.validation-summary ul { margin: 0; padding-left: 20px; }
 .notice {
   display: grid;
   gap: 3px;

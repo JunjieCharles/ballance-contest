@@ -54,7 +54,7 @@ try {
   const lines = [];
   client = new ManagedMockClient({
     executable: join(serverDirectory, "BallanceMMOMockClient.exe"), workingDirectory: serverDirectory,
-    server: `127.0.0.1:${port}`, loginName: "*ConsolePipeProbe",
+    server: `127.0.0.1:${port}`, refereeName: "ConsolePipeProbe",
     uuid: "00010002-0003-0004-0005-000600070008", logPath: join(temporary, "mock-client.log")
   });
   client.onLine((line) => lines.push(line));

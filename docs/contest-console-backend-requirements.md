@@ -104,7 +104,7 @@ BallanceMMOMockClient.exe ── BallanceMMO 服务器
 默认启动参数语义：
 
 - `-s <服务器地址>`：`bmmo.win` 系列预设只传主机名，例如 `1.bmmo.win`，不附加端口；自定义服务器可按需要包含端口。
-- `-n <登录名>`：默认 `*ContestConsole`，可配置。
+- `-n <旁观登录名>`：由裁判名派生，规范化后强制添加且仅添加一个 `*`；默认 `*ContestConsole`，不得关闭旁观标记。
 - `-u <UUID>`：固定 UUID，首次生成后持久化。
 - `-l <独立日志路径>` 和 `--auto-flush`：保证实时日志。
 - `--no-sound-files`：避免无关声音文件写入比赛目录。
@@ -149,8 +149,7 @@ API 必须返回 `CompetitionMode` 和结构化 `Capabilities`，至少包含真
 | --- | --- |
 | 比赛名称 | 必填，用于页面、导出和归档目录 |
 | 比赛日期与时区 | 本机日期、`Asia/Shanghai`；可修改 |
-| 裁判显示名 | `ContestConsole`，可修改 |
-| MockClient 登录名 | `*ContestConsole`，可修改 |
+| 裁判名 | `ContestConsole`，可修改；MockClient 登录名自动派生为 `*裁判名` |
 | MockClient UUID | 首次生成后固定；比赛中不可更换 |
 | 服务器 | `1.bmmo.win`；三个 `bmmo.win` 预设不附加端口，自定义地址可包含端口 |
 | 比赛类型 | 默认小型，也可选择大型、自定义 |
@@ -753,7 +752,7 @@ API 接收类型化动作，例如发送公告、Ready、关闭 cheat、正常�
 ## 17. 默认假设
 
 - 本机后端固定监听 `127.0.0.1:32113`。
-- 默认裁判名为 `ContestConsole`、MockClient 登录名为 `*ContestConsole`；工作模式只认可本机 MockClient 自身连接 ID，测试发令来源完全由场景定义。
+- 默认裁判名为 `ContestConsole`，MockClient 必须自动以 `*ContestConsole` 旁观登录；工作模式只认可本机 MockClient 自身连接 ID，测试发令来源完全由场景定义。
 - 比赛类型默认小型，默认服务器为不带端口的 `1.bmmo.win`。
 - 正常自动 Go 无需逐次确认；手动 Go 和比赛中重赛需要确认。
 - 赛前等待上限 5 分钟、重连稳定窗口 15 秒、Ready 缓冲 15 秒、起跑保护窗口 15 秒。

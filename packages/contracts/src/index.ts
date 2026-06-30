@@ -127,7 +127,6 @@ export interface CompetitionConfig {
   date: string;
   timezone: string;
   refereeName: string;
-  loginName: string;
   server: string;
   contestType: ContestType;
   scoring: ScoringConfig;
@@ -136,6 +135,29 @@ export interface CompetitionConfig {
   stages: readonly StageConfig[];
   participants: readonly ParticipantView[];
 }
+
+export const normalizeRefereeName = (value: string): string => value.trim().replace(/^\*+/, "").trim();
+
+export const spectatorLoginName = (refereeName: string): string => `*${normalizeRefereeName(refereeName)}`;
+
+export const validateCompetitionConfigForPublish = (config: CompetitionConfig): string[] => {
+  const issues: string[] = [];
+  if (!config.name.trim()) issues.push("比赛名称不能为空");
+  if (!normalizeRefereeName(config.refereeName)) issues.push("裁判名不能为空");
+  if (!config.server.trim()) issues.push("服务器不能为空");
+  if (["0.bmmo.win", "1.bmmo.win", "2.bmmo.win"].some((server) => config.server.startsWith(`${server}:`))) {
+    issues.push("bmmo.win 预设服务器不得填写端口");
+  }
+  if (config.stages.length === 0) issues.push("至少需要一个轮次");
+  for (const stage of config.stages) {
+    if (stage.level < 0 || stage.level > 13) issues.push(`${stage.label} 关卡号必须在 0..13`);
+    if (stage.scoring.length === 0) issues.push(`${stage.label} 缺少积分规则`);
+  }
+  if (config.participants.filter((participant) => participant.role === "participant").length === 0) {
+    issues.push("至少需要一名参赛者");
+  }
+  return issues;
+};
 
 export interface CompetitionRecordView {
   id: string;
@@ -324,7 +346,6 @@ export const createDefaultCompetitionConfig = (name: string): CompetitionConfig 
     date: now.toISOString().slice(0, 10),
     timezone: "Asia/Shanghai",
     refereeName: "ContestConsole",
-    loginName: "*ContestConsole",
     server: "1.bmmo.win",
     contestType: "small",
     scoring,

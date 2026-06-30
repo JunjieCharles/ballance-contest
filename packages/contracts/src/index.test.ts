@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { capabilitiesFor } from "./index.js";
+import {
+  capabilitiesFor,
+  createDefaultCompetitionConfig,
+  spectatorLoginName,
+  validateCompetitionConfigForPublish
+} from "./index.js";
 
 describe("capabilitiesFor", () => {
   it("isolates test mode from real side effects", () => {
@@ -22,5 +27,29 @@ describe("capabilitiesFor", () => {
       playback: false,
       faultInjection: false
     });
+  });
+});
+
+describe("competition configuration", () => {
+  it("derives an immutable spectator login from the referee name", () => {
+    expect(spectatorLoginName("ContestConsole")).toBe("*ContestConsole");
+    expect(spectatorLoginName("** Referee ")).toBe("*Referee");
+  });
+
+  it("returns actionable publish issues", () => {
+    const config = createDefaultCompetitionConfig("Small Contest");
+    expect(validateCompetitionConfigForPublish(config)).toEqual(["至少需要一名参赛者"]);
+    expect(validateCompetitionConfigForPublish({
+      ...config,
+      refereeName: "",
+      participants: [{
+        id: "p1",
+        displayName: "Alpha",
+        role: "participant",
+        connectionIds: [],
+        online: false,
+        currentStageStatus: "not-started"
+      }]
+    })).toEqual(["裁判名不能为空"]);
   });
 });

@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { validateCompetitionConfigForPublish } from "@ballance/contracts";
 import type {
   CompetitionAction,
   CompetitionConfig,
@@ -36,8 +37,14 @@ const request = async <T,>(path: string, session: Session | null, init?: Request
   });
   const contentType = response.headers.get("content-type") ?? "";
   const payload = contentType.includes("application/json") ? await response.json() as unknown : undefined;
-  const envelope = typeof payload === "object" && payload !== null ? payload as { data?: T; error?: { message: string } } : {};
-  if (!response.ok) throw new Error(envelope.error?.message ?? `HTTP ${response.status}`);
+  const envelope = typeof payload === "object" && payload !== null
+    ? payload as { data?: T; error?: { message: string; details?: { issues?: unknown } } }
+    : {};
+  if (!response.ok) {
+    const issues = envelope.error?.details?.issues;
+    const issueText = Array.isArray(issues) ? issues.filter((issue): issue is string => typeof issue === "string").join("；") : "";
+    throw new Error(`${envelope.error?.message ?? `HTTP ${response.status}`}${issueText ? `：${issueText}` : ""}`);
+  }
   return envelope.data !== undefined ? envelope.data : payload as T;
 };
 
@@ -87,7 +94,7 @@ export function App() {
   const [snapshot, setSnapshot] = useState<CompetitionSnapshot>();
   const [scenarios, setScenarios] = useState<TestScenarioSummary[]>([]);
   const [scenarioDetail, setScenarioDetail] = useState<ScenarioDefinition | null>(null);
-  const [tab, setTab] = useState<"console" | "config" | "players" | "scoreboard" | "test" | "archive">("console");
+  const [tab, setTab] = useState<"console" | "config" | "players" | "scoreboard" | "test" | "archive">("config");
   const [name, setName] = useState("小型比赛");
   const [mode, setMode] = useState<CompetitionMode>("test");
   const [newParticipant, setNewParticipant] = useState("");
@@ -100,7 +107,17 @@ export function App() {
   const canWrite = Boolean(session?.control && realtimeConnected);
   const runtime = snapshot?.runtime;
 
+  const refreshSnapshot = async (current: Session, competitionId: string) => {
+    const next = await request<CompetitionSnapshot>(`/api/v1/competitions/${competitionId}/snapshot`, current);
+    setSnapshot(next);
+  };
+
   const selectCompetition = (competitionId: string) => {
+    if (competitionId === selectedId) {
+      if (session) void refreshSnapshot(session, competitionId)
+        .catch((error: unknown) => setMessage(error instanceof Error ? error.message : "快照加载失败"));
+      return;
+    }
     setSnapshot(undefined);
     setScenarioDetail(null);
     setAdvancedJson("");
@@ -111,11 +128,6 @@ export function App() {
     const records = await request<CompetitionRecordView[]>("/api/v1/competitions", current);
     setCompetitions(records);
     setSelectedId((old) => old ?? records[0]?.id);
-  };
-
-  const refreshSnapshot = async (current: Session, competitionId: string) => {
-    const next = await request<CompetitionSnapshot>(`/api/v1/competitions/${competitionId}/snapshot`, current);
-    setSnapshot(next);
   };
 
   useEffect(() => {
@@ -201,6 +213,7 @@ export function App() {
       method: "POST",
       body: JSON.stringify({ name, mode, idempotencyKey: crypto.randomUUID() })
     });
+    setTab("config");
     return created.id;
   }, "比赛已创建");
 
@@ -413,8 +426,8 @@ export function App() {
               <div><span>下一 Ready</span><strong>{formatMs(runtime?.plannedReadyAtMs)}</strong></div>
             </section>
             <div className="tabs">
-              {(["console", "config", "players", "scoreboard", "test", "archive"] as const).map((item) =>
-                <button className={tab === item ? "active" : ""} key={item} onClick={() => setTab(item)}>{({ console: "控制台", config: "配置发布", players: "玩家", scoreboard: "成绩", test: "测试", archive: "归档" })[item]}</button>)}
+              {(["config", "console", "players", "scoreboard", "test", "archive"] as const).map((item) =>
+                <button className={tab === item ? "active" : ""} key={item} onClick={() => setTab(item)}>{({ config: "比赛配置", console: "控制台", players: "玩家", scoreboard: "成绩", test: "测试", archive: "归档" })[item]}</button>)}
             </div>
             {tab === "console" && <ConsolePanel snapshot={snapshot} announcement={announcement} setAnnouncement={setAnnouncement} canWrite={canWrite}
               enableAutomation={() => void enableAutomation()} pauseAutomation={() => void pauseAutomation()} startWork={() => void startWork()} sendAnnouncement={() => void sendAnnouncement()}
@@ -598,6 +611,7 @@ function ConfigPanel({ snapshot, canWrite, saveDraft, publish, advancedJson, set
   advancedJson: string; setAdvancedJson(value: string): void; importScenarioJson(): void;
 }) {
   const config = snapshot.config;
+  const publishIssues = validateCompetitionConfigForPublish(config);
   return <section className="grid two">
     <div className="panel">
       <h2>基本信息</h2>
@@ -610,9 +624,13 @@ function ConfigPanel({ snapshot, canWrite, saveDraft, publish, advancedJson, set
       <label>裁判名<input key={`${snapshot.competition.stateVersion}:referee`} defaultValue={config.refereeName} onBlur={(event) => {
         if (event.target.value !== config.refereeName) saveDraft({ refereeName: event.target.value });
       }} disabled={!canWrite || snapshot.competition.status !== "draft"} /></label>
-      <label>MockClient 登录名<input key={`${snapshot.competition.stateVersion}:login`} defaultValue={config.loginName} onBlur={(event) => {
-        if (event.target.value !== config.loginName) saveDraft({ loginName: event.target.value });
-      }} disabled={!canWrite || snapshot.competition.status !== "draft"} /></label>
+      <p className="muted">MockClient 会自动强制使用旁观模式登录，无需单独配置登录名。</p>
+      <div className={publishIssues.length > 0 ? "validation-summary invalid" : "validation-summary valid"} aria-live="polite">
+        <strong>发布检查</strong>
+        {publishIssues.length > 0
+          ? <><span>还需处理 {publishIssues.length} 项：</span><ul>{publishIssues.map((issue) => <li key={issue}>{issue}</li>)}</ul></>
+          : <span>配置完整，可以发布。</span>}
+      </div>
       <button disabled={!canWrite || snapshot.competition.status !== "draft"} onClick={publish}>发布比赛</button>
     </div>
     <div className="panel">

@@ -6,6 +6,8 @@ import {
   assertScenarioDefinition,
   capabilitiesFor,
   createDefaultCompetitionConfig,
+  normalizeRefereeName,
+  validateCompetitionConfigForPublish,
   type CommandRecordView,
   type CompetitionAction,
   type CompetitionConfig,
@@ -327,7 +329,7 @@ export class CompetitionService {
     const current = this.get(id);
     if (current.stateVersion !== expectedStateVersion) throw new ServiceError("STATE_CONFLICT", "状态版本已变化", 409, { latestStateVersion: current.stateVersion });
     const config = this.normalizeConfig(this.getDraftConfig(id));
-    const issues = this.validatePublishConfig(config);
+    const issues = validateCompetitionConfigForPublish(config);
     if (issues.length > 0) throw new ServiceError("VALIDATION_FAILED", "发布检查未通过", 400, { issues });
     const updated = { ...current, status: "published" as const, name: config.name, stateVersion: current.stateVersion + 1, updatedAt: new Date().toISOString() };
     this.withDatabase((database) => {
@@ -545,7 +547,7 @@ export class CompetitionService {
       executable,
       workingDirectory: serverWindowsRoot(),
       server: config.server,
-      loginName: config.loginName,
+      refereeName: config.refereeName,
       uuid: randomUUID(),
       logPath
     });
@@ -838,17 +840,26 @@ export class CompetitionService {
 
   private getDraftConfig(competitionId: string): CompetitionConfig {
     const stored = row<{ payload: string }>(this.options.database, "SELECT payload FROM config_versions WHERE competition_id=? AND version=0", competitionId);
-    return stored ? JSON.parse(stored.payload) as CompetitionConfig : createDefaultCompetitionConfig(this.get(competitionId).name);
+    return stored ? this.parseStoredConfig(stored.payload) : createDefaultCompetitionConfig(this.get(competitionId).name);
   }
 
   private getPublishedConfig(competitionId: string): CompetitionConfig | undefined {
     const stored = row<{ payload: string }>(this.options.database, "SELECT payload FROM config_versions WHERE competition_id=? AND immutable=1 ORDER BY version DESC LIMIT 1", competitionId);
-    return stored ? JSON.parse(stored.payload) as CompetitionConfig : undefined;
+    return stored ? this.parseStoredConfig(stored.payload) : undefined;
+  }
+
+  private parseStoredConfig(payload: string): CompetitionConfig {
+    const { loginName, ...config } = JSON.parse(payload) as CompetitionConfig & { loginName?: string };
+    return {
+      ...config,
+      refereeName: normalizeRefereeName(config.refereeName || loginName || "ContestConsole")
+    };
   }
 
   private normalizeConfig(config: CompetitionConfig): CompetitionConfig {
     const name = config.name.trim();
     if (!name) throw new ServiceError("VALIDATION_FAILED", "比赛名称不能为空", 400);
+    const refereeName = normalizeRefereeName(config.refereeName);
     const scoring = {
       ...config.scoring,
       points: config.scoring.points.map((point) => {
@@ -863,20 +874,7 @@ export class CompetitionService {
       scoring: stage.scoring.length > 0 ? stage.scoring : scoring.points,
       minimumScoringPlace: stage.minimumScoringPlace || scoring.minimumScoringPlace
     }));
-    return { ...config, name, scoring, stages };
-  }
-
-  private validatePublishConfig(config: CompetitionConfig): string[] {
-    const issues: string[] = [];
-    if (!config.server.trim()) issues.push("服务器不能为空");
-    if (["0.bmmo.win", "1.bmmo.win", "2.bmmo.win"].some((server) => config.server.startsWith(`${server}:`))) issues.push("bmmo.win 预设服务器不得填写端口");
-    if (config.stages.length === 0) issues.push("至少需要一个轮次");
-    for (const stage of config.stages) {
-      if (stage.level < 0 || stage.level > 13) issues.push(`${stage.label} 关卡号必须在 0..13`);
-      if (stage.scoring.length === 0) issues.push(`${stage.label} 缺少积分规则`);
-    }
-    if (config.participants.filter((participant) => participant.role === "participant").length === 0) issues.push("至少需要一名参赛者");
-    return issues;
+    return { ...config, name, refereeName, scoring, stages };
   }
 
   private makeTestRuntime(competitionId: string, definition: ScenarioDefinition, id: string = randomUUID(), createdAt: string = new Date().toISOString()): TestRuntime {
@@ -1079,7 +1077,7 @@ export class CompetitionService {
       case "player-disconnect":
         return participant ? { atMs: Date.parse(event.occurredAt), sourceId: event.sourceId, type: "disconnect", playerId: participant.id, connectionId: event.connectionId } : undefined;
       case "go":
-        if (!stage || event.refereeName !== config.loginName && event.refereeName !== config.refereeName) return undefined;
+        if (!stage || normalizeRefereeName(event.refereeName) !== normalizeRefereeName(config.refereeName)) return undefined;
         return { atMs: Date.parse(event.occurredAt), sourceId: event.sourceId, type: "go", stageId: stage.id, refereeConnectionId: "work-referee" };
       case "finish":
         return stage && participant ? { atMs: Date.parse(event.occurredAt), sourceId: event.sourceId, type: "finish", stageId: stage.id, playerId: participant.id, score: event.score, elapsedMs: event.elapsedMs } : undefined;
