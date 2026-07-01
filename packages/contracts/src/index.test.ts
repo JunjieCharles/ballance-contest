@@ -15,7 +15,8 @@ describe("capabilitiesFor", () => {
       realCommands: false,
       virtualClock: true,
       playback: true,
-      faultInjection: true
+      faultInjection: false,
+      scenarioFaults: true
     });
   });
 

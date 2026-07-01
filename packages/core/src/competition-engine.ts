@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import type { ScenarioDefinition, ScenarioEvent, ScenarioStage } from "@ballance/contracts";
 
-export type ResultStatus = "finished" | "dnf";
+export type ResultStatus = "finished" | "dnf" | "excluded";
 
 export interface StageResult {
   playerId: string;
@@ -12,6 +12,7 @@ export interface StageResult {
   elapsedMs?: number;
   reason?: string;
   sourceId: string;
+  finishSourceId?: string;
 }
 
 export interface ScoreboardEntry {
@@ -102,7 +103,7 @@ export class CompetitionEngine {
     }
     this.seenSources.add(event.sourceId);
     if (event.type === "go") this.applyGo(event);
-    else if (event.type === "finish" || event.type === "dnf") this.applyResult(event);
+    else if (event.type === "finish" || event.type === "dnf" || event.type === "exclude") this.applyResult(event);
   }
 
   private applyGo(event: Extract<ScenarioEvent, { type: "go" }>): void {
@@ -128,7 +129,7 @@ export class CompetitionEngine {
     });
   }
 
-  private applyResult(event: Extract<ScenarioEvent, { type: "finish" | "dnf" }>): void {
+  private applyResult(event: Extract<ScenarioEvent, { type: "finish" | "dnf" | "exclude" }>): void {
     const stage = this.stages.get(event.stageId);
     if (!stage) {
       this.anomalies.push({ sourceId: event.sourceId, code: "unknown-stage", detail: event.stageId });
@@ -144,7 +145,31 @@ export class CompetitionEngine {
       return;
     }
     const stageResults = this.results.get(event.stageId) ?? new Map<string, MutableStageResult>();
-    if (stageResults.has(event.playerId)) {
+    const existing = stageResults.get(event.playerId);
+    if (existing?.status === "excluded" && event.type === "finish") {
+      stageResults.set(event.playerId, {
+        ...existing,
+        score: event.score,
+        elapsedMs: event.elapsedMs,
+        finishSourceId: event.sourceId
+      });
+      this.results.set(event.stageId, stageResults);
+      this.createScoreboardVersion(event.stageId, event.sourceId);
+      return;
+    }
+    if (existing && event.type === "exclude" && existing.status === "finished") {
+      stageResults.set(event.playerId, {
+        ...existing,
+        status: "excluded",
+        reason: event.reason,
+        sourceId: event.sourceId,
+        finishSourceId: existing.sourceId
+      });
+      this.results.set(event.stageId, stageResults);
+      this.createScoreboardVersion(event.stageId, event.sourceId);
+      return;
+    }
+    if (existing) {
       this.anomalies.push({ sourceId: event.sourceId, code: "post-completion-result", detail: `${event.stageId}:${event.playerId}` });
       return;
     }
@@ -152,7 +177,7 @@ export class CompetitionEngine {
     this.finishSequence += 1;
     stageResults.set(event.playerId, event.type === "finish"
       ? { playerId: event.playerId, status: "finished", score: event.score, elapsedMs: event.elapsedMs, sourceId: event.sourceId, finishSequence: this.finishSequence }
-      : { playerId: event.playerId, status: "dnf", reason: event.reason, sourceId: event.sourceId, finishSequence: this.finishSequence });
+      : { playerId: event.playerId, status: event.type === "dnf" ? "dnf" : "excluded", reason: event.reason, sourceId: event.sourceId, finishSequence: this.finishSequence });
     this.results.set(event.stageId, stageResults);
     if (event.type === "finish" && !this.baselines.has(event.stageId)) this.baselines.set(event.stageId, this.rankBeforeStage(stage));
     this.createScoreboardVersion(event.stageId, event.sourceId);
@@ -161,20 +186,22 @@ export class CompetitionEngine {
   private rankedStageResults(stage: ScenarioStage): readonly StageResult[] {
     const values = [...(this.results.get(stage.id)?.values() ?? [])];
     values.sort((left, right) => {
-      if (left.status !== right.status) return left.status === "finished" ? -1 : 1;
-      if (left.status === "dnf") return left.finishSequence - right.finishSequence;
+      if (left.status !== right.status) return left.status === "finished" ? -1 : right.status === "finished" ? 1 : left.finishSequence - right.finishSequence;
+      if (left.status !== "finished") return left.finishSequence - right.finishSequence;
       if (stage.mode === "HS" && left.score !== right.score) return (right.score ?? 0) - (left.score ?? 0);
       return left.finishSequence - right.finishSequence;
     });
-    return values.map((result, index) => ({
+    let finishedPlace = 0;
+    return values.map((result) => ({
       playerId: result.playerId,
       status: result.status,
-      place: index + 1,
-      points: result.status === "finished" ? (stage.scoring[index] ?? 0) : 0,
+      place: result.status === "finished" ? ++finishedPlace : 0,
+      points: result.status === "finished" ? (stage.scoring[finishedPlace - 1] ?? 0) : 0,
       ...(result.score === undefined ? {} : { score: result.score }),
       ...(result.elapsedMs === undefined ? {} : { elapsedMs: result.elapsedMs }),
       ...(result.reason === undefined ? {} : { reason: result.reason }),
-      sourceId: result.sourceId
+      sourceId: result.sourceId,
+      ...(result.finishSourceId === undefined ? {} : { finishSourceId: result.finishSourceId })
     }));
   }
 

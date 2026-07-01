@@ -21,7 +21,8 @@ export const CapabilitiesSchema = Type.Object({
   automation: Type.Boolean(),
   virtualClock: Type.Boolean(),
   playback: Type.Boolean(),
-  faultInjection: Type.Boolean()
+  faultInjection: Type.Boolean(),
+  scenarioFaults: Type.Boolean()
 });
 export type Capabilities = Static<typeof CapabilitiesSchema>;
 
@@ -34,7 +35,8 @@ export const capabilitiesFor = (mode: CompetitionMode): Capabilities =>
         automation: true,
         virtualClock: false,
         playback: false,
-        faultInjection: false
+        faultInjection: false,
+        scenarioFaults: false
       }
     : {
         realProcess: false,
@@ -43,7 +45,8 @@ export const capabilitiesFor = (mode: CompetitionMode): Capabilities =>
         automation: true,
         virtualClock: true,
         playback: true,
-        faultInjection: true
+        faultInjection: false,
+        scenarioFaults: true
       };
 
 export const HealthResponseSchema = Type.Object({
@@ -79,7 +82,7 @@ export interface ParticipantView {
   role: "participant" | "staff" | "observer";
   connectionIds: readonly string[];
   online: boolean;
-  currentStageStatus: "not-started" | "practice" | "waiting" | "running" | "finished" | "dnf" | "review";
+  currentStageStatus: "not-started" | "practice" | "waiting" | "running" | "finished" | "dnf" | "excluded" | "review";
   notes?: string;
 }
 
@@ -196,6 +199,8 @@ export interface RuntimeSnapshot {
   plannedReadyAtMs?: number;
   plannedReadyAt?: string;
   plannedStageStartAt?: string;
+  stageDeadlineAt?: string;
+  countdownValue?: 3 | 2 | 1;
   virtualNowMs?: number;
   blockers: readonly { code: string; severity: "warning" | "critical"; suggestion: string; autoRecoverable: boolean; participantId?: string }[];
   waitingParticipants: readonly string[];
@@ -203,6 +208,33 @@ export interface RuntimeSnapshot {
   incidents: readonly unknown[];
   rejectedResults: readonly unknown[];
   commands: readonly CommandRecordView[];
+  availableActions: readonly ActionAvailability[];
+  attentionItems: readonly AttentionItem[];
+}
+
+export type RefereeActionId =
+  | "start-work" | "enable-automation" | "pause-automation" | "ready" | "cheat-off" | "manual-go"
+  | "delay-ready" | "extend-stage-deadline" | "reschedule" | "reschedule-stage-deadline" | "end-stage" | "restart"
+  | "void-attempt" | "restore-attempt" | "kick" | "raw-command" | "finish" | "archive" | "delete";
+
+export interface ActionAvailability {
+  action: RefereeActionId;
+  enabled: boolean;
+  label: string;
+  effect: string;
+  disabledReason?: string;
+}
+
+export interface AttentionItem {
+  id: string;
+  category: "flow" | "result" | "blocker" | "incident" | "command";
+  severity: "info" | "warning" | "critical";
+  title: string;
+  message: string;
+  occurredAt: string;
+  stageId?: string;
+  participantIds?: readonly string[];
+  action?: RefereeActionId;
 }
 
 export interface ScoreboardVersionView {
@@ -249,6 +281,7 @@ export interface TestScenarioSummary {
   events: number;
   expectedScoreboardVersions: number;
   playerProfiles: readonly ScenarioPlayerProfile[];
+  faults: number;
 }
 
 export interface TestRunSnapshot {
@@ -287,50 +320,50 @@ export interface ConfirmationSummary {
   stateVersion: number;
   impactHash: string;
   summary: string;
+  effect: {
+    title: string;
+    target: string;
+    currentPhase: string;
+    consequences: readonly string[];
+    irreversible: boolean;
+  };
 }
 
-export interface ScoreboardOverrideInput {
+interface ScoreboardAdjudicationBase {
   playerId: string;
-  stageId?: string;
-  displayName?: string;
-  totalPoints?: number;
-  stage?: {
-    status?: "finished" | "dnf";
-    place?: number;
-    points?: number;
-    score?: number;
-    elapsedMs?: number;
-    reason?: string;
-    includeInTotal?: boolean;
-  };
-  rankPolicy?: "tie" | "shift";
-  actor: string;
-  reason: string;
-  evidence?: string;
+  stageId: string;
   confirmationToken: string;
   impactHash: string;
 }
 
+export type ScoreboardAdjudicationInput =
+  | (ScoreboardAdjudicationBase & { operation: "set-place"; place: number; rankPolicy?: "tie" | "shift" })
+  | (ScoreboardAdjudicationBase & { operation: "set-dnf" });
+
+export type ScoreboardOverrideInput = ScoreboardAdjudicationInput;
+
+export type NotificationChannel = "bulletin" | "notice" | "announce";
+
 export type CompetitionAction =
-  | { type: "announcement"; text: string }
+  | { type: "notification"; channel: NotificationChannel; text: string }
   | { type: "ready" }
   | { type: "cheat-off" }
-  | { type: "manual-go"; confirmationToken: string; impactHash: string; reason: string }
-  | { type: "reschedule"; plannedReadyAt: string; confirmationToken: string; impactHash: string; reason: string }
-  | { type: "extend-wait"; milliseconds: number; confirmationToken: string; impactHash: string; reason: string }
-  | { type: "end-stage"; confirmationToken: string; impactHash: string; reason: string }
-  | { type: "restart"; incidentId: string; confirmationToken: string; impactHash: string; reason: string }
-  | { type: "void-attempt"; attemptId: string; confirmationToken: string; impactHash: string; reason: string }
-  | { type: "restore-attempt"; attemptId: string; confirmationToken: string; impactHash: string; reason: string }
-  | { type: "mark-dnf"; participantId: string; stageId?: string; confirmationToken: string; impactHash: string; reason: string }
-  | { type: "participant-associate"; participantId: string; connectionId: string; reason: string }
-  | { type: "participant-split"; connectionId: string; reason: string }
-  | { type: "participant-edit"; participantId: string; displayName?: string; notes?: string; reason: string }
-  | { type: "player-alias-upsert"; playerId: string; displayName: string; reason: string }
+  | { type: "manual-go"; confirmationToken: string; impactHash: string }
+  | { type: "reschedule"; plannedReadyAt: string; confirmationToken: string; impactHash: string }
+  | { type: "reschedule-stage-deadline"; deadlineAt: string; confirmationToken: string; impactHash: string }
+  | { type: "delay-ready"; milliseconds: number; confirmationToken: string; impactHash: string }
+  | { type: "extend-stage-deadline"; milliseconds: number; confirmationToken: string; impactHash: string }
+  | { type: "end-stage"; confirmationToken: string; impactHash: string }
+  | { type: "restart"; incidentId: string; confirmationToken: string; impactHash: string }
+  | { type: "void-attempt"; attemptId: string; confirmationToken: string; impactHash: string }
+  | { type: "restore-attempt"; attemptId: string; confirmationToken: string; impactHash: string }
+  | { type: "participant-associate"; participantId: string; connectionId: string }
+  | { type: "participant-split"; connectionId: string }
+  | { type: "participant-edit"; participantId: string; displayName?: string; notes?: string }
+  | { type: "player-alias-upsert"; playerId: string; displayName: string }
   | ({ type: "scoreboard-override" } & ScoreboardOverrideInput)
-  | { type: "kick"; playerName: string; confirmationToken: string; impactHash: string; reason: string }
-  | { type: "crash"; playerName: string; confirmationToken: string; impactHash: string; reason: string }
-  | { type: "raw-command"; command: string; confirmationToken: string; impactHash: string; reason: string };
+  | { type: "kick"; playerName: string; confirmationToken: string; impactHash: string }
+  | { type: "raw-command"; command: string; confirmationToken: string; impactHash: string };
 
 export const SMALL_SCORING = [20, 15, 12, 10, 8, 6, 5, 4, 3, 2, 1, 1] as const;
 export const LARGE_SCORING = [30, 24, 21, 18, 16, 14, 12, 10, 8, 6, 5, 4, 3, 2, 1] as const;
@@ -352,7 +385,7 @@ export const defaultFlowPolicy = (): FlowPolicy => ({
 
 export const defaultNotifications = (): NotificationTemplates => ({
   bulletin: "{stage} {mode} 将于 {time} 开始，请选手准备。",
-  ready: "{stage} {mode} Ready，请关闭 cheat 并回到起点。",
+  ready: "READY!",
   delay: "等待 {player} 重连，剩余 {remaining}。",
   restart: "本轮因 {reason} 重赛，请等待裁判重新发令。",
   stageComplete: "{stage} 已进入成绩接收/结算。",
@@ -370,6 +403,21 @@ export const defaultSrStages = (scoring: readonly number[] = SMALL_SCORING, mini
       level,
       mode: "SR" as const,
       timeLimitMs: level === 13 ? 15 * 60_000 : 10 * 60_000,
+      scoring,
+      minimumScoringPlace
+    };
+  });
+
+export const defaultHsStages = (scoring: readonly number[] = SMALL_SCORING, minimumScoringPlace = minimumScoringPlaceFor(scoring)): StageConfig[] =>
+  Array.from({ length: 13 }, (_unused, index) => {
+    const level = index + 1;
+    return {
+      id: `hs-${level}`,
+      order: level,
+      label: `HS ${level}`,
+      level,
+      mode: "HS" as const,
+      timeLimitMs: level === 12 || level === 13 ? 15 * 60_000 : 10 * 60_000,
       scoring,
       minimumScoringPlace
     };
@@ -432,6 +480,7 @@ export const ScenarioEventSchema = Type.Union([
   Type.Object({ ...ScenarioEventBase, type: Type.Literal("go"), stageId: Type.String(), refereeConnectionId: Type.String() }),
   Type.Object({ ...ScenarioEventBase, type: Type.Literal("finish"), stageId: Type.String(), playerId: Type.String(), score: Type.Number(), elapsedMs: Type.Integer({ minimum: 0 }) }),
   Type.Object({ ...ScenarioEventBase, type: Type.Literal("dnf"), stageId: Type.String(), playerId: Type.String(), reason: Type.String() }),
+  Type.Object({ ...ScenarioEventBase, type: Type.Literal("exclude"), stageId: Type.String(), playerId: Type.String(), reason: Type.String() }),
   Type.Object({ ...ScenarioEventBase, type: Type.Literal("cheat"), playerId: Type.String(), enabled: Type.Boolean() }),
   Type.Object({ ...ScenarioEventBase, type: Type.Literal("warning"), playerId: Type.Optional(Type.String()), message: Type.String() }),
   Type.Object({
@@ -447,6 +496,21 @@ export const ScenarioEventSchema = Type.Union([
 ]);
 export type ScenarioEvent = Static<typeof ScenarioEventSchema>;
 
+export const ScenarioFaultPlanSchema = Type.Object({
+  id: Type.String({ minLength: 1 }),
+  fault: Type.Union([
+    Type.Literal("process-exit"), Type.Literal("server-disconnect"), Type.Literal("clock-jump"),
+    Type.Literal("participant-disconnect"), Type.Literal("player-crash"), Type.Literal("warning")
+  ]),
+  trigger: Type.Union([Type.Literal("ready"), Type.Literal("running")]),
+  stageOrder: Type.Integer({ minimum: 1 }),
+  offsetMs: Type.Integer({ minimum: 0 }),
+  playerId: Type.Optional(Type.String()),
+  recoverAfterMs: Type.Optional(Type.Integer({ minimum: 1 })),
+  message: Type.Optional(Type.String())
+});
+export type ScenarioFaultPlan = Static<typeof ScenarioFaultPlanSchema>;
+
 export const ScenarioDefinitionSchema = Type.Object({
   schemaVersion: Type.Literal(1),
   kind: Type.Optional(Type.Union([Type.Literal("player-behavior"), Type.Literal("scripted-replay")])),
@@ -459,6 +523,7 @@ export const ScenarioDefinitionSchema = Type.Object({
   players: Type.Array(ScenarioPlayerSchema, { minItems: 1 }),
   stages: Type.Array(ScenarioStageSchema),
   events: Type.Array(ScenarioEventSchema),
+  faultPlan: Type.Optional(Type.Array(ScenarioFaultPlanSchema)),
   expected: Type.Object({
     attempts: Type.Integer({ minimum: 0 }),
     scoreboardVersions: Type.Integer({ minimum: 0 })

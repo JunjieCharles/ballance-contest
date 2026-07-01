@@ -41,7 +41,9 @@ export const parseLogLine = (input: string, context: ParseContext): ParsedLogLin
     const login = /^(.*?) \(#(\d+)\) logged in with cheat mode (on|off)\.$/.exec(body);
     const disconnect = /^(.*?) \(#(\d+)\) disconnected\.$/.exec(body);
     const listed = /^(.*?) \(#(\d+)\)( \[CHEAT\])?$/.exec(body);
-    const readyOrGo = /^\[(\d+), (.*?)\]: Level (\d{2}) - (Get ready|Go!)$/.exec(body);
+    const readyOrGo = /^\[(\d+), (.*?)\]: Level (\d{2}) - (Get ready|3|2|1|Go!)$/.exec(body);
+    const noticeOrAnnouncement = /^\[(Notice|Announcement)\] \((\d+), (.*?)\): (.*)$/.exec(body);
+    const bulletin = /^\[Bulletin\] (.*?): (.*)$/.exec(body);
     const finish = /^(\[CHEAT\] )?\(#(\d+), (.*?)\) finished Level (\d{2}) in (\d+)(?:st|nd|rd|th) place \(score: (-?\d+); real time: (\d+):(\d+):(\d+)\.(\d+)\)\.$/.exec(body);
     const dnf = /^(\[CHEAT\] )?\(#(\d+), (.*?)\) did not finish Level (\d{2}) \(furthest reach: sector (-?\d+)\)\.$/.exec(body);
     const cheat = /^\(?#?(\d+), (.*?)\)? turned cheat (on|off)\.$/.exec(body);
@@ -55,13 +57,22 @@ export const parseLogLine = (input: string, context: ParseContext): ParsedLogLin
     } else if (listed) {
       event = { ...metadata, type: "player-listed", playerName: listed[1] ?? "", connectionId: listed[2] ?? "", cheat: Boolean(listed[3]) };
     } else if (readyOrGo) {
+      const value = readyOrGo[4] ?? "";
+      const common = { ...metadata, connectionId: readyOrGo[1] ?? "", refereeName: readyOrGo[2] ?? "", level: Number(readyOrGo[3]) };
+      event = value === "Go!" ? { ...common, type: "go" }
+        : value === "Get ready" ? { ...common, type: "ready" }
+        : { ...common, type: "countdown", value: Number(value) as 3 | 2 | 1 };
+    } else if (noticeOrAnnouncement) {
       event = {
         ...metadata,
-        type: readyOrGo[4] === "Go!" ? "go" : "ready",
-        connectionId: readyOrGo[1] ?? "",
-        refereeName: readyOrGo[2] ?? "",
-        level: Number(readyOrGo[3])
+        type: "notification",
+        channel: noticeOrAnnouncement[1] === "Notice" ? "notice" : "announce",
+        connectionId: noticeOrAnnouncement[2] ?? "",
+        refereeName: noticeOrAnnouncement[3] ?? "",
+        text: noticeOrAnnouncement[4] ?? ""
       };
+    } else if (bulletin) {
+      event = { ...metadata, type: "notification", channel: "bulletin", refereeName: bulletin[1] ?? "", text: bulletin[2] ?? "" };
     } else if (finish) {
       event = {
         ...metadata,
@@ -87,7 +98,20 @@ export const parseLogLine = (input: string, context: ParseContext): ParsedLogLin
     } else if (cheat) {
       event = { ...metadata, type: "cheat-changed", connectionId: cheat[1] ?? "", playerName: cheat[2] ?? "", enabled: cheat[3] === "on" };
     } else if (body.startsWith("[Warning]")) {
-      event = { ...metadata, type: "warning", message: body.slice("[Warning]".length).trim() };
+      const message = body.slice("[Warning]".length).trim();
+      const uncontrollable = /^(.*?) just restarted Level (\d{2}) when their ball is not controllable\.$/.exec(message);
+      const resetHotkey = /^(.*?) just pressed the Reset hotkey at Level (\d{2})!$/.exec(message);
+      const violation = uncontrollable ?? resetHotkey;
+      event = violation
+        ? {
+            ...metadata,
+            type: "warning",
+            message,
+            playerName: violation[1] ?? "",
+            level: Number(violation[2]),
+            violationCode: uncontrollable ? "uncontrollable-restart" : "reset-hotkey"
+          }
+        : { ...metadata, type: "warning", message };
     } else {
       event = { ...metadata, type: "unknown", text: body };
     }

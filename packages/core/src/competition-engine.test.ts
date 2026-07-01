@@ -70,6 +70,51 @@ describe("CompetitionEngine", () => {
     expect(snapshot.anomalies).toContainEqual(expect.objectContaining({ sourceId: "dnf-after", code: "post-completion-result" }));
   });
 
+  it("keeps excluded evidence at zero points and lets later valid finishers move up", () => {
+    const base = loadMain();
+    const scenario = assertScenarioDefinition({
+      ...base,
+      id: "excluded-finish-evidence",
+      stages: [base.stages[0]],
+      players: base.players.slice(0, 2),
+      events: [
+        { atMs: 0, sourceId: "go", type: "go", stageId: "s1", refereeConnectionId: "ref-1" },
+        { atMs: 10, sourceId: "p1-cheat", type: "exclude", stageId: "s1", playerId: "p1", reason: "cheat-enabled" },
+        { atMs: 20, sourceId: "p1-finish", type: "finish", stageId: "s1", playerId: "p1", score: 999, elapsedMs: 20 },
+        { atMs: 30, sourceId: "p2-finish", type: "finish", stageId: "s1", playerId: "p2", score: 800, elapsedMs: 30 }
+      ],
+      expected: { attempts: 1, scoreboardVersions: 3 }
+    });
+    const engine = new CompetitionEngine(scenario);
+    for (const event of scenario.events) engine.apply(event);
+
+    const p1 = engine.snapshot().currentScoreboard.find((entry) => entry.playerId === "p1")?.stages.s1;
+    const p2 = engine.snapshot().currentScoreboard.find((entry) => entry.playerId === "p2")?.stages.s1;
+    expect(p1).toMatchObject({ status: "excluded", place: 0, points: 0, sourceId: "p1-cheat", finishSourceId: "p1-finish", score: 999 });
+    expect(p2).toMatchObject({ status: "finished", place: 1, points: 20 });
+  });
+
+  it("can exclude an already recorded finish without losing its source evidence", () => {
+    const base = loadMain();
+    const scenario = assertScenarioDefinition({
+      ...base,
+      id: "finish-then-excluded",
+      stages: [base.stages[0]],
+      players: [base.players[0]],
+      events: [
+        { atMs: 0, sourceId: "go", type: "go", stageId: "s1", refereeConnectionId: "ref-1" },
+        { atMs: 10, sourceId: "finish", type: "finish", stageId: "s1", playerId: "p1", score: 999, elapsedMs: 10 },
+        { atMs: 20, sourceId: "warning", type: "exclude", stageId: "s1", playerId: "p1", reason: "reset-hotkey" }
+      ],
+      expected: { attempts: 1, scoreboardVersions: 2 }
+    });
+    const engine = new CompetitionEngine(scenario);
+    for (const event of scenario.events) engine.apply(event);
+    expect(engine.snapshot().currentScoreboard[0]?.stages.s1).toMatchObject({
+      status: "excluded", place: 0, points: 0, sourceId: "warning", finishSourceId: "finish", score: 999
+    });
+  });
+
   it("rejects an unauthorized Go and never creates an attempt", () => {
     const definition = loadMain();
     const engine = new CompetitionEngine(definition);

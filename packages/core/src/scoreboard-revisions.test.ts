@@ -59,4 +59,32 @@ describe("ScoreboardRevisionLedger", () => {
     expect(stageResults.p3).toMatchObject({ place: 2, points: 15 });
     expect(stageResults.p1).toMatchObject({ place: 3, points: 12 });
   });
+
+  it("preserves every leaderboard entry after a place edit", () => {
+    const source = baseVersion();
+    const ledger = new ScoreboardRevisionLedger(source, { s3: [20, 15, 12] });
+    const revised = ledger.apply({
+      playerId: "p2", stageId: "s3", stage: { status: "finished", place: 1 }, rankPolicy: "shift",
+      actor: "referee", reason: "adjudicated place"
+    });
+
+    expect(revised.entries).toHaveLength(source.entries.length);
+    expect(new Set(revised.entries.map((entry) => entry.playerId))).toEqual(new Set(source.entries.map((entry) => entry.playerId)));
+    expect(revised.entries.find((entry) => entry.playerId === "p2")?.stages.s3).toMatchObject({ status: "finished", place: 1, points: 20 });
+  });
+
+  it("can adjudicate an empty stage cell as DNF without removing the player", () => {
+    const source = baseVersion();
+    const entries = source.entries.map((entry) => entry.playerId === "p5"
+      ? { ...entry, stages: Object.fromEntries(Object.entries(entry.stages).filter(([stageId]) => stageId !== "s3")) }
+      : entry);
+    const ledger = new ScoreboardRevisionLedger({ ...source, entries });
+    const revised = ledger.apply({
+      playerId: "p5", stageId: "s3", stage: { status: "dnf", reason: "referee-adjudicated-dnf" },
+      actor: "referee", reason: "set DNF"
+    });
+
+    expect(revised.entries).toHaveLength(source.entries.length);
+    expect(revised.entries.find((entry) => entry.playerId === "p5")?.stages.s3).toMatchObject({ status: "dnf", place: 0, points: 0 });
+  });
 });

@@ -26,6 +26,30 @@ describe("parseLogLine", () => {
       .toMatchObject({ type: "cheat-changed", enabled: true });
   });
 
+  it("parses the three player-facing notifications and the real 3/2/1 countdown", () => {
+    expect(parseLogLine("[06-29 11:20:12] [Announcement] (2717249041, *Referee): READY!", context).event)
+      .toMatchObject({ type: "notification", channel: "announce", refereeName: "*Referee", text: "READY!" });
+    expect(parseLogLine("[06-29 11:20:13] [Notice] (2717249041, *Referee): wait Player", context).event)
+      .toMatchObject({ type: "notification", channel: "notice", text: "wait Player" });
+    expect(parseLogLine("[06-29 11:20:14] [Bulletin] *Referee: SR1, 20:10", context).event)
+      .toMatchObject({ type: "notification", channel: "bulletin", text: "SR1, 20:10" });
+    for (const value of [3, 2, 1] as const) {
+      expect(parseLogLine(`[06-29 11:20:2${8 - value}] [2717249041, *Referee]: Level 01 - ${value}`, context).event)
+        .toMatchObject({ type: "countdown", level: 1, value });
+    }
+  });
+
+  it("identifies only the two known player warnings as scoring violations", () => {
+    expect(parseLogLine("[06-29 11:20:14] [Warning] Hurts_LM just pressed the Reset hotkey at Level 01!", context).event)
+      .toMatchObject({ type: "warning", playerName: "Hurts_LM", level: 1, violationCode: "reset-hotkey" });
+    expect(parseLogLine("[06-29 11:20:15] [Warning] Fresh_Mush just restarted Level 01 when their ball is not controllable.", context).event)
+      .toMatchObject({ type: "warning", playerName: "Fresh_Mush", level: 1, violationCode: "uncontrollable-restart" });
+    expect(parseLogLine("[06-29 11:20:16] [Warning] Incompatible server version.", context).event)
+      .toEqual(expect.objectContaining({ type: "warning", message: "Incompatible server version." }));
+    expect(parseLogLine("[06-29 11:20:16] [Warning] Incompatible server version.", context).event)
+      .not.toEqual(expect.objectContaining({ playerName: expect.any(String) }));
+  });
+
   it("removes ANSI and preserves unknown data without changing state", () => {
     const parsed = parseLogLine("\u001b[31m[06-29 11:21:00] new upstream format\u001b[0m", context);
     expect(parsed.event).toMatchObject({ type: "unknown", text: "new upstream format" });

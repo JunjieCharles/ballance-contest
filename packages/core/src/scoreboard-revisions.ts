@@ -2,7 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import type { ScoreboardEntry, ScoreboardVersion, StageResult } from "./competition-engine.js";
 
 export interface StageResultPatch {
-  status?: "finished" | "dnf";
+  status?: "finished" | "dnf" | "excluded";
   place?: number;
   points?: number;
   score?: number;
@@ -147,37 +147,51 @@ export class ScoreboardRevisionLedger {
     if (request.displayName !== undefined) (entry as { displayName: string }).displayName = request.displayName;
     if (request.stageId !== undefined && request.stage !== undefined) {
       const current = entry.stages[request.stageId];
-      if (!current) throw new Error("OVERRIDE_STAGE_RESULT_NOT_FOUND");
       const patch = request.stage;
+      if (!current && patch.status !== "dnf") throw new Error("OVERRIDE_STAGE_RESULT_NOT_FOUND");
       if (patch.place !== undefined && (!Number.isInteger(patch.place) || patch.place < 1)) throw new Error("OVERRIDE_PLACE_INVALID");
-      if (patch.place !== undefined && patch.place !== current.place && request.rankPolicy === "shift") {
-        const oldPlace = current.place;
-        for (const candidate of entries) {
-          const result = candidate.stages[request.stageId];
-          if (!result || result.status !== "finished" || candidate.playerId === entry.playerId) continue;
-          const movesDown = patch.place < oldPlace && result.place >= patch.place && result.place < oldPlace;
-          const movesUp = patch.place > oldPlace && result.place > oldPlace && result.place <= patch.place;
-          if (movesDown || movesUp) {
-            const place = result.place + (movesDown ? 1 : -1);
-            (candidate.stages as Record<string, StageResult>)[request.stageId] = {
-              ...result,
-              place,
-              points: this.pointsFor(request.stageId, place, result.points)
-            };
-            this.recalculate(candidate);
-          }
-        }
-      }
-      const merged = { ...current, ...patch } as StageResult & { includeInTotal?: boolean };
+      const fallback: StageResult = {
+        playerId: entry.playerId,
+        status: "dnf",
+        place: 0,
+        points: 0,
+        reason: patch.reason ?? "referee-adjudicated-dnf",
+        sourceId: `adjudication:${entry.playerId}:${request.stageId}`
+      };
+      const merged = { ...(current ?? fallback), ...patch } as StageResult & { includeInTotal?: boolean };
       if (merged.status === "finished" && patch.place !== undefined) {
         merged.points = this.pointsFor(request.stageId, patch.place, merged.points);
+      } else if (merged.status !== "finished") {
+        merged.place = 0;
+        merged.points = 0;
       }
       delete merged.includeInTotal;
       if (patch.includeInTotal === false) merged.points = 0;
       (entry.stages as Record<string, StageResult>)[request.stageId] = merged;
-      this.recalculate(entry);
+      this.normalizeStagePlaces(entries, request.stageId, entry.playerId, patch.place);
     }
     if (request.totalPoints !== undefined) (entry as { points: number }).points = request.totalPoints;
+  }
+
+  private normalizeStagePlaces(entries: ScoreboardEntry[], stageId: string, targetPlayerId: string, requestedPlace?: number): void {
+    const target = entries.find((candidate) => candidate.playerId === targetPlayerId);
+    const targetResult = target?.stages[stageId];
+    const finished = entries
+      .filter((candidate) => candidate.playerId !== targetPlayerId && candidate.stages[stageId]?.status === "finished")
+      .sort((left, right) => (left.stages[stageId]?.place ?? 0) - (right.stages[stageId]?.place ?? 0));
+    if (target && targetResult?.status === "finished") {
+      const index = Math.min(finished.length, Math.max(0, (requestedPlace ?? targetResult.place) - 1));
+      finished.splice(index, 0, target);
+    }
+    finished.forEach((candidate, index) => {
+      const result = candidate.stages[stageId] as StageResult;
+      (candidate.stages as Record<string, StageResult>)[stageId] = {
+        ...result,
+        place: index + 1,
+        points: this.pointsFor(stageId, index + 1, result.points)
+      };
+    });
+    for (const candidate of entries) this.recalculate(candidate);
   }
 
   private pointsFor(stageId: string, place: number, fallback: number): number {

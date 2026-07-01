@@ -33,6 +33,17 @@ const settle = (controller: CompetitionController, statusFor?: (action: Automati
   }
 };
 
+const startRunning = (controller: CompetitionController, clock: ManualClock, readyBufferMs: number): void => {
+  controller.enable(0);
+  settle(controller);
+  clock.advanceBy(3_000);
+  settle(controller);
+  clock.advanceBy(3_000);
+  settle(controller);
+  clock.advanceBy(Math.max(0, readyBufferMs - 6_000));
+  settle(controller);
+};
+
 const putEveryoneOnline = (controller: CompetitionController, participants = ["p1", "p2", "p3"]): void => {
   for (const participantId of participants) controller.observeConnection(participantId, true);
 };
@@ -67,8 +78,7 @@ describe("P0 centralized automation and command regression", () => {
     const clock = new ManualClock();
     const controller = makeController(clock, { readyBufferMs: 0 });
     putEveryoneOnline(controller);
-    controller.enable(0);
-    settle(controller);
+    startRunning(controller, clock, 0);
     expect(controller.snapshot().phase).toBe("running");
 
     expect(controller.recordResult({ stageId: "s1", playerId: "p1", status: "finished", sourceId: "s1-p1" })).toBe("accepted");
@@ -83,14 +93,13 @@ describe("P0 centralized automation and command regression", () => {
     expect(controller.recordResult({ stageId: "s1", playerId: "p3", status: "finished", sourceId: "s1-p3-after-ready" })).toBe("intake-closed");
   });
 
-  it("BE-CHEAT-001/002: turns in-race cheat into DNF while leaving completed players untouched", () => {
+  it("BE-CHEAT-001/002: excludes in-race cheat while leaving completed players untouched", () => {
     const clock = new ManualClock();
     const controller = makeController(clock, { readyBufferMs: 0 }, ["p1", "p2"]);
     putEveryoneOnline(controller, ["p1", "p2"]);
     controller.observeCheat("p2", true, "practice-cheat");
     controller.observeCheat("p2", false, "practice-cheat-off");
-    controller.enable(0);
-    settle(controller);
+    startRunning(controller, clock, 0);
     expect(controller.snapshot().phase).toBe("running");
 
     expect(controller.recordResult({ stageId: "s1", playerId: "p1", status: "finished", sourceId: "p1-finish" })).toBe("accepted");
@@ -99,18 +108,17 @@ describe("P0 centralized automation and command regression", () => {
     const attempt = controller.snapshot().attempts[0];
     expect(attempt?.results).toEqual([
       expect.objectContaining({ playerId: "p1", status: "finished", sourceId: "p1-finish" }),
-      expect.objectContaining({ playerId: "p2", status: "dnf", sourceId: "p2-cheat-running", reason: "cheat-enabled" })
+      expect.objectContaining({ playerId: "p2", status: "excluded", sourceId: "p2-cheat-running", reason: "cheat-enabled" })
     ]);
     expect(controller.snapshot().incidents).toEqual([expect.objectContaining({ type: "cheat-violation", participantIds: ["p2"], recommendedRestart: false })]);
-    expect(controller.recordResult({ stageId: "s1", playerId: "p2", status: "finished", sourceId: "p2-finish-after-cheat" })).toBe("duplicate");
+    expect(controller.recordResult({ stageId: "s1", playerId: "p2", status: "finished", sourceId: "p2-finish-after-cheat" })).toBe("accepted");
   });
 
   it("BE-RESTART-001/002/003: binds restart confirmation to current state and sends one force-next-restart before the new Go", () => {
     const clock = new ManualClock();
     const controller = makeController(clock, { readyBufferMs: 0 }, ["p1", "p2"]);
     putEveryoneOnline(controller, ["p1", "p2"]);
-    controller.enable(0);
-    settle(controller);
+    startRunning(controller, clock, 0);
     controller.observeCrash("p2", "protected crash");
     const incident = controller.snapshot().incidents[0];
     expect(incident).toMatchObject({ type: "protected-crash", recommendedRestart: true });
@@ -119,6 +127,8 @@ describe("P0 centralized automation and command regression", () => {
     expect(() => controller.confirmRestart({ incidentId: incident!.id, impactHash: confirmation.impactHash, token: "bad-token", reason: "bad" })).toThrow("INVALID_CONFIRMATION_TOKEN");
     controller.confirmRestart({ incidentId: incident!.id, impactHash: confirmation.impactHash, token: confirmation.token, reason: "保护窗口崩溃重赛" });
     settle(controller);
+    clock.advanceBy(3_000); settle(controller);
+    clock.advanceBy(3_000); settle(controller);
     expect(controller.snapshot().actions.filter((action) => action.kind === "force-next-restart")).toHaveLength(1);
     expect(controller.snapshot().attempts[0]).toMatchObject({ voided: true });
     expect(controller.snapshot().phase).toBe("running");

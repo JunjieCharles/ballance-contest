@@ -34,16 +34,59 @@ const enterRunning = (controller: CompetitionController, clock: FakeClock): void
   controller.enable(clock.now());
   controller.drainActions();
   controller.tick();
-  const readyActions = controller.drainActions();
-  controller.acknowledgeAction((readyActions.find((item) => item.kind === "ready") as AutomationAction).id, "acknowledged");
-  controller.acknowledgeAction((readyActions.find((item) => item.kind === "cheat-off") as AutomationAction).id, "acknowledged");
-  clock.advance(1_000);
+  controller.acknowledgeAction(action(controller, "ready").id, "acknowledged");
+  for (let index = 0; index < 2; index += 1) {
+    clock.advance(3_000);
+    controller.tick();
+    controller.acknowledgeAction(action(controller, "ready").id, "acknowledged");
+  }
+  controller.tick();
+  controller.acknowledgeAction(action(controller, "announce").id, "acknowledged");
+  controller.tick();
+  controller.acknowledgeAction(action(controller, "cheat-off").id, "acknowledged");
   controller.tick();
   const go = action(controller, "go");
   controller.acknowledgeAction(go.id, "acknowledged");
 };
 
 describe("CompetitionController", () => {
+  it("sends Ready three times at 0/3/6 seconds before READY, cheat-off and Go", () => {
+    const clock = new FakeClock();
+    const controller = new CompetitionController(configuration(), clock);
+    connectAll(controller);
+    controller.enable(0);
+
+    controller.tick();
+    let current = action(controller, "ready");
+    expect(current.createdAtMs).toBe(0);
+    controller.acknowledgeAction(current.id, "acknowledged");
+    clock.advance(3_000);
+    controller.tick();
+    current = action(controller, "ready");
+    expect(current.createdAtMs).toBe(3_000);
+    controller.acknowledgeAction(current.id, "acknowledged");
+    clock.advance(3_000);
+    controller.tick();
+    current = action(controller, "ready");
+    expect(current.createdAtMs).toBe(6_000);
+    controller.acknowledgeAction(current.id, "acknowledged");
+    controller.tick();
+    const readyAnnouncement = action(controller, "announce");
+    expect(readyAnnouncement.message).toBe("READY!");
+    controller.acknowledgeAction(readyAnnouncement.id, "acknowledged");
+    controller.tick();
+    const cheatOff = action(controller, "cheat-off");
+    controller.acknowledgeAction(cheatOff.id, "acknowledged");
+    controller.tick();
+    const go = action(controller, "go");
+    controller.acknowledgeAction(go.id, "acknowledged");
+
+    expect(controller.snapshot()).toMatchObject({ phase: "running", attempts: [{ goAtMs: 6_000 }] });
+    expect(controller.snapshot().actions.map((item) => item.kind)).toEqual([
+      "bulletin", "ready", "ready", "ready", "announce", "cheat-off", "go"
+    ]);
+  });
+
   it("registers observed players dynamically without treating the known set as a closed roster", () => {
     const clock = new FakeClock();
     const controller = new CompetitionController(configuration({
@@ -66,18 +109,18 @@ describe("CompetitionController", () => {
     for (const playerId of ["p1", "p2", "p3"]) {
       expect(controller.recordResult({ stageId: "s1", playerId, status: "finished", sourceId: `finish-${playerId}` })).toBe("accepted");
     }
-    expect(controller.snapshot()).toMatchObject({ phase: "tail-intake", plannedReadyAtMs: 4_000 });
+    expect(controller.snapshot()).toMatchObject({ phase: "tail-intake", plannedReadyAtMs: 9_000 });
     expect(controller.snapshot().actions.at(-1)?.message).toBe("下一轮 Ready 计划在 3 秒后执行");
 
-    clock.set(3_999);
+    clock.set(8_999);
     expect(controller.recordResult({ stageId: "s1", playerId: "p4", status: "finished", sourceId: "finish-p4" })).toBe("accepted");
-    clock.set(4_000);
+    clock.set(9_000);
     controller.tick();
 
     const snapshot = controller.snapshot();
     expect(snapshot.phase).toBe("ready");
     expect(snapshot.currentStageId).toBe("s2");
-    expect(snapshot.attempts[0]).toMatchObject({ stageId: "s1", intakeOpen: false, intakeClosedAtMs: 4_000 });
+    expect(snapshot.attempts[0]).toMatchObject({ stageId: "s1", intakeOpen: false, intakeClosedAtMs: 9_000 });
     expect(controller.recordResult({ stageId: "s1", playerId: "p5", status: "finished", sourceId: "finish-p5" })).toBe("intake-closed");
     expect(controller.snapshot().rejectedResults.at(-1)?.reason).toBe("intake-closed");
   });
@@ -95,14 +138,14 @@ describe("CompetitionController", () => {
     for (const playerId of ["p1", "p2", "p3"]) controller.recordResult({ stageId: "s1", playerId, status: "finished", sourceId: playerId });
     controller.observeConnection("p5", false);
 
-    clock.set(4_000);
+    clock.set(9_000);
     controller.tick();
     expect(controller.snapshot()).toMatchObject({ phase: "tail-intake", attempts: [{ intakeOpen: true }] });
     expect(controller.recordResult({ stageId: "s1", playerId: "p4", status: "finished", sourceId: "p4" })).toBe("accepted");
 
-    clock.set(6_000);
+    clock.set(12_000);
     controller.tick();
-    expect(controller.snapshot().attempts[0]).toMatchObject({ intakeOpen: false, intakeClosedAtMs: 6_000 });
+    expect(controller.snapshot().attempts[0]).toMatchObject({ intakeOpen: false, intakeClosedAtMs: 12_000 });
     expect(controller.snapshot().attempts[0]?.results).toContainEqual(expect.objectContaining({ playerId: "p5", status: "dnf", reason: "time-limit" }));
   });
 
@@ -136,8 +179,12 @@ describe("CompetitionController", () => {
     controller.enable(0);
     controller.drainActions();
     controller.tick();
-    for (const item of controller.drainActions()) controller.acknowledgeAction(item.id, "acknowledged");
-    clock.advance(1_000);
+    controller.acknowledgeAction(action(controller, "ready").id, "acknowledged");
+    for (let index = 0; index < 2; index += 1) {
+      clock.advance(3_000); controller.tick(); controller.acknowledgeAction(action(controller, "ready").id, "acknowledged");
+    }
+    controller.tick(); controller.acknowledgeAction(action(controller, "announce").id, "acknowledged");
+    controller.tick(); controller.acknowledgeAction(action(controller, "cheat-off").id, "acknowledged");
     controller.tick();
     const go = action(controller, "go");
     controller.acknowledgeAction(go.id, "uncertain");
@@ -162,9 +209,12 @@ describe("CompetitionController", () => {
     controller.confirmRestart({ incidentId: incident.id, impactHash: confirmation.impactHash, token: confirmation.token, reason: "保护窗口崩溃" });
     controller.drainActions();
     controller.tick();
-    const readyActions = controller.drainActions();
-    for (const item of readyActions) controller.acknowledgeAction(item.id, "acknowledged");
-    clock.advance(1_000);
+    controller.acknowledgeAction(action(controller, "ready").id, "acknowledged");
+    for (let index = 0; index < 2; index += 1) {
+      clock.advance(3_000); controller.tick(); controller.acknowledgeAction(action(controller, "ready").id, "acknowledged");
+    }
+    controller.tick(); controller.acknowledgeAction(action(controller, "announce").id, "acknowledged");
+    controller.tick(); controller.acknowledgeAction(action(controller, "cheat-off").id, "acknowledged");
     controller.tick();
     const force = action(controller, "force-next-restart");
     controller.acknowledgeAction(force.id, "acknowledged");
@@ -180,7 +230,7 @@ describe("CompetitionController", () => {
     expect(snapshot.attempts[1]).toMatchObject({ attemptNumber: 2, voided: false });
   });
 
-  it("turns an unfinished player's in-race cheat into DNF without changing completed players", () => {
+  it("excludes an unfinished player's in-race cheat without changing completed players", () => {
     const clock = new FakeClock();
     const controller = new CompetitionController(configuration(), clock);
     connectAll(controller);
@@ -190,7 +240,7 @@ describe("CompetitionController", () => {
     controller.observeCheat("p2", true, "cheat-p2-after-finish");
 
     const results = controller.snapshot().attempts[0]?.results ?? [];
-    expect(results).toContainEqual(expect.objectContaining({ playerId: "p1", status: "dnf", reason: "cheat-enabled" }));
+    expect(results).toContainEqual(expect.objectContaining({ playerId: "p1", status: "excluded", reason: "cheat-enabled" }));
     expect(results.filter((result) => result.playerId === "p2")).toEqual([expect.objectContaining({ status: "finished" })]);
     expect(controller.snapshot().incidents.filter((item) => item.type === "cheat-violation")).toHaveLength(1);
   });

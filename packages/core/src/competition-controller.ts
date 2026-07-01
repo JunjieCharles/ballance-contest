@@ -53,7 +53,7 @@ const formatDelay = (milliseconds: number): string => {
   return seconds === 0 ? `${minutes} 分钟` : `${minutes} 分 ${seconds} 秒`;
 };
 
-export type AutomationActionKind = "announcement" | "ready" | "cheat-off" | "go" | "force-next-restart";
+export type AutomationActionKind = "bulletin" | "notice" | "announce" | "ready" | "cheat-off" | "go" | "force-next-restart";
 
 export interface AutomationAction {
   id: string;
@@ -77,10 +77,11 @@ export interface AutomationBlocker {
 
 export interface AutomationResult {
   playerId: string;
-  status: "finished" | "dnf";
+  status: "finished" | "dnf" | "excluded";
   sourceId: string;
   receivedAtMs: number;
   reason?: string;
+  finishSourceId?: string;
 }
 
 export interface ControlledAttempt {
@@ -121,6 +122,7 @@ export interface AutomationSnapshot {
   automationEnabled: boolean;
   currentStageId: string;
   plannedReadyAtMs?: number;
+  countdownValue?: 3 | 2 | 1;
   blockers: readonly AutomationBlocker[];
   waitingParticipants: readonly string[];
   attempts: readonly ControlledAttempt[];
@@ -222,9 +224,13 @@ export class CompetitionController {
   private nextStagePending = false;
   private restartPending = false;
   private readyActionId: string | undefined;
+  private readonly readyActionIds: string[] = [];
+  private readyAnnouncementActionId: string | undefined;
   private cheatOffActionId: string | undefined;
   private forceRestartActionId: string | undefined;
   private goActionId: string | undefined;
+  private manualFlow = false;
+  private countdownValue: 3 | 2 | 1 | undefined;
 
   public constructor(private readonly configuration: AutomationConfiguration, private readonly clock: MonotonicClock) {
     if (configuration.stages.length === 0) throw new Error("At least one stage is required");
@@ -277,9 +283,11 @@ export class CompetitionController {
         this.phase = "pre-start-wait";
         this.readyAtMs = undefined;
         this.readyActionId = undefined;
+        this.readyActionIds.length = 0;
+        this.readyAnnouncementActionId = undefined;
         this.cheatOffActionId = undefined;
         this.goActionId = undefined;
-        this.queueAction("announcement", `等待 ${participantId} 重连`);
+        this.queueAction("notice", `等待 ${participantId} 重连`);
       }
     } else if ((this.phase === "running" || this.phase === "tail-intake") && !online) {
       this.disconnectedDuringAttempt.add(participantId);
@@ -297,12 +305,33 @@ export class CompetitionController {
     this.cheat.set(participantId, enabled);
     const attempt = this.currentAttempt;
     if (enabled && attempt?.intakeOpen && (this.phase === "running" || this.phase === "tail-intake") && !attempt.results.some((result) => result.playerId === participantId)) {
-      this.acceptResult(attempt, { playerId: participantId, status: "dnf", sourceId, receivedAtMs: this.clock.now(), reason: "cheat-enabled" });
+      this.acceptResult(attempt, { playerId: participantId, status: "excluded", sourceId, receivedAtMs: this.clock.now(), reason: "cheat-enabled" });
       this.incidents.push({
         id: randomUUID(), type: "cheat-violation", severity: "high", createdAtMs: this.clock.now(), attemptId: attempt.id,
         participantIds: [participantId], recommendedRestart: false, status: "open", evidence: `cheat ${previous ? "on" : "off"} -> on`
       });
     }
+    this.bump();
+  }
+
+  public observeViolation(participantId: string, sourceId: string, reason: string): void {
+    this.assertParticipant(participantId);
+    const attempt = this.currentAttempt;
+    if (!attempt?.intakeOpen || (this.phase !== "running" && this.phase !== "tail-intake")) return;
+    const existing = attempt.results.find((result) => result.playerId === participantId);
+    if (existing?.status === "dnf" || existing?.status === "excluded") return;
+    if (existing?.status === "finished") {
+      existing.status = "excluded";
+      existing.reason = reason;
+      existing.finishSourceId = existing.sourceId;
+      existing.sourceId = sourceId;
+    } else {
+      this.acceptResult(attempt, { playerId: participantId, status: "excluded", sourceId, receivedAtMs: this.clock.now(), reason });
+    }
+    this.incidents.push({
+      id: randomUUID(), type: "cheat-violation", severity: "high", createdAtMs: this.clock.now(), attemptId: attempt.id,
+      participantIds: [participantId], recommendedRestart: false, status: "open", evidence: reason
+    });
     this.bump();
   }
 
@@ -343,12 +372,13 @@ export class CompetitionController {
     this.automationEnabled = true;
     this.phase = "preparing";
     this.plannedReadyAtMs = plannedReadyAtMs;
-    this.queueAction("announcement", `${this.stage.map.toUpperCase()} ${this.stage.mode.toUpperCase()} 将于计划时间开始`);
+    this.manualFlow = false;
+    this.queueAction("bulletin", `${this.stage.mode.toUpperCase()}${this.stage.map} 将于计划时间 Ready`);
     this.bump();
   }
 
   public pause(): void {
-    if (!this.automationEnabled) return;
+    if (!this.automationEnabled && this.phase === "paused") return;
     this.automationEnabled = false;
     this.phase = "paused";
     this.bump();
@@ -358,7 +388,7 @@ export class CompetitionController {
     const now = this.clock.now();
     const attempt = this.currentAttempt;
     if (attempt?.intakeOpen && now >= attempt.deadlineAtMs) this.closeAtDeadline(attempt);
-    if (!this.automationEnabled) return;
+    if (!this.automationEnabled && this.phase !== "ready" && this.phase !== "countdown") return;
 
     if (this.phase === "pre-start-wait") {
       const allStable = [...this.waiting].every((participantId) =>
@@ -389,13 +419,34 @@ export class CompetitionController {
       this.enterReady(false);
       return;
     }
-    if (this.phase !== "ready" || this.readyAtMs === undefined || now < this.readyAtMs + this.policy.readyBufferMs) return;
-    if (this.startBlockers().length > 0 || !this.isAcknowledged(this.readyActionId) || !this.isAcknowledged(this.cheatOffActionId)) return;
+    if (this.phase !== "ready" || this.readyAtMs === undefined) return;
+    const nextReadyAtMs = this.readyAtMs + this.readyActionIds.length * 3_000;
+    if (this.readyActionIds.length < 3 && now >= nextReadyAtMs && this.readyActionIds.every((id) => this.isAcknowledged(id))) {
+      const action = this.queueAction("ready");
+      this.readyActionIds.push(action.id);
+      this.readyActionId = action.id;
+      this.bump();
+      return;
+    }
+    if (this.readyActionIds.length < 3 || !this.readyActionIds.every((id) => this.isAcknowledged(id))) return;
+    if (!this.readyAnnouncementActionId) {
+      this.readyAnnouncementActionId = this.queueAction("announce", "READY!").id;
+      this.bump();
+      return;
+    }
+    if (!this.isAcknowledged(this.readyAnnouncementActionId)) return;
+    if (!this.cheatOffActionId) {
+      this.cheatOffActionId = this.queueAction("cheat-off").id;
+      this.bump();
+      return;
+    }
+    if (now < this.readyAtMs + this.policy.readyBufferMs) return;
+    if (this.startBlockers(!this.manualFlow).length > 0 || !this.isAcknowledged(this.cheatOffActionId)) return;
     if (this.restartPending && !this.isAcknowledged(this.forceRestartActionId)) {
       if (!this.forceRestartActionId) this.forceRestartActionId = this.queueAction("force-next-restart").id;
       return;
     }
-    if (!this.goActionId) {
+    if (!this.goActionId && !this.manualFlow) {
       this.goActionId = this.queueAction("go").id;
       this.phase = "countdown";
       this.bump();
@@ -427,6 +478,12 @@ export class CompetitionController {
     this.bump();
   }
 
+  public observeCountdown(value: 3 | 2 | 1): void {
+    this.countdownValue = value;
+    if (this.phase !== "countdown") this.phase = "countdown";
+    this.bump();
+  }
+
   public recordResult(input: Omit<AutomationResult, "receivedAtMs"> & { stageId: string; receivedAtMs?: number }): "accepted" | RejectedResult["reason"] {
     const receivedAtMs = input.receivedAtMs ?? this.clock.now();
     const currentAttempt = this.currentAttempt;
@@ -437,13 +494,20 @@ export class CompetitionController {
       return reason;
     };
     if (!attempt) return reject(currentAttempt ? "wrong-stage" : "no-attempt");
-    if (attempt.results.some((result) => result.playerId === input.playerId || result.sourceId === input.sourceId)) return reject("duplicate");
+    const existing = attempt.results.find((result) => result.playerId === input.playerId);
+    if (existing?.status === "excluded" && input.status === "finished") {
+      existing.finishSourceId = input.sourceId;
+      this.bump();
+      return "accepted";
+    }
+    if (existing || attempt.results.some((result) => result.sourceId === input.sourceId)) return reject("duplicate");
     if (!attempt.intakeOpen) return reject("intake-closed");
     if (receivedAtMs > attempt.deadlineAtMs) return reject("deadline-passed");
     this.assertParticipant(input.playerId);
     this.acceptResult(attempt, {
       playerId: input.playerId, status: input.status, sourceId: input.sourceId, receivedAtMs,
-      ...(input.reason === undefined ? {} : { reason: input.reason })
+      ...(input.reason === undefined ? {} : { reason: input.reason }),
+      ...(input.finishSourceId === undefined ? {} : { finishSourceId: input.finishSourceId })
     });
     this.bump();
     return "accepted";
@@ -451,18 +515,54 @@ export class CompetitionController {
 
   public reschedule(plannedReadyAtMs: number): void {
     if (!Number.isFinite(plannedReadyAtMs)) throw new Error("INVALID_READY_TIME");
-    if (this.phase === "running" || this.phase === "tail-intake" || this.phase === "review") throw new Error("RESCHEDULE_NOT_AVAILABLE");
-    this.automationEnabled = true;
-    this.phase = this.restartPending ? "restart-preparing" : "preparing";
+    if (this.plannedReadyAtMs === undefined || this.phase === "ready" || this.phase === "countdown" || this.phase === "review") throw new Error("RESCHEDULE_NOT_AVAILABLE");
+    if (this.phase !== "tail-intake") this.phase = this.restartPending ? "restart-preparing" : "preparing";
     this.plannedReadyAtMs = plannedReadyAtMs;
+    this.queueAction("notice", "Ready 时间已改期");
     this.bump();
   }
 
-  public extendWait(milliseconds: number): void {
+  public delayReady(milliseconds: number): void {
     if (!Number.isFinite(milliseconds) || milliseconds <= 0) throw new Error("INVALID_WAIT_EXTENSION");
     if (this.phase === "pre-start-wait" && this.waitDeadlineAtMs !== undefined) this.waitDeadlineAtMs += milliseconds;
     else if (this.plannedReadyAtMs !== undefined) this.plannedReadyAtMs += milliseconds;
     else throw new Error("WAIT_EXTENSION_NOT_AVAILABLE");
+    this.queueAction("notice", `Ready 已延后 ${formatDelay(milliseconds)}`);
+    this.bump();
+  }
+
+  public extendWait(milliseconds: number): void { this.delayReady(milliseconds); }
+
+  public extendStageDeadline(milliseconds: number): void {
+    if (!Number.isFinite(milliseconds) || milliseconds <= 0) throw new Error("INVALID_DEADLINE_EXTENSION");
+    const attempt = this.currentAttempt;
+    if (!attempt?.intakeOpen || (this.phase !== "running" && this.phase !== "tail-intake")) throw new Error("DEADLINE_EXTENSION_NOT_AVAILABLE");
+    attempt.deadlineAtMs += milliseconds;
+    this.queueAction("notice", `本关时限已延长 ${formatDelay(milliseconds)}`);
+    this.bump();
+  }
+
+  public rescheduleStageDeadline(deadlineAtMs: number): void {
+    if (!Number.isFinite(deadlineAtMs) || deadlineAtMs <= this.clock.now()) throw new Error("INVALID_STAGE_DEADLINE");
+    const attempt = this.currentAttempt;
+    if (!attempt?.intakeOpen || (this.phase !== "running" && this.phase !== "tail-intake")) throw new Error("DEADLINE_RESCHEDULE_NOT_AVAILABLE");
+    attempt.deadlineAtMs = deadlineAtMs;
+    this.queueAction("notice", "本关最晚结束时间已改期");
+    this.bump();
+  }
+
+  public manualReady(): void {
+    if (!["lobby", "preparing", "paused", "restart-preparing"].includes(this.phase)) throw new Error("READY_NOT_AVAILABLE");
+    if (this.startBlockers(false).length > 0) throw new Error("READY_BLOCKED");
+    this.manualFlow = true;
+    this.enterReady(false);
+  }
+
+  public requestManualGo(): void {
+    if (this.phase !== "ready" || !this.manualFlow || !this.readySequenceComplete()) throw new Error("MANUAL_GO_NOT_AVAILABLE");
+    if (this.startBlockers(false).length > 0) throw new Error("MANUAL_GO_BLOCKED");
+    this.goActionId = this.queueAction("go").id;
+    this.phase = "countdown";
     this.bump();
   }
 
@@ -542,10 +642,12 @@ export class CompetitionController {
     this.restartPending = true;
     this.plannedReadyAtMs = this.clock.now();
     this.readyActionId = undefined;
+    this.readyActionIds.length = 0;
+    this.readyAnnouncementActionId = undefined;
     this.cheatOffActionId = undefined;
     this.forceRestartActionId = undefined;
     this.goActionId = undefined;
-    this.queueAction("announcement", `本轮将重赛：${input.reason.trim()}`);
+    this.queueAction("announce", `本轮将重赛：${input.reason.trim()}`);
     this.bump();
   }
 
@@ -561,7 +663,8 @@ export class CompetitionController {
       automationEnabled: this.automationEnabled,
       currentStageId: this.stage.id,
       ...(this.plannedReadyAtMs === undefined ? {} : { plannedReadyAtMs: this.plannedReadyAtMs }),
-      blockers: this.startBlockers(),
+      ...(this.countdownValue === undefined ? {} : { countdownValue: this.countdownValue }),
+      blockers: this.startBlockers(!this.manualFlow),
       waitingParticipants: [...this.waiting],
       attempts: this.attempts.map(cloneAttempt),
       incidents: this.incidents.map(cloneIncident),
@@ -580,8 +683,12 @@ export class CompetitionController {
     this.phase = "ready";
     this.readyAtMs = this.clock.now();
     this.plannedReadyAtMs = undefined;
-    this.readyActionId = this.queueAction("ready").id;
-    this.cheatOffActionId = this.queueAction("cheat-off").id;
+    this.readyActionIds.length = 0;
+    this.readyAnnouncementActionId = undefined;
+    this.cheatOffActionId = undefined;
+    const readyAction = this.queueAction("ready");
+    this.readyActionIds.push(readyAction.id);
+    this.readyActionId = readyAction.id;
     this.goActionId = undefined;
     this.bump();
   }
@@ -594,6 +701,8 @@ export class CompetitionController {
       deadlineAtMs: now + this.stage.timeLimitMs, intakeOpen: true, voided: false, results: []
     });
     this.phase = "running";
+    this.countdownValue = undefined;
+    this.manualFlow = false;
     this.restartPending = false;
     this.forceRestartActionId = undefined;
     this.disconnectedDuringAttempt.clear();
@@ -615,7 +724,7 @@ export class CompetitionController {
       this.nextStagePending = true;
       this.plannedReadyAtMs = this.clock.now() + this.policy.intermissionMs;
       this.phase = "tail-intake";
-      this.queueAction("announcement", `下一轮 Ready 计划在 ${formatDelay(this.policy.intermissionMs)}后执行`);
+      this.queueAction("bulletin", `下一轮 Ready 计划在 ${formatDelay(this.policy.intermissionMs)}后执行`);
     }
   }
 
@@ -626,6 +735,7 @@ export class CompetitionController {
       }
     }
     this.closeIntake(attempt);
+    this.queueAction("announce", `${this.stage.map.toUpperCase()} 比赛时间已到`);
     if (this.stageIndex === this.stages.length - 1) this.phase = "review";
     else {
       this.nextStagePending = true;
@@ -667,9 +777,16 @@ export class CompetitionController {
     return actionId !== undefined && this.actions.find((action) => action.id === actionId)?.status === "acknowledged";
   }
 
-  private startBlockers(): AutomationBlocker[] {
+  private readySequenceComplete(): boolean {
+    return this.readyActionIds.length === 3
+      && this.readyActionIds.every((id) => this.isAcknowledged(id))
+      && this.isAcknowledged(this.readyAnnouncementActionId)
+      && this.isAcknowledged(this.cheatOffActionId);
+  }
+
+  private startBlockers(includeAutomation = true): AutomationBlocker[] {
     const blockers: AutomationBlocker[] = [];
-    if (!this.automationEnabled) blockers.push({ code: "AUTOMATION_PAUSED", severity: "critical", autoRecoverable: false, suggestion: "由裁判核对现场后恢复自动化" });
+    if (includeAutomation && !this.automationEnabled) blockers.push({ code: "AUTOMATION_PAUSED", severity: "critical", autoRecoverable: false, suggestion: "由裁判核对现场后恢复自动化" });
     for (const participantId of this.participantIds) {
       if (this.absent.has(participantId)) continue;
       if (!this.online.get(participantId)) blockers.push({ code: "PARTICIPANT_OFFLINE", severity: "warning", autoRecoverable: true, participantId, suggestion: "等待选手重连并保持稳定在线" });
