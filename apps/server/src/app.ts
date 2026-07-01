@@ -169,7 +169,7 @@ export const buildApp = async (options: BuildAppOptions): Promise<FastifyInstanc
     return { data: service.pauseAutomation(request.params.competitionId) };
   });
   app.post<{ Params: { competitionId: string }; Body: {
-    kind: "restart" | "manual-action" | "manual-go" | "scoreboard-override" | "automation-command-resolution" | "high-risk";
+    kind: "restart-stage" | "manual-action" | "manual-go" | "scoreboard-override" | "automation-command-resolution" | "high-risk";
     target?: string;
     playerId?: string;
     stageId?: string;

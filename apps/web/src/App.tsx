@@ -549,8 +549,7 @@ function ConsolePanel({ snapshot, canWrite, versionKey, startWork, enableAutomat
   const [rawCommand, setRawCommand] = useState("");
   const [scheduleAt, setScheduleAt] = useState(() => toUtc8Input(new Date(Date.now() + 5 * 60_000)));
   const participant = snapshot.config.participants.find((candidate) => candidate.id === participantId);
-  const incident = (runtime.incidents as Array<{ id?: string; status?: string; recommendedRestart?: boolean }>).find((candidate) => candidate.status === "open" && candidate.recommendedRestart);
-  const attempt = runtime.attempts.at(-1) as { id?: string; voided?: boolean } | undefined;
+  const attempt = (runtime.attempts as Array<{ id?: string; stageId?: string; voided?: boolean }>).findLast((candidate) => candidate.stageId === runtime.currentStageId && !candidate.voided);
   const confirmedAction = (label: string, actionId: RefereeActionId, kind: ConfirmationKind, target: string, build: (confirmation: ConfirmationSummary) => CompetitionAction, className?: string, extraDisabled = false, extraReason?: string) => {
     const availability = availabilityFor(runtime, actionId);
     return <ConfirmButton key={`${label}:${target}:${versionKey}`} label={label} kind={kind} target={target} versionKey={versionKey} className={className}
@@ -574,6 +573,7 @@ function ConsolePanel({ snapshot, canWrite, versionKey, startWork, enableAutomat
         <ActionButton runtime={runtime} action="cheat-off" canWrite={canWrite} onClick={() => void performAction({ type: "cheat-off" })}>关闭 cheat</ActionButton>
         {confirmedAction("手动发令", "manual-go", "manual-go", snapshot.competition.id, (confirmation) => ({ type: "manual-go", confirmationToken: confirmation.token, impactHash: confirmation.impactHash }))}
         {confirmedAction("提前结束本关", "end-stage", "manual-action", snapshot.competition.id, (confirmation) => ({ type: "end-stage", confirmationToken: confirmation.token, impactHash: confirmation.impactHash }), "danger")}
+        {attempt?.id && confirmedAction("重赛本关", "restart-stage", "restart-stage", attempt.id, (confirmation) => ({ type: "restart-stage", attemptId: attempt.id as string, confirmationToken: confirmation.token, impactHash: confirmation.impactHash }), "danger")}
       </div>
       <h3>相对延时</h3>
       <div className="button-row action-row">
@@ -603,12 +603,7 @@ function ConsolePanel({ snapshot, canWrite, versionKey, startWork, enableAutomat
         <div><strong>{item.title}</strong><time>{formatUtc8DateTime(item.occurredAt)}</time></div><p>{item.message}</p>
         {(item.stageId || item.participantIds?.length) && <small>{item.stageId ? `关卡 ${stageTitle(snapshot.config, item.stageId)}` : ""}{item.participantIds?.length ? ` · 玩家 ${item.participantIds.join("、")}` : ""}</small>}
       </article>)}</div>
-      <h3>事故与尝试</h3>
-      <div className="button-row action-row">
-        {incident?.id && confirmedAction("确认重赛", "restart", "restart", incident.id, (confirmation) => ({ type: "restart", incidentId: incident.id as string, confirmationToken: confirmation.token, impactHash: confirmation.impactHash }))}
-        {attempt?.id && !attempt.voided && confirmedAction("作废尝试", "void-attempt", "high-risk", attempt.id, (confirmation) => ({ type: "void-attempt", attemptId: attempt.id as string, confirmationToken: confirmation.token, impactHash: confirmation.impactHash }), "danger")}
-        {attempt?.id && attempt.voided && confirmedAction("恢复尝试", "restore-attempt", "high-risk", attempt.id, (confirmation) => ({ type: "restore-attempt", attemptId: attempt.id as string, confirmationToken: confirmation.token, impactHash: confirmation.impactHash }))}
-      </div>
+      <h3>事故与尝试</h3><p className="muted">事故证据和历史尝试永久保留；重赛入口位于左侧流程控制。</p>
     </div>
     <div className="panel"><h2>玩家处置</h2>
       <p className="muted">这里只保留 Kick 和原始命令。DNF 请在成绩页修订。</p>
@@ -746,10 +741,17 @@ function ScoreboardPanel({ snapshot, canWrite, versionKey, requestConfirmation, 
   overrideScoreboard(draft: ScoreDraft, confirmation: ConfirmationSummary): Promise<void>;
   downloadExport(format: "html" | "tsv" | "csv" | "xlsx"): Promise<void>;
 }) {
+  const editPermissions = new Map(snapshot.runtime.scoreEditPermissions.map((permission) => [permission.stageId, permission]));
   return <section className="panel"><div className="panel-title-row"><h2>实时成绩</h2><div className="button-row compact"><button onClick={() => void downloadExport("xlsx")}>XLSX</button><button onClick={() => void downloadExport("csv")}>CSV</button><button onClick={() => void downloadExport("html")}>HTML</button><button onClick={() => void downloadExport("tsv")}>TSV</button></div></div>
+    <p className="muted">当前关成绩由现场事件持续接收；进入下一关 Ready 后可修订此前关卡，比赛结束后可修订全部关卡。</p>
     <table className="scoreboard"><thead><tr><th>变化</th><th>名次</th><th>总分</th><th>选手</th>{snapshot.config.stages.map((stage) => <th key={stage.id}>{stage.label}</th>)}</tr></thead><tbody>{snapshot.currentScoreboard.map((entry) => <tr key={entry.playerId}>
       <td className={entry.change === null ? "" : entry.change > 0 ? "rank-up" : entry.change < 0 ? "rank-down" : ""}>{entry.change === null ? "—" : entry.change > 0 ? `▲${entry.change}` : entry.change < 0 ? `▼${Math.abs(entry.change)}` : "="}</td><td>{entry.rank}</td><td>{entry.points}</td><td>{entry.displayName}</td>
-      {snapshot.config.stages.map((stage) => <EditableScoreCell key={`${stage.id}:${versionKey}`} value={entry.stages[stage.id] as { status?: string; place?: number; points?: number; reason?: string } | undefined} stage={stage} playerId={entry.playerId} playerName={entry.displayName} canWrite={canWrite} versionKey={versionKey} requestConfirmation={requestConfirmation} save={(draft, confirmation) => overrideScoreboard(draft, confirmation)} />)}
+      {snapshot.config.stages.map((stage) => {
+        const permission = editPermissions.get(stage.id);
+        return <EditableScoreCell key={`${stage.id}:${versionKey}`} value={entry.stages[stage.id] as { status?: string; place?: number; points?: number; reason?: string } | undefined} stage={stage} playerId={entry.playerId} playerName={entry.displayName}
+          canWrite={canWrite && Boolean(permission?.editable)} {...(!canWrite ? { disabledReason: "实时连接或控制权不可用" } : permission?.reason ? { disabledReason: permission.reason } : {})}
+          versionKey={versionKey} requestConfirmation={requestConfirmation} save={(draft, confirmation) => overrideScoreboard(draft, confirmation)} />;
+      })}
     </tr>)}</tbody></table>
     {snapshot.currentScoreboard.length === 0 && <p className="muted">暂无榜单版本。选手有首条有效或排除结果后会出现在这里。</p>}
     <div className="score-override"><h3>修订记录</h3><p className="muted">成绩页只提交“设置名次”或“设置 DNF”。得分由已发布的单关计分规则重算，并生成新榜单版本。</p>
@@ -766,9 +768,9 @@ const formatOverrideValue = (value: unknown): string => {
   return result.place ? `第 ${result.place} 名 · ${result.points ?? 0} 分` : "已修改";
 };
 
-function EditableScoreCell({ value, stage, playerId, playerName, canWrite, versionKey, requestConfirmation, save }: {
+function EditableScoreCell({ value, stage, playerId, playerName, canWrite, disabledReason, versionKey, requestConfirmation, save }: {
   value: { status?: string; place?: number; points?: number; reason?: string } | undefined;
-  stage: StageConfig; playerId: string; playerName: string; canWrite: boolean; versionKey: string;
+  stage: StageConfig; playerId: string; playerName: string; canWrite: boolean; disabledReason?: string; versionKey: string;
   requestConfirmation(kind: ConfirmationKind, target: string, requestPayload?: unknown): Promise<ConfirmationSummary>;
   save(draft: ScoreDraft, confirmation: ConfirmationSummary): Promise<void>;
 }) {
@@ -778,7 +780,7 @@ function EditableScoreCell({ value, stage, playerId, playerName, canWrite, versi
   const numericPlace = Number(place);
   const calculatedPoints = Number.isInteger(numericPlace) && numericPlace > 0 ? stage.scoring[numericPlace - 1] ?? 0 : 0;
   const className = value?.status === "dnf" ? "dnf" : value?.status === "excluded" ? "excluded" : value?.place === 1 ? "gold" : value?.place === 2 ? "silver" : value?.place === 3 ? "bronze" : "";
-  if (!editing) return <td className={`${className} editable-score-cell`}><button className="cell-button" disabled={!canWrite} title={`修改 ${playerName} 的 ${stage.label} 成绩`} onClick={() => { setPlace(String(value?.place || 1)); setShiftOthers(true); setEditing(true); }}>{!value ? "—" : value.status === "dnf" ? "DNF" : value.status === "excluded" ? `排除 · 0 分` : `#${value.place} / ${value.points} 分`}</button></td>;
+  if (!editing) return <td className={`${className} editable-score-cell`}><button className="cell-button" disabled={!canWrite} title={canWrite ? `修改 ${playerName} 的 ${stage.label} 成绩` : disabledReason} onClick={() => { setPlace(String(value?.place || 1)); setShiftOthers(true); setEditing(true); }}>{!value ? "—" : value.status === "dnf" ? "DNF" : value.status === "excluded" ? `排除 · 0 分` : `#${value.place} / ${value.points} 分`}</button></td>;
   const target = `${playerId}:${stage.id}`;
   const rankPolicy = shiftOthers ? "shift" : "tie";
   return <td className="score-cell-editor"><label>新名次<input aria-label={`${playerId} ${stage.label} 新名次`} type="number" min="1" value={place} onChange={(event) => setPlace(event.target.value)} /></label><label className="score-policy-row">其他玩家是否顺延<input aria-label="其他玩家是否顺延" type="checkbox" checked={shiftOthers} onChange={(event) => setShiftOthers(event.target.checked)} /><span>{shiftOthers ? "顺延" : "不顺延"}</span></label><small>{shiftOthers ? `会顺延其他玩家并按本关规则自动计 ${calculatedPoints} 分` : `不会顺延其他玩家，按本关规则直接计 ${calculatedPoints} 分`}</small>

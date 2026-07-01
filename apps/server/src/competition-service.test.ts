@@ -417,7 +417,7 @@ describe("CompetitionService dynamic participants", () => {
     const first = service.create({ name: "Work A", mode: "work", idempotencyKey: "work-a" });
     const second = service.create({ name: "Work B", mode: "work", idempotencyKey: "work-b" });
     const third = service.create({ name: "Work C", mode: "work", idempotencyKey: "work-c" });
-    service.updateDraft(second.id, { expectedStateVersion: 0, idempotencyKey: "work-b-server", server: "same.server" });
+    service.updateDraft(second.id, { expectedStateVersion: 0, idempotencyKey: "work-b-server", server: " SAME.SERVER. " });
     service.updateDraft(third.id, { expectedStateVersion: 0, idempotencyKey: "work-c-server", server: "other.server" });
     service.publish(first.id, 0, "publish-work-a");
     service.publish(second.id, 1, "publish-work-b");

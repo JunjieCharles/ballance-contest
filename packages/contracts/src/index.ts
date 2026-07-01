@@ -211,6 +211,11 @@ export interface RuntimeSnapshot {
   commands: readonly CommandRecordView[];
   availableActions: readonly ActionAvailability[];
   attentionItems: readonly AttentionItem[];
+  scoreEditPermissions: readonly {
+    stageId: string;
+    editable: boolean;
+    reason?: string;
+  }[];
   unconfirmedAutomationActions: readonly {
     id: string;
     kind: string;
@@ -221,8 +226,8 @@ export interface RuntimeSnapshot {
 
 export type RefereeActionId =
   | "start-work" | "enable-automation" | "pause-automation" | "ready" | "cheat-off" | "manual-go"
-  | "delay-ready" | "extend-stage-deadline" | "reschedule" | "reschedule-stage-deadline" | "end-stage" | "restart"
-  | "void-attempt" | "restore-attempt" | "kick" | "raw-command" | "finish" | "archive" | "delete";
+  | "delay-ready" | "extend-stage-deadline" | "reschedule" | "reschedule-stage-deadline" | "end-stage" | "restart-stage"
+  | "kick" | "raw-command" | "finish" | "archive" | "delete";
 
 export interface ActionAvailability {
   action: RefereeActionId;
@@ -317,7 +322,7 @@ export interface CompetitionSnapshot {
   archives: readonly { version: number; directory: string; packagePath: string; manifestHash: string; createdAt: string }[];
 }
 
-export type ConfirmationKind = "restart" | "manual-action" | "manual-go" | "scoreboard-override" | "automation-command-resolution" | "high-risk";
+export type ConfirmationKind = "restart-stage" | "manual-action" | "manual-go" | "scoreboard-override" | "automation-command-resolution" | "high-risk";
 
 export interface ConfirmationSummary {
   token: string;
@@ -369,9 +374,7 @@ export type CompetitionAction =
   | { type: "delay-ready"; milliseconds: number; confirmationToken: string; impactHash: string }
   | { type: "extend-stage-deadline"; milliseconds: number; confirmationToken: string; impactHash: string }
   | { type: "end-stage"; confirmationToken: string; impactHash: string }
-  | { type: "restart"; incidentId: string; confirmationToken: string; impactHash: string }
-  | { type: "void-attempt"; attemptId: string; confirmationToken: string; impactHash: string }
-  | { type: "restore-attempt"; attemptId: string; confirmationToken: string; impactHash: string }
+  | { type: "restart-stage"; attemptId: string; confirmationToken: string; impactHash: string }
   | { type: "participant-associate"; participantId: string; connectionId: string }
   | { type: "participant-split"; connectionId: string }
   | { type: "participant-edit"; participantId: string; displayName?: string; notes?: string }

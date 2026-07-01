@@ -207,25 +207,47 @@ describe("P0 API mode isolation and test run regression", () => {
     expect(automaticData.attempts.some((attempt) => attempt.results.some((result) => result.status === "dnf" && result.reason === "time-limit"))).toBe(true);
     expect(automaticData.attempts.some((attempt) => attempt.results.some((result) => result.status === "dnf" && result.reason === "gave-up"))).toBe(true);
     expect(automaticData.attempts.some((attempt) => attempt.results.some((result) => result.status === "excluded"))).toBe(true);
-    await app.inject({ method: "POST", url: `/api/v1/competitions/${competitionId}/test-runs/${runId}/reset`, headers: auth(token), payload: {} });
+    const automaticallyFinished = await app.inject({ method: "GET", url: `/api/v1/competitions/${competitionId}`, headers: auth(token) });
+    expect(automaticallyFinished.json()).toMatchObject({ data: { status: "finished" } });
+
+    const manualCompetition = await app.inject({
+      method: "POST",
+      url: "/api/v1/competitions",
+      headers: auth(token),
+      payload: { name: "独立玩家手动闭环", mode: "test", idempotencyKey: "independent-player-manual-lifecycle" }
+    });
+    const manualCompetitionId = manualCompetition.json<{ data: { id: string } }>().data.id;
+    await app.inject({
+      method: "POST",
+      url: `/api/v1/competitions/${manualCompetitionId}/publish`,
+      headers: auth(token),
+      payload: { expectedStateVersion: 0, idempotencyKey: "publish-independent-player-manual-lifecycle" }
+    });
+    const manualRun = await app.inject({
+      method: "POST",
+      url: `/api/v1/competitions/${manualCompetitionId}/test-runs/from-scenario`,
+      headers: auth(token),
+      payload: { scenarioId: "independent-player-sandbox" }
+    });
+    const manualRunId = manualRun.json<{ data: { runId: string } }>().data.runId;
     const ready = await app.inject({
       method: "POST",
-      url: `/api/v1/competitions/${competitionId}/actions`,
+      url: `/api/v1/competitions/${manualCompetitionId}/actions`,
       headers: auth(token),
       payload: { expectedStateVersion: 1, idempotencyKey: "manual-ready", action: { type: "ready" } }
     });
     expect(ready.statusCode).toBe(200);
     await app.inject({
       method: "POST",
-      url: `/api/v1/competitions/${competitionId}/test-runs/${runId}/automation/advance`,
+      url: `/api/v1/competitions/${manualCompetitionId}/test-runs/${manualRunId}/automation/advance`,
       headers: auth(token),
       payload: { milliseconds: 15_000 }
     });
-    const goConfirmationResponse = await app.inject({ method: "POST", url: `/api/v1/competitions/${competitionId}/confirmations`, headers: auth(token), payload: { kind: "manual-go", target: competitionId } });
+    const goConfirmationResponse = await app.inject({ method: "POST", url: `/api/v1/competitions/${manualCompetitionId}/confirmations`, headers: auth(token), payload: { kind: "manual-go", target: manualCompetitionId } });
     const goConfirmation = goConfirmationResponse.json<{ data: { token: string; impactHash: string } }>().data;
     const manualGo = await app.inject({
       method: "POST",
-      url: `/api/v1/competitions/${competitionId}/actions`,
+      url: `/api/v1/competitions/${manualCompetitionId}/actions`,
       headers: auth(token),
       payload: {
         expectedStateVersion: 2,
@@ -234,45 +256,45 @@ describe("P0 API mode isolation and test run regression", () => {
       }
     });
     expect(manualGo.statusCode).toBe(200);
-    await app.inject({ method: "POST", url: `/api/v1/competitions/${competitionId}/test-runs/${runId}/automation/advance`, headers: auth(token), payload: { milliseconds: 3_000 } });
+    await app.inject({ method: "POST", url: `/api/v1/competitions/${manualCompetitionId}/test-runs/${manualRunId}/automation/advance`, headers: auth(token), payload: { milliseconds: 3_000 } });
     await app.inject({
       method: "POST",
-      url: `/api/v1/competitions/${competitionId}/test-runs/${runId}/automation/advance`,
+      url: `/api/v1/competitions/${manualCompetitionId}/test-runs/${manualRunId}/automation/advance`,
       headers: auth(token),
       payload: { milliseconds: 240_000 }
     });
-    const snapshot = await app.inject({ method: "GET", url: `/api/v1/competitions/${competitionId}/snapshot`, headers: auth(token) });
+    const snapshot = await app.inject({ method: "GET", url: `/api/v1/competitions/${manualCompetitionId}/snapshot`, headers: auth(token) });
     const snapshotData = snapshot.json<{ data: { runtime: { phase: string }; currentScoreboard: unknown[]; competition: { stateVersion: number } } }>().data;
     expect(snapshotData.runtime.phase).toBe("tail-intake");
     expect(snapshotData.currentScoreboard).toHaveLength(20);
 
-    const logs = await app.inject({ method: "GET", url: `/api/v1/competitions/${competitionId}/logs/raw`, headers: auth(token) });
+    const logs = await app.inject({ method: "GET", url: `/api/v1/competitions/${manualCompetitionId}/logs/raw`, headers: auth(token) });
     expect(logs.json()).toMatchObject({ data: expect.arrayContaining([
-      expect.objectContaining({ source: "test-player", rawLine: expect.stringContaining("did not finish Level") }),
+      expect.objectContaining({ source: "test-player", rawLine: expect.stringContaining("finished Level") }),
       expect.objectContaining({ source: "test-referee", rawLine: expect.stringContaining(" - Go!") })
     ]) });
     expect(logs.json<{ data: Array<{ rawLine: string }> }>().data.every((line) => line.rawLine.startsWith("["))).toBe(true);
     expect(logs.json<{ data: Array<{ rawLine: string }> }>().data.some((line) => line.rawLine.includes("[模拟裁判]"))).toBe(false);
 
-    const finishConfirmation = await app.inject({ method: "POST", url: `/api/v1/competitions/${competitionId}/confirmations`, headers: auth(token), payload: { kind: "high-risk", target: competitionId } });
+    const finishConfirmation = await app.inject({ method: "POST", url: `/api/v1/competitions/${manualCompetitionId}/confirmations`, headers: auth(token), payload: { kind: "high-risk", target: manualCompetitionId } });
     const finishToken = finishConfirmation.json<{ data: { token: string; impactHash: string } }>().data;
     const finished = await app.inject({
       method: "POST",
-      url: `/api/v1/competitions/${competitionId}/finish`,
+      url: `/api/v1/competitions/${manualCompetitionId}/finish`,
       headers: auth(token),
       payload: { expectedStateVersion: snapshotData.competition.stateVersion, idempotencyKey: "finish", confirmationToken: finishToken.token, impactHash: finishToken.impactHash }
     });
     expect(finished.json()).toMatchObject({ data: { status: "finished" } });
     const finishedRecord = finished.json<{ data: { stateVersion: number } }>().data;
-    const deleteConfirmation = await app.inject({ method: "POST", url: `/api/v1/competitions/${competitionId}/confirmations`, headers: auth(token), payload: { kind: "high-risk", target: competitionId } });
+    const deleteConfirmation = await app.inject({ method: "POST", url: `/api/v1/competitions/${manualCompetitionId}/confirmations`, headers: auth(token), payload: { kind: "high-risk", target: manualCompetitionId } });
     const deleteToken = deleteConfirmation.json<{ data: { token: string; impactHash: string } }>().data;
     const deleted = await app.inject({
       method: "DELETE",
-      url: `/api/v1/competitions/${competitionId}`,
+      url: `/api/v1/competitions/${manualCompetitionId}`,
       headers: auth(token),
       payload: { expectedStateVersion: finishedRecord.stateVersion, idempotencyKey: "delete", confirmationToken: deleteToken.token, impactHash: deleteToken.impactHash }
     });
-    expect(deleted.json()).toMatchObject({ data: { id: competitionId } });
-    expect((await app.inject({ method: "GET", url: `/api/v1/competitions/${competitionId}`, headers: auth(token) })).statusCode).toBe(404);
+    expect(deleted.json()).toMatchObject({ data: { id: manualCompetitionId } });
+    expect((await app.inject({ method: "GET", url: `/api/v1/competitions/${manualCompetitionId}`, headers: auth(token) })).statusCode).toBe(404);
   });
 });

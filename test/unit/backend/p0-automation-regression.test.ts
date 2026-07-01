@@ -120,13 +120,11 @@ describe("P0 centralized automation and command regression", () => {
     const controller = makeController(clock, { readyBufferMs: 0 }, ["p1", "p2"]);
     putEveryoneOnline(controller, ["p1", "p2"]);
     startRunning(controller, clock, 0);
-    controller.observeCrash("p2", "protected crash");
-    const incident = controller.snapshot().incidents[0];
-    expect(incident).toMatchObject({ type: "protected-crash", recommendedRestart: true });
-
-    const confirmation = controller.issueRestartConfirmation(incident!.id);
-    expect(() => controller.confirmRestart({ incidentId: incident!.id, impactHash: confirmation.impactHash, token: "bad-token", reason: "bad" })).toThrow("INVALID_CONFIRMATION_TOKEN");
-    controller.confirmRestart({ incidentId: incident!.id, impactHash: confirmation.impactHash, token: confirmation.token, reason: "保护窗口崩溃重赛" });
+    const attempt = controller.snapshot().attempts[0];
+    if (!attempt) throw new Error("missing attempt");
+    const confirmation = controller.issueStageRestartConfirmation(attempt.id);
+    expect(() => controller.confirmStageRestart({ attemptId: attempt.id, impactHash: confirmation.impactHash, token: "bad-token", reason: "bad" })).toThrow("INVALID_CONFIRMATION_TOKEN");
+    controller.confirmStageRestart({ attemptId: attempt.id, impactHash: confirmation.impactHash, token: confirmation.token, reason: "裁判重赛本关" });
     settle(controller);
     clock.advanceBy(3_000); settle(controller);
     clock.advanceBy(3_000); settle(controller);

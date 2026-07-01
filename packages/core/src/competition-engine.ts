@@ -42,6 +42,7 @@ export interface AttemptState {
   goAtMs: number;
   deadlineAtMs: number;
   open: boolean;
+  voided: boolean;
 }
 
 export interface EngineAnomaly {
@@ -85,6 +86,7 @@ export class CompetitionEngine {
   private readonly anomalies: EngineAnomaly[] = [];
   private readonly baselines = new Map<string, Map<string, number>>();
   private finishSequence = 0;
+  private nextScoreboardVersion = 1;
 
   public constructor(private readonly scenario: ScenarioDefinition) {
     for (const stage of scenario.stages) this.stages.set(stage.id, stage);
@@ -94,6 +96,11 @@ export class CompetitionEngine {
   public registerPlayer(playerId: string, displayName = playerId): void {
     if (!playerId.trim()) throw new Error("PLAYER_ID_REQUIRED");
     this.playerNames.set(playerId, displayName.trim() || playerId);
+  }
+
+  public setNextScoreboardVersion(version: number): void {
+    if (!Number.isInteger(version) || version < 1) throw new Error("INVALID_SCOREBOARD_VERSION");
+    this.nextScoreboardVersion = Math.max(this.nextScoreboardVersion, version);
   }
 
   public apply(event: ScenarioEvent): void {
@@ -125,7 +132,8 @@ export class CompetitionEngine {
       goSourceId: event.sourceId,
       goAtMs: event.atMs,
       deadlineAtMs: event.atMs + stage.timeLimitMs,
-      open: true
+      open: true,
+      voided: false
     });
   }
 
@@ -135,7 +143,7 @@ export class CompetitionEngine {
       this.anomalies.push({ sourceId: event.sourceId, code: "unknown-stage", detail: event.stageId });
       return;
     }
-    const attempt = [...this.attempts].reverse().find((candidate) => candidate.stageId === event.stageId && candidate.open);
+    const attempt = [...this.attempts].reverse().find((candidate) => candidate.stageId === event.stageId && candidate.open && !candidate.voided);
     if (!attempt) {
       this.anomalies.push({ sourceId: event.sourceId, code: "practice-result", detail: event.stageId });
       return;
@@ -144,7 +152,7 @@ export class CompetitionEngine {
       this.anomalies.push({ sourceId: event.sourceId, code: "late-result", detail: event.stageId });
       return;
     }
-    const stageResults = this.results.get(event.stageId) ?? new Map<string, MutableStageResult>();
+    const stageResults = this.results.get(attempt.id) ?? new Map<string, MutableStageResult>();
     const existing = stageResults.get(event.playerId);
     if (existing?.status === "excluded" && event.type === "finish") {
       stageResults.set(event.playerId, {
@@ -153,7 +161,7 @@ export class CompetitionEngine {
         elapsedMs: event.elapsedMs,
         finishSourceId: event.sourceId
       });
-      this.results.set(event.stageId, stageResults);
+      this.results.set(attempt.id, stageResults);
       this.createScoreboardVersion(event.stageId, event.sourceId);
       return;
     }
@@ -165,7 +173,7 @@ export class CompetitionEngine {
         sourceId: event.sourceId,
         finishSourceId: existing.sourceId
       });
-      this.results.set(event.stageId, stageResults);
+      this.results.set(attempt.id, stageResults);
       this.createScoreboardVersion(event.stageId, event.sourceId);
       return;
     }
@@ -178,13 +186,14 @@ export class CompetitionEngine {
     stageResults.set(event.playerId, event.type === "finish"
       ? { playerId: event.playerId, status: "finished", score: event.score, elapsedMs: event.elapsedMs, sourceId: event.sourceId, finishSequence: this.finishSequence }
       : { playerId: event.playerId, status: event.type === "dnf" ? "dnf" : "excluded", reason: event.reason, sourceId: event.sourceId, finishSequence: this.finishSequence });
-    this.results.set(event.stageId, stageResults);
+    this.results.set(attempt.id, stageResults);
     if (event.type === "finish" && !this.baselines.has(event.stageId)) this.baselines.set(event.stageId, this.rankBeforeStage(stage));
     this.createScoreboardVersion(event.stageId, event.sourceId);
   }
 
   private rankedStageResults(stage: ScenarioStage): readonly StageResult[] {
-    const values = [...(this.results.get(stage.id)?.values() ?? [])];
+    const attempt = [...this.attempts].reverse().find((candidate) => candidate.stageId === stage.id && !candidate.voided);
+    const values = [...(attempt ? this.results.get(attempt.id)?.values() ?? [] : [])];
     values.sort((left, right) => {
       if (left.status !== right.status) return left.status === "finished" ? -1 : right.status === "finished" ? 1 : left.finishSequence - right.finishSequence;
       if (left.status !== "finished") return left.finishSequence - right.finishSequence;
@@ -203,6 +212,14 @@ export class CompetitionEngine {
       sourceId: result.sourceId,
       ...(result.finishSourceId === undefined ? {} : { finishSourceId: result.finishSourceId })
     }));
+  }
+
+  public voidAttempt(stageId: string, attemptNumber: number, sourceId: string): void {
+    const attempt = this.attempts.find((candidate) => candidate.stageId === stageId && candidate.attemptNumber === attemptNumber && !candidate.voided);
+    if (!attempt) throw new Error("ATTEMPT_NOT_FOUND");
+    attempt.open = false;
+    attempt.voided = true;
+    this.createScoreboardVersion(stageId, sourceId);
   }
 
   private buildScoreboard(excludeStageId?: string): readonly ScoreboardEntry[] {
@@ -244,7 +261,8 @@ export class CompetitionEngine {
   private createScoreboardVersion(stageId: string, sourceId: string): void {
     const baseline = this.baselines.get(stageId);
     const entries = this.buildScoreboard().map((entry) => ({ ...entry, change: baseline?.has(entry.playerId) ? (baseline.get(entry.playerId) as number) - entry.rank : null }));
-    const version = this.versions.length + 1;
+    const version = this.nextScoreboardVersion;
+    this.nextScoreboardVersion += 1;
     const hashPayload = { version, triggerSourceId: sourceId, stageId, entries };
     this.versions.push({
       id: randomUUID(),

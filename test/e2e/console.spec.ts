@@ -148,17 +148,21 @@ test("runs the 20-player sandbox from the console and edits a score without losi
   await expect(page.locator(".scoreboard tbody tr")).toHaveCount(rowsBefore);
   await expect(page.locator(".score-cell-editor")).toHaveCount(0);
 
-  const dnfEditorButton = page.locator(".scoreboard .cell-button").filter({ hasText: /^#/ }).nth(1);
+  const secondRow = page.locator(".scoreboard tbody tr").nth(1);
+  const dnfEditorButton = secondRow.locator(".cell-button").filter({ hasText: /^#/ }).first();
   await dnfEditorButton.click();
-  const secondRow = dnfEditorButton.locator("xpath=ancestor::tr");
   const secondEditor = secondRow.locator(".score-cell-editor");
   await expect(secondEditor).toBeVisible();
   const dnfButton = secondEditor.getByRole("button", { name: "设为 DNF" });
   await expect(dnfButton).toBeVisible();
-  await dnfButton.click({ force: true });
+  await dnfButton.click();
   const dnfConfirmation = secondEditor.locator(".inline-confirm");
   await expect(dnfConfirmation).toContainText("生成新的榜单版本");
   await dnfConfirmation.getByRole("button", { name: "确认" }).click();
+  await expect(page.locator(".scoreboard tbody tr")).toHaveCount(rowsBefore);
+  await page.reload();
+  await expect(page.locator(".competition-list button.selected")).toContainText(name);
+  await page.getByRole("button", { name: "成绩", exact: true }).click();
   await expect(page.locator(".scoreboard tbody tr")).toHaveCount(rowsBefore);
   expect(dialogOpened).toBe(false);
   expect(externalRequests).toEqual([]);
@@ -185,6 +189,45 @@ test("resizes the raw client log window from the top-left handle", async ({ page
   expect(after).not.toBeNull();
   expect(after?.width).toBeLessThan(before.width);
   expect(after?.height).toBeLessThan(before.height);
+});
+
+test("restarts the current stage and unlocks its score review only after the next Ready", async ({ page }, testInfo) => {
+  await page.goto("/#token=e2e-bootstrap-token");
+  await expect(page.getByText(/已取得控制权|只读标签页/)).toBeVisible();
+  await acquireControl(page);
+  const name = `E2E 重赛与修订边界 ${testInfo.project.name}`;
+  await createCompetition(page, name, "test");
+  await page.getByRole("button", { name: "发布比赛" }).click();
+  await expect(page.locator(".competition-list button.selected")).toContainText("published");
+  await page.getByRole("button", { name: "测试", exact: true }).click();
+  await page.getByRole("button", { name: /普通玩家场景/ }).click();
+  await page.getByRole("button", { name: "创建测试运行" }).click();
+  await page.getByRole("button", { name: "控制台", exact: true }).click();
+  await page.getByRole("button", { name: "启动自动化" }).click();
+  await accelerateActiveTestRun(page, name, 300_000);
+  await expect(page.getByRole("button", { name: "重赛本关" })).toBeEnabled();
+
+  await page.getByRole("button", { name: "成绩", exact: true }).click();
+  const firstStageCell = page.locator(".scoreboard tbody tr").first().locator("td").nth(4).getByRole("button");
+  await expect(firstStageCell).toBeDisabled();
+  await expect(firstStageCell).toHaveAttribute("title", /进入下一关 Ready 后才能修订/);
+  expect((await page.locator(".scoreboard tbody tr td:nth-child(5) .cell-button").allTextContents()).some((value) => value.trim().startsWith("#"))).toBe(true);
+
+  await page.getByRole("button", { name: "控制台", exact: true }).click();
+  await page.getByRole("button", { name: "重赛本关" }).click();
+  const confirmation = page.getByRole("group", { name: "重赛本关确认" });
+  await expect(confirmation).toContainText("当前尝试将作废并立即退出有效榜单");
+  await expect(confirmation).toContainText("只有新 Go 才创建新尝试");
+  await confirmation.getByRole("button", { name: "确认" }).click();
+  await expect(page.getByText("阶段", { exact: true }).locator("..")).toContainText("Ready");
+  await page.getByRole("button", { name: "成绩", exact: true }).click();
+  expect((await page.locator(".scoreboard tbody tr td:nth-child(5) .cell-button").allTextContents()).some((value) => value.trim().startsWith("#"))).toBe(false);
+
+  await accelerateActiveTestRun(page, name, 240_000);
+  await expect.poll(async () => (await page.locator(".scoreboard tbody tr td:nth-child(5) .cell-button").allTextContents()).some((value) => value.trim().startsWith("#"))).toBe(true);
+  await accelerateActiveTestRun(page, name, 180_000);
+  const previousStageCell = page.locator(".scoreboard tbody tr").first().locator("td").nth(4).getByRole("button");
+  await expect(previousStageCell).toBeEnabled();
 });
 
 test("shows disabled reasons, shared scheduling controls and automatic review completion", async ({ page }, testInfo) => {

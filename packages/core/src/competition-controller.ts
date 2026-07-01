@@ -146,7 +146,7 @@ interface ConfirmationClaims {
   stageId: string;
   attemptId: string;
   stateVersion: number;
-  incidentId: string;
+  targetId: string;
   impactHash: string;
   expiresAtMs: number;
   nonce: string;
@@ -611,55 +611,34 @@ export class CompetitionController {
     this.bump();
   }
 
-  public voidAttempt(attemptId: string): void {
-    const attempt = this.attempts.find((candidate) => candidate.id === attemptId && !candidate.voided);
-    if (!attempt) throw new Error("ATTEMPT_NOT_FOUND");
-    attempt.voided = true;
-    this.closeIntake(attempt);
-    this.automationEnabled = false;
-    this.phase = "paused";
-    this.bump();
-  }
-
-  public restoreAttempt(attemptId: string): void {
-    const attempt = this.attempts.find((candidate) => candidate.id === attemptId && candidate.voided);
-    if (!attempt) throw new Error("ATTEMPT_NOT_FOUND");
-    if (this.attempts.some((candidate) => candidate.id !== attemptId && candidate.stageId === attempt.stageId && !candidate.voided)) {
-      throw new Error("ATTEMPT_RESTORE_CONFLICT");
-    }
-    attempt.voided = false;
-    this.phase = "review";
-    this.bump();
-  }
-
-  public issueRestartConfirmation(incidentId: string, ttlMs = 60_000): { token: string; impactHash: string; expiresAtMs: number } {
-    const incident = this.incidents.find((candidate) => candidate.id === incidentId && candidate.status === "open");
+  public issueStageRestartConfirmation(attemptId: string, ttlMs = 60_000): { token: string; impactHash: string; expiresAtMs: number } {
     const attempt = this.currentAttempt;
-    if (!incident?.recommendedRestart || !attempt || incident.attemptId !== attempt.id) throw new Error("RESTART_NOT_AVAILABLE");
+    if (!attempt || attempt.id !== attemptId || !this.stageRestartAvailable()) throw new Error("RESTART_NOT_AVAILABLE");
     const impactHash = sha256({ attemptId: attempt.id, stageId: attempt.stageId, results: attempt.results });
     const expiresAtMs = this.clock.now() + ttlMs;
     const token = this.tokenService.issue({
       competitionId: this.configuration.competitionId, stageId: this.stage.id, attemptId: attempt.id,
-      stateVersion: this.stateVersion, incidentId, impactHash, expiresAtMs, nonce: randomUUID()
+      stateVersion: this.stateVersion, targetId: attempt.id, impactHash, expiresAtMs, nonce: randomUUID()
     });
     return { token, impactHash, expiresAtMs };
   }
 
-  public confirmRestart(input: { incidentId: string; impactHash: string; token: string; reason: string }): void {
+  public confirmStageRestart(input: { attemptId: string; impactHash: string; token: string; reason: string }): void {
     if (!input.reason.trim()) throw new Error("RESTART_REASON_REQUIRED");
-    const incident = this.incidents.find((candidate) => candidate.id === input.incidentId && candidate.status === "open");
     const attempt = this.currentAttempt;
-    if (!incident?.recommendedRestart || !attempt) throw new Error("RESTART_NOT_AVAILABLE");
+    if (!attempt || attempt.id !== input.attemptId || !this.stageRestartAvailable()) throw new Error("RESTART_NOT_AVAILABLE");
     this.tokenService.consume(input.token, {
       competitionId: this.configuration.competitionId, stageId: this.stage.id, attemptId: attempt.id,
-      stateVersion: this.stateVersion, incidentId: input.incidentId, impactHash: input.impactHash
+      stateVersion: this.stateVersion, targetId: attempt.id, impactHash: input.impactHash
     }, this.clock.now());
     attempt.voided = true;
     this.closeIntake(attempt);
-    incident.status = "resolved";
+    for (const incident of this.incidents) if (incident.attemptId === attempt.id && incident.status === "open") incident.status = "resolved";
     this.automationEnabled = true;
+    this.pausedFromPhase = undefined;
     this.phase = "restart-preparing";
     this.restartPending = true;
+    this.nextStagePending = false;
     this.plannedReadyAtMs = this.clock.now();
     this.readyActionId = undefined;
     this.readyActionIds.length = 0;
@@ -669,6 +648,11 @@ export class CompetitionController {
     this.goActionId = undefined;
     this.queueAction("announce", `本轮将重赛：${input.reason.trim()}`);
     this.bump();
+  }
+
+  private stageRestartAvailable(): boolean {
+    const effectivePhase = this.phase === "paused" ? this.pausedFromPhase : this.phase;
+    return effectivePhase === "running" || effectivePhase === "tail-intake" || this.phase === "incident";
   }
 
   public drainActions(): readonly AutomationAction[] {

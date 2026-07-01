@@ -115,6 +115,30 @@ describe("CompetitionEngine", () => {
     });
   });
 
+  it("keeps voided attempt evidence but ranks only the latest valid attempt", () => {
+    const base = loadMain();
+    const stage = base.stages[0];
+    if (!stage) throw new Error("missing stage fixture");
+    const engine = new CompetitionEngine({ ...base, stages: [stage], players: base.players.slice(0, 2), events: [] });
+    engine.apply({ atMs: 0, sourceId: "go-1", type: "go", stageId: stage.id, refereeConnectionId: base.refereeConnectionId });
+    engine.apply({ atMs: 10, sourceId: "old-p1", type: "finish", stageId: stage.id, playerId: "p1", score: 100, elapsedMs: 10 });
+    engine.apply({ atMs: 20, sourceId: "old-p2", type: "finish", stageId: stage.id, playerId: "p2", score: 90, elapsedMs: 20 });
+    engine.voidAttempt(stage.id, 1, "void-attempt-1");
+
+    expect(engine.snapshot().attempts[0]).toMatchObject({ attemptNumber: 1, voided: true, open: false });
+    expect(engine.snapshot().currentScoreboard.every((entry) => entry.stages[stage.id] === undefined)).toBe(true);
+
+    engine.apply({ atMs: 30, sourceId: "go-2", type: "go", stageId: stage.id, refereeConnectionId: base.refereeConnectionId });
+    engine.apply({ atMs: 40, sourceId: "new-p2", type: "finish", stageId: stage.id, playerId: "p2", score: 80, elapsedMs: 10 });
+    const snapshot = engine.snapshot();
+    expect(snapshot.attempts).toMatchObject([
+      { attemptNumber: 1, voided: true },
+      { attemptNumber: 2, voided: false }
+    ]);
+    expect(snapshot.currentScoreboard.find((entry) => entry.playerId === "p1")?.stages[stage.id]).toBeUndefined();
+    expect(snapshot.currentScoreboard.find((entry) => entry.playerId === "p2")?.stages[stage.id]).toMatchObject({ sourceId: "new-p2", place: 1 });
+  });
+
   it("rejects an unauthorized Go and never creates an attempt", () => {
     const definition = loadMain();
     const engine = new CompetitionEngine(definition);

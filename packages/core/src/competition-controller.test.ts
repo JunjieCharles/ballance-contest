@@ -232,21 +232,21 @@ describe("CompetitionController", () => {
     expect(controller.snapshot().blockers.map((blocker) => blocker.code)).toContain("COMMAND_UNCONFIRMED");
   });
 
-  it("binds restart confirmation to current state and sends force-next-restart exactly once", () => {
+  it("restarts the current stage without requiring an incident and sends force-next-restart exactly once", () => {
     const clock = new FakeClock();
     const controller = new CompetitionController(configuration(), clock);
     connectAll(controller);
     enterRunning(controller, clock);
     controller.recordResult({ stageId: "s1", playerId: "p1", status: "finished", sourceId: "p1-finish" });
-    controller.observeCrash("p2", "Fatal Error in protection window");
-    const incident = controller.snapshot().incidents[0] as NonNullable<ReturnType<typeof controller.snapshot>["incidents"][number]>;
-    const stale = controller.issueRestartConfirmation(incident.id);
+    const attempt = controller.snapshot().attempts[0];
+    if (!attempt) throw new Error("missing attempt");
+    const stale = controller.issueStageRestartConfirmation(attempt.id);
     controller.observeCheat("p3", true, "p3-cheat");
-    expect(() => controller.confirmRestart({ incidentId: incident.id, impactHash: stale.impactHash, token: stale.token, reason: "群体确认重赛" })).toThrow("STALE_CONFIRMATION_TOKEN");
+    expect(() => controller.confirmStageRestart({ attemptId: attempt.id, impactHash: stale.impactHash, token: stale.token, reason: "群体确认重赛" })).toThrow("STALE_CONFIRMATION_TOKEN");
 
     controller.observeCheat("p3", false);
-    const confirmation = controller.issueRestartConfirmation(incident.id);
-    controller.confirmRestart({ incidentId: incident.id, impactHash: confirmation.impactHash, token: confirmation.token, reason: "保护窗口崩溃" });
+    const confirmation = controller.issueStageRestartConfirmation(attempt.id);
+    controller.confirmStageRestart({ attemptId: attempt.id, impactHash: confirmation.impactHash, token: confirmation.token, reason: "裁判重赛本关" });
     controller.drainActions();
     controller.tick();
     controller.acknowledgeAction(action(controller, "ready").id, "acknowledged");
