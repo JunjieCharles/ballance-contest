@@ -158,12 +158,12 @@ export const validateCompetitionConfigForPublish = (config: CompetitionConfig): 
     issues.push("bmmo.win 预设服务器不得填写端口");
   }
   if (config.stages.length === 0) issues.push("至少需要一个轮次");
-  if (config.scoring.points.length === 0) issues.push("积分表至少需要一个名次");
-  if (config.scoring.points.some((point) => !Number.isFinite(point))) issues.push("积分必须是有限数字");
+  if (config.scoring.points.length === 0) issues.push("计分表至少需要一个名次");
+  if (config.scoring.points.some((point) => !Number.isFinite(point))) issues.push("计分必须是有限数字");
   if (!config.scoring.allowNegative && config.scoring.points.some((point) => point < 0)) issues.push("当前配置不允许负分");
   for (const stage of config.stages) {
     if (stage.level < 0 || stage.level > 13) issues.push(`${stage.label} 关卡号必须在 0..13`);
-    if (stage.scoring.length === 0) issues.push(`${stage.label} 缺少积分规则`);
+    if (stage.scoring.length === 0) issues.push(`${stage.label} 缺少计分规则`);
   }
   return issues;
 };

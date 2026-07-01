@@ -37,7 +37,7 @@ describe("scoreboard exports", () => {
     const content = xlsx.toString("utf8");
     expect(content).toContain('state="frozen"');
     expect(content).toContain('name="测试成绩"');
-    expect(content).toContain('name="积分规则"');
+    expect(content).toContain('name="计分规则"');
     expect(content).toContain("FFFFD700");
     expect(content).toContain("<strike/>");
   });
