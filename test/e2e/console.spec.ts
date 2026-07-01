@@ -71,7 +71,8 @@ test("edits per-stage scoring and replaces the stage draft through inline confir
   await page.getByRole("button", { name: "大型赛事预设" }).click();
   const scoringPresetConfirmation = page.locator(".grid.two .panel .inline-confirm").filter({ hasText: "用大型赛事预设覆盖当前计分" });
   await expect(scoringPresetConfirmation).toBeVisible();
-  await scoringPresetConfirmation.getByRole("button", { name: "确认" }).click({ force: true });
+  await scoringPresetConfirmation.getByRole("button", { name: "确认" }).click();
+  await expect(scoringPresetConfirmation).toHaveCount(0);
   await expect(page.getByLabel("第 1 名计分")).toHaveValue(/30|20/);
 
   await page.getByLabel("第 1 名计分").fill("31");
@@ -81,17 +82,28 @@ test("edits per-stage scoring and replaces the stage draft through inline confir
   await page.getByRole("button", { name: "HS1–13 预设" }).click();
   const presetConfirmation = page.locator(".panel.wide .inline-confirm");
   await expect(presetConfirmation).toContainText("用 HS 1–13 整体替换当前关卡草稿。");
-  await presetConfirmation.getByRole("button", { name: "确认" }).click({ force: true });
+  await presetConfirmation.getByRole("button", { name: "确认" }).click();
+  await expect(presetConfirmation).toHaveCount(0);
   await expect(page.locator(".stage-editor")).toHaveCount(13);
 
   const firstStage = page.locator(".stage-editor").first();
-  await firstStage.getByLabel("名称").fill("决赛关");
+  await firstStage.getByLabel("第 1 关关卡模式").selectOption("custom-HS");
+  await firstStage.getByLabel("自制图名称").fill("决赛关");
+  await firstStage.getByLabel("关卡哈希").fill("e90b2f535c8bf881e9cb83129fba241d");
   await firstStage.getByLabel("时限（分钟）").fill("12");
   await firstStage.getByLabel("单关计分").fill("50,30,20");
   await firstStage.getByLabel("单关计分").blur();
+  await firstStage.getByRole("button", { name: "拖拽第 1 关" }).dragTo(page.locator(".stage-editor").nth(2));
+  const customStage = page.locator('.stage-editor[data-stage-id="hs-1"]');
+  await expect(customStage.locator(".stage-order strong")).toHaveText("#3");
+  await expect(customStage.getByLabel("自制图名称")).toHaveValue("决赛关");
   await expect(page.getByRole("button", { name: "发布比赛" })).toBeDisabled();
   await page.getByRole("button", { name: "保存关卡列表" }).click();
   await expect(page.getByRole("button", { name: "发布比赛" })).toBeEnabled();
+  await page.reload();
+  await expect(page.locator(".competition-list button.selected")).toContainText(name);
+  await expect(page.locator('.stage-editor[data-stage-id="hs-1"] .stage-order strong')).toHaveText("#3");
+  await expect(page.locator('.stage-editor[data-stage-id="hs-1"]').getByLabel("自制图名称")).toHaveValue("决赛关");
 
   await page.getByRole("button", { name: "发布比赛" }).click();
   await expect(page.locator(".competition-list button.selected")).toContainText("published");

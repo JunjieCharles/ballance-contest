@@ -11,6 +11,7 @@ if (process.env.BALLANCE_ALLOW_LIVE_COMMANDS !== "1") {
 const root = resolve(import.meta.dirname, "..");
 const serverDirectory = join(root, "server-windows");
 const server = process.env.BALLANCE_LIVE_SERVER ?? "2.bmmo.win";
+const customMapHash = process.env.BALLANCE_LIVE_CUSTOM_MAP_HASH ?? "e90b2f535c8bf881e9cb83129fba241d";
 const temporary = await mkdtemp(join(tmpdir(), "ballance-live-work-"));
 const artifactPath = join(root, "test", "artifacts", "live-work-mode.json");
 const probeName = `Stage1Probe${Date.now().toString().slice(-6)}`;
@@ -64,6 +65,8 @@ try {
   }
   await run({ type: "cheat-off" }, "live-cheat-off");
   await run({ type: "go", map: "level 1", mode: "sr" }, "live-go");
+  await run({ type: "ready", map: `${customMapHash} 0`, mode: "sr" }, "live-custom-ready");
+  await run({ type: "go", map: `${customMapHash} 0`, mode: "sr" }, "live-custom-go");
   await run({ type: "kick", playerName: `*${probeName}`, reason: "workflow-probe-finished" }, "live-kick");
 
   const artifact = {

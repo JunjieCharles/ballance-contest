@@ -4,6 +4,7 @@ import staticPlugin from "@fastify/static";
 import websocket from "@fastify/websocket";
 import {
   HealthResponseSchema,
+  stageDisplayName,
   type CompetitionAction,
   type CompetitionConfig,
   type HealthResponse,
@@ -81,7 +82,7 @@ export const buildApp = async (options: BuildAppOptions): Promise<FastifyInstanc
       version: fixed.version,
       generatedAt: new Date().toISOString(),
       entries: fixed.entries,
-      scoringRules: snapshot.config.stages.map((stage) => ({ stage: stage.label, rule: stage.scoring.join("/") }))
+      scoringRules: snapshot.config.stages.map((stage) => ({ stage: stageDisplayName(stage), rule: stage.scoring.join("/") }))
     });
     const formats = {
       html: { contentType: "text/html; charset=utf-8", body: bundle.html },
@@ -312,7 +313,7 @@ export const buildApp = async (options: BuildAppOptions): Promise<FastifyInstanc
     const generatedAt = new Date().toISOString();
     const exports = createScoreboardExports({
       competitionName: competition.name, mode: competition.mode, version: fixed.version, generatedAt, entries: fixed.entries,
-      scoringRules: snapshot.config.stages.map((stage) => ({ stage: stage.label, rule: stage.scoring.join("/") }))
+      scoringRules: snapshot.config.stages.map((stage) => ({ stage: stageDisplayName(stage), rule: stage.scoring.join("/") }))
     });
     mkdirSync(dataRoot, { recursive: true });
     const archive = createCompetitionArchive({

@@ -59,6 +59,7 @@ export type HealthResponse = Static<typeof HealthResponseSchema>;
 
 export const StageModeSchema = Type.Union([Type.Literal("SR"), Type.Literal("HS")]);
 export type StageMode = Static<typeof StageModeSchema>;
+export type StageMapKind = "official" | "custom";
 
 export type CompetitionLifecycleStatus =
   | "draft"
@@ -104,11 +105,27 @@ export interface StageConfig {
   label: string;
   level: number;
   mode: StageMode;
+  mapKind: StageMapKind;
+  mapHash?: string;
   timeLimitMs: number;
   scoring: readonly number[];
   minimumScoringPlace: number;
   plannedStartAt?: string;
 }
+
+export const CUSTOM_MAP_HASH_PATTERN = /^[0-9a-f]{32}$/i;
+
+export const stageMapKind = (stage: { mapKind?: StageMapKind }): StageMapKind => stage.mapKind === "custom" ? "custom" : "official";
+
+export const stageDisplayName = (stage: Pick<StageConfig, "label" | "level" | "mode"> & { mapKind?: StageMapKind }): string =>
+  stageMapKind(stage) === "custom" ? stage.label.trim() : `${stage.mode}${stage.level}`;
+
+export const stageCommandTarget = (stage: Pick<StageConfig, "level"> & { mapKind?: StageMapKind; mapHash?: string }): string => {
+  if (stageMapKind(stage) === "official") return `level ${stage.level}`;
+  const mapHash = stage.mapHash?.trim().toLowerCase() ?? "";
+  if (!CUSTOM_MAP_HASH_PATTERN.test(mapHash)) throw new Error("INVALID_CUSTOM_MAP_HASH");
+  return `${mapHash} 0`;
+};
 
 export interface FlowPolicy {
   announcementLeadMs: number;
@@ -161,9 +178,24 @@ export const validateCompetitionConfigForPublish = (config: CompetitionConfig): 
   if (config.scoring.points.length === 0) issues.push("计分表至少需要一个名次");
   if (config.scoring.points.some((point) => !Number.isFinite(point))) issues.push("计分必须是有限数字");
   if (!config.scoring.allowNegative && config.scoring.points.some((point) => point < 0)) issues.push("当前配置不允许负分");
+  const customHashes = new Set<string>();
   for (const stage of config.stages) {
-    if (stage.level < 0 || stage.level > 13) issues.push(`${stage.label} 关卡号必须在 0..13`);
-    if (stage.scoring.length === 0) issues.push(`${stage.label} 缺少计分规则`);
+    const displayName = stageDisplayName(stage);
+    if (stageMapKind(stage) === "custom") {
+      const mapHash = stage.mapHash?.trim().toLowerCase() ?? "";
+      if (!stage.label.trim()) issues.push(`第 ${stage.order} 关的自制图名称不能为空`);
+      if (!CUSTOM_MAP_HASH_PATTERN.test(mapHash)) issues.push(`${displayName || `第 ${stage.order} 关`} 的哈希必须是 32 位十六进制 MD5`);
+      else customHashes.add(mapHash);
+      if (stage.level !== 0) issues.push(`${displayName || `第 ${stage.order} 关`} 的内部关卡号必须为 0`);
+    } else if (stage.level < 0 || stage.level > 13) issues.push(`${displayName} 关卡号必须在 0..13`);
+    if (stage.scoring.length === 0) issues.push(`${displayName} 缺少计分规则`);
+  }
+  const distinctHashes = [...customHashes];
+  for (const hash of distinctHashes) {
+    if (distinctHashes.some((candidate) => candidate !== hash && candidate.startsWith(hash.slice(0, 20)))) {
+      issues.push(`自制图哈希前缀 ${hash.slice(0, 20)}.. 无法唯一匹配`);
+      break;
+    }
   }
   return issues;
 };
@@ -424,9 +456,10 @@ export const defaultSrStages = (scoring: readonly number[] = SMALL_SCORING, mini
     return {
       id: `sr-${level}`,
       order: level,
-      label: `SR ${level}`,
+      label: `SR${level}`,
       level,
       mode: "SR" as const,
+      mapKind: "official" as const,
       timeLimitMs: level === 13 ? 15 * 60_000 : 10 * 60_000,
       scoring,
       minimumScoringPlace
@@ -439,9 +472,10 @@ export const defaultHsStages = (scoring: readonly number[] = SMALL_SCORING, mini
     return {
       id: `hs-${level}`,
       order: level,
-      label: `HS ${level}`,
+      label: `HS${level}`,
       level,
       mode: "HS" as const,
+      mapKind: "official" as const,
       timeLimitMs: level === 12 || level === 13 ? 15 * 60_000 : 10 * 60_000,
       scoring,
       minimumScoringPlace
@@ -487,6 +521,9 @@ export const ScenarioStageSchema = Type.Object({
   order: Type.Integer({ minimum: 1 }),
   level: Type.Integer({ minimum: 0, maximum: 13 }),
   mode: StageModeSchema,
+  mapKind: Type.Optional(Type.Union([Type.Literal("official"), Type.Literal("custom")])),
+  mapHash: Type.Optional(Type.String()),
+  displayName: Type.Optional(Type.String()),
   timeLimitMs: Type.Integer({ minimum: 1 }),
   scoring: Type.Array(Type.Number(), { minItems: 1 }),
   minimumScoringPlace: Type.Integer({ minimum: 1 })

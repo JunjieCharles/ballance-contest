@@ -38,6 +38,29 @@ describe("CommandQueue", () => {
     expect((await queue.enqueue({ type: "list" }, "current-list")).status).toBe("acknowledged");
   });
 
+  it("encodes custom maps with hidden level zero and requires their quoted hash prefix", async () => {
+    const transport = new FakeTransport();
+    const queue = new CommandQueue(transport, 100);
+    const hash = "e90b2f535c8bf881e9cb83129fba241d";
+    transport.onWrite = (command) => setTimeout(() => {
+      queue.observeLine(`[7, *ContestConsole]: "ffffffffffffffffffff.." - ${command.endsWith(" 4") ? "Get ready" : "Go!"}`);
+      queue.observeLine(`[7, *ContestConsole]: "${hash.slice(0, 20)}.." - ${command.endsWith(" 4") ? "Get ready" : "Go!"}`);
+    }, 0);
+    expect((await queue.enqueue({ type: "ready", map: `${hash} 0`, mode: "hs" }, "custom-ready")).status).toBe("acknowledged");
+    expect((await queue.enqueue({ type: "go", map: `${hash} 0`, mode: "hs" }, "custom-go")).status).toBe("acknowledged");
+    expect(transport.writes).toEqual([
+      `countdown ${hash} 0 hs 4`,
+      `countdown ${hash} 0 hs`
+    ]);
+  });
+
+  it("accepts the live server's unquoted official-map hash echo", async () => {
+    const transport = new FakeTransport();
+    const queue = new CommandQueue(transport, 100);
+    transport.onWrite = () => setTimeout(() => queue.observeLine("[7, *ContestConsole]: a364b408fffaab434480.. - Go!"), 0);
+    expect((await queue.enqueue({ type: "go", map: "level 1", mode: "sr" }, "official-hash-go")).status).toBe("acknowledged");
+  });
+
   it("encodes bulletin, notice and announce as distinct MockClient commands", async () => {
     const transport = new FakeTransport();
     const queue = new CommandQueue(transport, 100);

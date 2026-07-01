@@ -4,6 +4,8 @@ import {
   createDefaultCompetitionConfig,
   minimumScoringPlaceFor,
   spectatorLoginName,
+  stageCommandTarget,
+  stageDisplayName,
   validateCompetitionConfigForPublish
 } from "./index.js";
 
@@ -61,5 +63,34 @@ describe("competition configuration", () => {
     expect(minimumScoringPlaceFor([20, 10, 1])).toBe(3);
     expect(minimumScoringPlaceFor([10, 5, 0, 0])).toBe(2);
     expect(minimumScoringPlaceFor([0])).toBe(1);
+  });
+
+  it("validates and encodes official and custom map stages", () => {
+    const config = createDefaultCompetitionConfig("Mixed maps");
+    const official = config.stages[0]!;
+    const custom = {
+      ...official,
+      id: "custom-final",
+      label: "云端决赛图",
+      level: 0,
+      mode: "HS" as const,
+      mapKind: "custom" as const,
+      mapHash: "e90b2f535c8bf881e9cb83129fba241d"
+    };
+    expect(stageDisplayName(official)).toBe("SR1");
+    expect(stageCommandTarget(official)).toBe("level 1");
+    expect(stageDisplayName(custom)).toBe("云端决赛图");
+    expect(stageCommandTarget(custom)).toBe("e90b2f535c8bf881e9cb83129fba241d 0");
+    expect(validateCompetitionConfigForPublish({ ...config, stages: [official, custom] })).toEqual([]);
+    expect(validateCompetitionConfigForPublish({ ...config, stages: [{ ...custom, label: "", mapHash: "not-md5", level: 2 }] }))
+      .toEqual(expect.arrayContaining([
+        expect.stringContaining("名称不能为空"),
+        expect.stringContaining("32 位十六进制 MD5"),
+        expect.stringContaining("内部关卡号必须为 0")
+      ]));
+    expect(validateCompetitionConfigForPublish({
+      ...config,
+      stages: [custom, { ...custom, id: "collision", mapHash: "e90b2f535c8bf881e9cb000000000000" }]
+    })).toContain("自制图哈希前缀 e90b2f535c8bf881e9cb.. 无法唯一匹配");
   });
 });

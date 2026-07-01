@@ -45,7 +45,8 @@ describe("CompetitionService dynamic participants", () => {
           for (const action of actions) controller.acknowledgeAction(action.id, "acknowledged");
           return actions;
         }
-      }
+      },
+      mapEchoPrefixes: new Map<string, string>()
     };
     const internals = service as unknown as {
       workRuntimes: Map<string, typeof runtime>;
@@ -127,6 +128,100 @@ describe("CompetitionService dynamic participants", () => {
       expect.objectContaining({ id: "Silent_Snow", online: false }),
       expect.objectContaining({ id: "Modern_Player", connectionIds: ["314"], online: true })
     ]));
+  });
+
+  it("attributes quoted custom-map Ready, Go, finish and DNF echoes to the configured full hash", () => {
+    dataRoot = mkdtempSync(join(tmpdir(), "ballance-custom-map-"));
+    database = openDatabase(join(dataRoot, "console.sqlite"));
+    const service = new CompetitionService(undefined, { database, dataRoot });
+    const record = service.create({ name: "Custom map", mode: "work", idempotencyKey: "create-custom-map" });
+    const hash = "e90b2f535c8bf881e9cb83129fba241d";
+    service.updateDraft(record.id, {
+      expectedStateVersion: 0,
+      idempotencyKey: "configure-custom-map",
+      stages: [{
+        id: "custom-hs-final", order: 1, label: "云端决赛图", level: 0, mode: "HS", mapKind: "custom", mapHash: hash,
+        timeLimitMs: 600_000, scoring: [20, 15], minimumScoringPlace: 2
+      }]
+    });
+    service.publish(record.id, 1, "publish-custom-map");
+    const internals = service as unknown as {
+      workRuntimes: Map<string, WorkRuntimeHarness>;
+      makeWorkRuntime(competitionId: string, config: CompetitionConfig, transport: CommandTransport): WorkRuntimeHarness;
+      ingestWorkLine(runtime: WorkRuntimeHarness, line: string): void;
+      toCommandAction(competitionId: string, action: { type: "ready" } | { type: "manual-go" }): { type: string; map: string; mode: string };
+    };
+    const published = service.snapshot(record.id).publishedConfig as CompetitionConfig;
+    const runtime = internals.makeWorkRuntime(record.id, published, { write: async () => undefined });
+    internals.workRuntimes.set(record.id, runtime);
+    expect(internals.toCommandAction(record.id, { type: "ready" })).toMatchObject({ map: `${hash} 0`, mode: "hs" });
+    expect(internals.toCommandAction(record.id, { type: "manual-go" })).toMatchObject({ map: `${hash} 0`, mode: "hs" });
+    const prefix = hash.slice(0, 20);
+    internals.ingestWorkLine(runtime, "[07-01 19:25:40] Alpha (#11) logged in with cheat mode off.");
+    internals.ingestWorkLine(runtime, "[07-01 19:25:40] Beta (#12) logged in with cheat mode off.");
+    internals.ingestWorkLine(runtime, `[07-01 19:25:43] [7, *ContestConsole]: "${prefix}.." - Get ready`);
+    internals.ingestWorkLine(runtime, `[07-01 19:25:46] [7, *ContestConsole]: "${prefix}.." - Go!`);
+    internals.ingestWorkLine(runtime, `[07-01 19:26:19] (#11, Alpha) finished "${prefix}.." in 1st place (score: 120 [20]; real time: 00:00:02.045).`);
+    internals.ingestWorkLine(runtime, `[07-01 19:26:46] (#12, Beta) did not finish "${prefix}.." (furthest reach: sector 1).`);
+
+    const snapshot = service.snapshot(record.id);
+    expect(snapshot.config.stages[0]).toMatchObject({ mapKind: "custom", mapHash: hash, level: 0, label: "云端决赛图" });
+    expect(snapshot.runtime.attempts).toContainEqual(expect.objectContaining({ stageId: "custom-hs-final", attemptNumber: 1 }));
+    expect(snapshot.currentScoreboard.find((entry) => entry.playerId === "Alpha")?.stages["custom-hs-final"])
+      .toMatchObject({ status: "finished", score: 120, points: 20 });
+    expect(snapshot.currentScoreboard.find((entry) => entry.playerId === "Beta")?.stages["custom-hs-final"])
+      .toMatchObject({ status: "dnf", points: 0 });
+    expect(service.getRawClientLogs(record.id).filter((line) => line.rawLine.includes(`"${prefix}.."`))).toHaveLength(4);
+  });
+
+  it("binds an official server hash echo only after the current referee Ready", () => {
+    dataRoot = mkdtempSync(join(tmpdir(), "ballance-official-map-echo-"));
+    database = openDatabase(join(dataRoot, "console.sqlite"));
+    const service = new CompetitionService(undefined, { database, dataRoot });
+    const record = service.create({ name: "Official map echo", mode: "work", idempotencyKey: "create-official-map" });
+    service.publish(record.id, 0, "publish-official-map");
+    const internals = service as unknown as {
+      workRuntimes: Map<string, WorkRuntimeHarness>;
+      makeWorkRuntime(competitionId: string, config: CompetitionConfig, transport: CommandTransport): WorkRuntimeHarness;
+      ingestWorkLine(runtime: WorkRuntimeHarness, line: string): void;
+    };
+    const published = service.snapshot(record.id).publishedConfig as CompetitionConfig;
+    const runtime = internals.makeWorkRuntime(record.id, published, { write: async () => undefined });
+    internals.workRuntimes.set(record.id, runtime);
+    runtime.controller.manualReady();
+    const prefix = "a364b408fffaab434480";
+    internals.ingestWorkLine(runtime, "[07-01 19:30:00] Alpha (#11) logged in with cheat mode off.");
+    internals.ingestWorkLine(runtime, `[07-01 19:30:01] [7, *ContestConsole]: ${prefix}.. - Get ready`);
+    internals.ingestWorkLine(runtime, `[07-01 19:30:16] [7, *ContestConsole]: ${prefix}.. - Go!`);
+    internals.ingestWorkLine(runtime, `[07-01 19:30:20] (#11, Alpha) finished ${prefix}.. in 1st place (score: 100; real time: 00:00:04.000).`);
+
+    expect(service.snapshot(record.id).currentScoreboard.find((entry) => entry.playerId === "Alpha")?.stages["sr-1"])
+      .toMatchObject({ status: "finished", score: 100, points: 20 });
+  });
+
+  it("renders custom-map test logs with the same quoted hash sentences as the live server", () => {
+    dataRoot = mkdtempSync(join(tmpdir(), "ballance-custom-test-logs-"));
+    database = openDatabase(join(dataRoot, "console.sqlite"));
+    const service = new CompetitionService(undefined, { database, dataRoot });
+    const record = service.create({ name: "Custom test logs", mode: "test", idempotencyKey: "custom-test-logs" });
+    const hash = "e90b2f535c8bf881e9cb83129fba241d";
+    service.updateDraft(record.id, {
+      expectedStateVersion: 0,
+      idempotencyKey: "custom-test-stage",
+      stages: [{
+        id: "custom-sr", order: 1, label: "云端竞速图", level: 0, mode: "SR", mapKind: "custom", mapHash: hash,
+        timeLimitMs: 600_000, scoring: [20, 15, 12], minimumScoringPlace: 3
+      }]
+    });
+    service.publish(record.id, 1, "publish-custom-test-stage");
+    const runId = service.createTestRunFromScenario(record.id, "normal-player-roster").runId;
+    service.startTestAutomation(record.id, runId, 0);
+    service.advanceTestAutomation(record.id, runId, 240_000);
+    const prefix = `"${hash.slice(0, 20)}.."`;
+    const lines = service.getRawClientLogs(record.id, 1_000).map((line) => line.rawLine);
+    expect(lines.filter((line) => line.includes(`${prefix} - Get ready`)), lines.join("\n")).toHaveLength(3);
+    expect(lines).toContainEqual(expect.stringContaining(`${prefix} - Go!`));
+    expect(lines).toContainEqual(expect.stringContaining(`finished ${prefix}`));
   });
 
   it("excludes cheat and known Warning results without fabricating DNF logs", () => {
@@ -243,6 +338,26 @@ describe("CompetitionService dynamic participants", () => {
     expect(restored.runtime.automationEnabled).toBe(false);
   });
 
+  it("reads legacy stages as official maps without rewriting immutable published snapshots", () => {
+    dataRoot = mkdtempSync(join(tmpdir(), "ballance-stage-map-migration-"));
+    database = openDatabase(join(dataRoot, "console.sqlite"));
+    const service = new CompetitionService(undefined, { database, dataRoot });
+    const record = service.create({ name: "Legacy maps", mode: "test", idempotencyKey: "legacy-maps" });
+    service.publish(record.id, 0, "publish-legacy-maps");
+    const stored = database.sqlite.prepare("SELECT payload FROM config_versions WHERE competition_id=? AND immutable=1").get(record.id) as { payload: string };
+    const legacy = JSON.parse(stored.payload) as { stages: Array<{ mapKind?: string; label: string }> };
+    for (const [index, stage] of legacy.stages.entries()) {
+      delete stage.mapKind;
+      stage.label = `SR ${index + 1}`;
+    }
+    const immutablePayload = JSON.stringify(legacy);
+    database.sqlite.prepare("UPDATE config_versions SET payload=? WHERE competition_id=? AND immutable=1").run(immutablePayload, record.id);
+
+    expect(service.snapshot(record.id).publishedConfig?.stages[0]).toMatchObject({ mapKind: "official", label: "SR1", level: 1 });
+    const afterRead = database.sqlite.prepare("SELECT payload FROM config_versions WHERE competition_id=? AND immutable=1").get(record.id) as { payload: string };
+    expect(afterRead.payload).toBe(immutablePayload);
+  });
+
   it("records timeout DNF in results without inventing MockClient DNF lines", () => {
     const service = new CompetitionService();
     const record = service.create({ name: "Timeout evidence", mode: "test", idempotencyKey: "timeout-evidence" });
@@ -279,8 +394,8 @@ describe("CompetitionService dynamic participants", () => {
       expectedStateVersion: 0,
       idempotencyKey: "short-two-stages",
       stages: [
-        { id: "sr-1", order: 1, label: "SR 1", level: 1, mode: "SR", timeLimitMs: 600_000, scoring: [20, 15, 12], minimumScoringPlace: 3 },
-        { id: "sr-2", order: 2, label: "SR 2", level: 2, mode: "SR", timeLimitMs: 600_000, scoring: [20, 15, 12], minimumScoringPlace: 3 }
+        { id: "sr-1", order: 1, label: "SR1", level: 1, mode: "SR", mapKind: "official", timeLimitMs: 600_000, scoring: [20, 15, 12], minimumScoringPlace: 3 },
+        { id: "sr-2", order: 2, label: "SR2", level: 2, mode: "SR", mapKind: "official", timeLimitMs: 600_000, scoring: [20, 15, 12], minimumScoringPlace: 3 }
       ]
     });
     service.publish(record.id, 1, "publish-tail-intake-finish");

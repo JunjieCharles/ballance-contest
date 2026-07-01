@@ -5,6 +5,8 @@ import {
   defaultHsStages,
   defaultSrStages,
   minimumScoringPlaceFor,
+  stageDisplayName,
+  stageMapKind,
   validateCompetitionConfigForPublish
 } from "@ballance/contracts";
 import type {
@@ -75,8 +77,10 @@ const phaseLabel: Record<string, string> = {
   review: "比赛复核", paused: "已暂停", finished: "已结束", archived: "已归档"
 };
 
-const stageTitle = (config: CompetitionConfig, stageId?: string): string =>
-  config.stages.find((stage) => stage.id === stageId)?.label ?? stageId ?? "—";
+const stageTitle = (config: CompetitionConfig, stageId?: string): string => {
+  const stage = config.stages.find((candidate) => candidate.id === stageId);
+  return stage ? stageDisplayName(stage) : stageId ?? "—";
+};
 
 const eventLabel = (event: ScenarioDefinition["events"][number]): string => {
   switch (event.type) {
@@ -626,26 +630,27 @@ function ConfigPanel({ snapshot, canWrite, saveDraft, publish }: {
   const [scoringDirty, setScoringDirty] = useState(false);
   const [stages, setStages] = useState<StageConfig[]>(config.stages.map((stage) => ({ ...stage, scoring: [...stage.scoring] })));
   const [stagesDirty, setStagesDirty] = useState(false);
+  const draggedStageId = useRef<string | undefined>(undefined);
   const lastScoringPlace = minimumScoringPlaceFor(points);
   const draft = { ...config, contestType, scoring: { ...config.scoring, contestType, points, minimumScoringPlace: lastScoringPlace }, stages };
   const publishIssues = [...validateCompetitionConfigForPublish(draft), ...(stagesDirty ? ["请先保存关卡列表"] : [])];
-  const selectScoringPreset = (type: CompetitionConfig["contestType"]) => {
+  const selectScoringPreset = async (type: CompetitionConfig["contestType"]) => {
     setContestType(type);
     if (type === "small") setPoints([...SMALL_SCORING]);
     if (type === "large") setPoints([...LARGE_SCORING]);
     setScoringDirty(false);
     const nextPoints = type === "small" ? [...SMALL_SCORING] : [...LARGE_SCORING];
-    void saveDraft({ contestType: type, scoring: { ...config.scoring, contestType: type, points: nextPoints, minimumScoringPlace: minimumScoringPlaceFor(nextPoints) }, stages: stages.map((stage) => ({ ...stage, scoring: [...nextPoints], minimumScoringPlace: minimumScoringPlaceFor(nextPoints) })) });
+    await saveDraft({ contestType: type, scoring: { ...config.scoring, contestType: type, points: nextPoints, minimumScoringPlace: minimumScoringPlaceFor(nextPoints) }, stages: stages.map((stage) => ({ ...stage, scoring: [...nextPoints], minimumScoringPlace: minimumScoringPlaceFor(nextPoints) })) });
   };
   const saveScoring = async (nextPoints: number[], nextContestType: CompetitionConfig["contestType"] = contestType) => {
     await saveDraft({ contestType: nextContestType, scoring: { ...config.scoring, contestType: nextContestType, points: nextPoints, minimumScoringPlace: minimumScoringPlaceFor(nextPoints) }, stages: stages.map((stage) => ({ ...stage, scoring: [...nextPoints], minimumScoringPlace: minimumScoringPlaceFor(nextPoints) })) });
     setScoringDirty(false);
   };
-  const replaceStages = (mode: "SR" | "HS") => {
+  const replaceStages = async (mode: "SR" | "HS") => {
     const replacement = (mode === "SR" ? defaultSrStages(points, lastScoringPlace) : defaultHsStages(points, lastScoringPlace)) as StageConfig[];
     setStages(replacement);
     setStagesDirty(false);
-    void saveDraft({ stages: replacement });
+    await saveDraft({ stages: replacement });
   };
   const saveStages = async (nextStages: StageConfig[]) => {
     await saveDraft({ stages: nextStages });
@@ -659,19 +664,21 @@ function ConfigPanel({ snapshot, canWrite, saveDraft, publish }: {
     setStages((current) => current.map((stage) => stage.id === id ? { ...stage, ...patch } : stage));
     setStagesDirty(true);
   };
-  const reorder = (id: string, delta: number) => setStages((current) => {
-    const index = current.findIndex((stage) => stage.id === id);
-    const target = index + delta;
-    if (index < 0 || target < 0 || target >= current.length) return current;
+  const reorder = (sourceId: string, targetId: string) => setStages((current) => {
+    const index = current.findIndex((stage) => stage.id === sourceId);
+    const target = current.findIndex((stage) => stage.id === targetId);
+    if (index < 0 || target < 0 || index === target) return current;
     const copy = [...current];
-    [copy[index], copy[target]] = [copy[target] as StageConfig, copy[index] as StageConfig];
+    const [moved] = copy.splice(index, 1);
+    copy.splice(target, 0, moved as StageConfig);
     const nextStages = copy.map((stage, order) => ({ ...stage, order: order + 1 }));
     setStagesDirty(true);
     return nextStages;
   });
   const addStage = () => {
     const order = stages.length + 1;
-    const nextStages: StageConfig[] = [...stages, { id: `custom-${crypto.randomUUID()}`, order, label: `SR ${order}`, level: Math.min(13, order), mode: "SR", timeLimitMs: order === 13 ? 900_000 : 600_000, scoring: [...points], minimumScoringPlace: lastScoringPlace }];
+    const level = Math.min(13, order);
+    const nextStages: StageConfig[] = [...stages, { id: `stage-${crypto.randomUUID()}`, order, label: `SR${level}`, level, mode: "SR", mapKind: "official", timeLimitMs: order === 13 ? 900_000 : 600_000, scoring: [...points], minimumScoringPlace: lastScoringPlace }];
     setStages(nextStages);
     setStagesDirty(true);
   };
@@ -702,18 +709,30 @@ function ConfigPanel({ snapshot, canWrite, saveDraft, publish }: {
       <button className="ghost" disabled={!editable} onClick={addStage}>添加关卡</button>
       <button disabled={!editable || !stagesDirty || stages.length === 0} onClick={() => void saveStages(stages)}>保存关卡列表</button>
     </div></div>
-      <div className="stage-editor-list">{stages.map((stage, index) => <div className="stage-editor" key={stage.id}>
-        <div className="stage-order"><strong>#{index + 1}</strong><button className="ghost" disabled={!editable || index === 0} onClick={() => reorder(stage.id, -1)}>↑</button><button className="ghost" disabled={!editable || index === stages.length - 1} onClick={() => reorder(stage.id, 1)}>↓</button></div>
-        <label>模式<select value={stage.mode} disabled={!editable} onChange={(event) => persistStage(stage.id, { mode: event.target.value as "SR" | "HS" })}><option>SR</option><option>HS</option></select></label>
-        <label>关卡号<input type="number" min="0" max="13" value={stage.level} disabled={!editable} onChange={(event) => updateStage(stage.id, { level: Number(event.target.value) })} onBlur={(event) => persistStage(stage.id, { level: Number(event.target.value) })} /></label>
-        <label>名称<input value={stage.label} disabled={!editable} onChange={(event) => updateStage(stage.id, { label: event.target.value })} onBlur={(event) => persistStage(stage.id, { label: event.target.value })} /></label>
+      <div className="stage-editor-list">{stages.map((stage, index) => <div className="stage-editor" data-stage-id={stage.id} key={stage.id}
+        onMouseUp={() => { const sourceId = draggedStageId.current; if (sourceId && sourceId !== stage.id) reorder(sourceId, stage.id); draggedStageId.current = undefined; }}>
+        <div className="stage-order"><button type="button" className="drag-handle" aria-label={`拖拽第 ${index + 1} 关`} title="拖拽调整顺序" disabled={!editable}
+          onMouseDown={(event) => { event.preventDefault(); draggedStageId.current = stage.id; }}
+          onMouseUp={() => { draggedStageId.current = undefined; }}>⋮⋮</button><strong>#{index + 1}</strong></div>
+        <label>关卡模式<select aria-label={`第 ${index + 1} 关关卡模式`} value={`${stageMapKind(stage)}-${stage.mode}`} disabled={!editable} onChange={(event) => {
+          const [mapKind, mode] = event.target.value.split("-") as ["official" | "custom", "SR" | "HS"];
+          if (mapKind === "official") {
+            const level = stage.level > 0 ? stage.level : Math.min(13, index + 1);
+            persistStage(stage.id, { mapKind, mode, level, label: `${mode}${level}`, mapHash: "" });
+          } else {
+            persistStage(stage.id, { mapKind, mode, level: 0, label: stageMapKind(stage) === "custom" ? stage.label : `自制图 ${index + 1}`, mapHash: stage.mapHash ?? "" });
+          }
+        }}><option value="official-SR">官图 SR</option><option value="official-HS">官图 HS</option><option value="custom-SR">自制图 SR</option><option value="custom-HS">自制图 HS</option></select></label>
+        {stageMapKind(stage) === "official"
+          ? <label>关卡号<input type="number" min="0" max="13" value={stage.level} disabled={!editable} onChange={(event) => { const level = Number(event.target.value); updateStage(stage.id, { level, label: `${stage.mode}${level}` }); }} onBlur={(event) => { const level = Number(event.target.value); persistStage(stage.id, { level, label: `${stage.mode}${level}` }); }} /></label>
+          : <><label>自制图名称<input value={stage.label} disabled={!editable} onChange={(event) => updateStage(stage.id, { label: event.target.value })} onBlur={(event) => persistStage(stage.id, { label: event.target.value })} /></label><label>关卡哈希<input value={stage.mapHash ?? ""} maxLength={32} spellCheck={false} disabled={!editable} onChange={(event) => updateStage(stage.id, { mapHash: event.target.value })} onBlur={(event) => persistStage(stage.id, { mapHash: event.target.value.trim().toLowerCase(), level: 0 })} /></label></>}
         <label>时限（分钟）<input type="number" min="1" value={Math.round(stage.timeLimitMs / 60_000)} disabled={!editable} onChange={(event) => updateStage(stage.id, { timeLimitMs: Number(event.target.value) * 60_000 })} onBlur={(event) => persistStage(stage.id, { timeLimitMs: Number(event.target.value) * 60_000 })} /></label>
         <label className="stage-scoring">单关计分<input defaultValue={stage.scoring.join(",")} disabled={!editable} onBlur={(event) => {
           const scoring = event.target.value.split(",").map((value) => Number(value.trim())).filter(Number.isFinite);
           persistStage(stage.id, { scoring, minimumScoringPlace: minimumScoringPlaceFor(scoring) });
         }} /></label>
         <div className="button-row compact"><button className="ghost" disabled={!editable} onClick={() => {
-          const copy = { ...stage, id: `copy-${crypto.randomUUID()}`, label: `${stage.label} 副本`, scoring: [...stage.scoring] };
+          const copy = { ...stage, id: `copy-${crypto.randomUUID()}`, label: stageMapKind(stage) === "custom" ? `${stage.label} 副本` : stageDisplayName(stage), scoring: [...stage.scoring] };
           const nextStages = [...stages.slice(0, index + 1), copy, ...stages.slice(index + 1)].map((item, order) => ({ ...item, order: order + 1 }));
           setStages(nextStages);
           setStagesDirty(true);
@@ -744,7 +763,7 @@ function ScoreboardPanel({ snapshot, canWrite, versionKey, requestConfirmation, 
   const editPermissions = new Map(snapshot.runtime.scoreEditPermissions.map((permission) => [permission.stageId, permission]));
   return <section className="panel"><div className="panel-title-row"><h2>实时成绩</h2><div className="button-row compact"><button onClick={() => void downloadExport("xlsx")}>XLSX</button><button onClick={() => void downloadExport("csv")}>CSV</button><button onClick={() => void downloadExport("html")}>HTML</button><button onClick={() => void downloadExport("tsv")}>TSV</button></div></div>
     <p className="muted">当前关成绩由现场事件持续接收；进入下一关 Ready 后可修订此前关卡，比赛结束后可修订全部关卡。</p>
-    <table className="scoreboard"><thead><tr><th>变化</th><th>名次</th><th>总分</th><th>选手</th>{snapshot.config.stages.map((stage) => <th key={stage.id}>{stage.label}</th>)}</tr></thead><tbody>{snapshot.currentScoreboard.map((entry) => <tr key={entry.playerId}>
+    <table className="scoreboard"><thead><tr><th>变化</th><th>名次</th><th>总分</th><th>选手</th>{snapshot.config.stages.map((stage) => <th key={stage.id}>{stageDisplayName(stage)}</th>)}</tr></thead><tbody>{snapshot.currentScoreboard.map((entry) => <tr key={entry.playerId}>
       <td className={entry.change === null ? "" : entry.change > 0 ? "rank-up" : entry.change < 0 ? "rank-down" : ""}>{entry.change === null ? "—" : entry.change > 0 ? `▲${entry.change}` : entry.change < 0 ? `▼${Math.abs(entry.change)}` : "="}</td><td>{entry.rank}</td><td>{entry.points}</td><td>{entry.displayName}</td>
       {snapshot.config.stages.map((stage) => {
         const permission = editPermissions.get(stage.id);

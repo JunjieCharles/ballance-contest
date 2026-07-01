@@ -30,6 +30,19 @@ const cleanText = (text: string): string => {
   return text.trim();
 };
 
+const mapEchoMatches = (line: string, map: string): boolean => {
+  const target = map.trim().toLowerCase();
+  const official = /^level\s+(\d+)$/.exec(target);
+  if (official) {
+    const levelEcho = /Level\s+(\d+)\s+-/i.exec(line);
+    if (levelEcho) return Number(levelEcho[1]) === Number(official[1]);
+    return /:\s*[0-9a-f]+\.\.\s+-/i.test(line);
+  }
+  const custom = /^([0-9a-f]{32})\s+0$/.exec(target);
+  const customEcho = /:\s*"([0-9a-f]+)\.\."\s+-/i.exec(line);
+  return Boolean(custom && customEcho?.[1] && custom[1]?.startsWith(customEcho[1].toLowerCase()));
+};
+
 const encode = (action: CommandAction): { command: string; critical: boolean; acknowledge: (line: string) => boolean } => {
   switch (action.type) {
     case "list": return {
@@ -42,9 +55,9 @@ const encode = (action: CommandAction): { command: string; critical: boolean; ac
       critical: false,
       acknowledge: (line) => line.includes(action.text) || line.includes(`[${action.channel === "announce" ? "Announcement" : action.channel === "notice" ? "Notice" : "Bulletin"}]`) || /success/i.test(line)
     };
-    case "ready": return { command: `countdown ${cleanText(action.map)} ${action.mode} 4`, critical: false, acknowledge: (line) => /Get ready/.test(line) };
+    case "ready": return { command: `countdown ${cleanText(action.map)} ${action.mode} 4`, critical: false, acknowledge: (line) => /Get ready$/.test(line) && mapEchoMatches(line, action.map) };
     case "cheat-off": return { command: "cheat off", critical: false, acknowledge: (line) => /cheat.*off/i.test(line) };
-    case "go": return { command: `countdown ${cleanText(action.map)} ${action.mode}`, critical: true, acknowledge: (line) => / - Go!$/.test(line) };
+    case "go": return { command: `countdown ${cleanText(action.map)} ${action.mode}`, critical: true, acknowledge: (line) => / - Go!$/.test(line) && mapEchoMatches(line, action.map) };
     case "force-next-restart": return { command: "forcenextrestart", critical: true, acknowledge: (line) => /force.*restart|success/i.test(line) };
     case "scores": return { command: `scores ${action.mode} ${cleanText(action.map)}`, critical: false, acknowledge: (line) => /place|score|ranking/i.test(line) };
     case "kick": return { command: `kick ${cleanText(action.playerName)} ${cleanText(action.reason)}`, critical: true, acknowledge: (line) => /kick|disconnect|success/i.test(line) };

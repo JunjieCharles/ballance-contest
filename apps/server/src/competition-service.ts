@@ -8,6 +8,9 @@ import {
   createDefaultCompetitionConfig,
   minimumScoringPlaceFor,
   normalizeRefereeName,
+  stageCommandTarget,
+  stageDisplayName,
+  stageMapKind,
   validateCompetitionConfigForPublish,
   type CommandRecordView,
   type ActionAvailability,
@@ -27,6 +30,7 @@ import {
   type ScenarioEvent,
   type ScenarioPlayerProfile,
   type ScenarioFaultPlan,
+  type StageConfig,
   type ScoreboardOverrideInput,
   type ScoreboardVersionView,
   type TestRunSnapshot,
@@ -102,7 +106,7 @@ interface ServiceSnapshotPayload {
   testRuns?: PersistedTestRun[];
   scoreboardRevisions?: ScoreboardVersionView[];
   archives?: Array<{ version: number; directory: string; packagePath: string; manifestHash: string; createdAt: string }>;
-  work?: { started: boolean; mockClientVersion?: string; automation?: AutomationSnapshot };
+  work?: { started: boolean; mockClientVersion?: string; automation?: AutomationSnapshot; mapEchoPrefixes?: Record<string, string> };
 }
 
 interface TestRuntime {
@@ -145,6 +149,7 @@ interface WorkRuntime {
   automationTimer?: ReturnType<typeof setInterval>;
   automationDispatching?: boolean;
   listReconciliation?: { expected?: number; seen: number; onlinePlayerIds: Set<string> };
+  mapEchoPrefixes: Map<string, string>;
 }
 
 interface ConfirmationRecord {
@@ -170,6 +175,21 @@ const serverLeaseKey = (server: string): string => {
   if (!match) return normalized;
   const host = (match[1] ?? normalized).replace(/\.$/, "");
   return match[2] ? `${host}:${Number(match[2])}` : host;
+};
+
+const migrateStageMap = (stage: StageConfig & { mapKind?: "official" | "custom" }): StageConfig => {
+  if (stageMapKind(stage) === "custom") {
+    return {
+      ...stage,
+      mapKind: "custom",
+      mapHash: stage.mapHash?.trim().toLowerCase() ?? "",
+      level: 0,
+      label: stage.label.trim()
+    };
+  }
+  const official: StageConfig = { ...stage, mapKind: "official", label: stageDisplayName({ ...stage, mapKind: "official" }) };
+  delete official.mapHash;
+  return official;
 };
 
 const commandView = (record: CommandRecord): CommandRecordView => ({
@@ -641,16 +661,21 @@ export class CompetitionService {
         points: [...primaryScoring],
         minimumScoringPlace: minimumScoringPlaceFor(primaryScoring)
       },
-      stages: definition.stages.map((stage) => ({
-        id: stage.id,
-        order: stage.order,
-        label: `${stage.mode} ${stage.level}`,
-        level: stage.level,
-        mode: stage.mode,
-        timeLimitMs: stage.timeLimitMs,
-        scoring: [...stage.scoring],
-        minimumScoringPlace: minimumScoringPlaceFor(stage.scoring)
-      })),
+      stages: definition.stages.map((stage) => {
+        const mapKind = stage.mapKind === "custom" ? "custom" as const : "official" as const;
+        return {
+          id: stage.id,
+          order: stage.order,
+          label: mapKind === "custom" ? stage.displayName?.trim() || stage.id : `${stage.mode}${stage.level}`,
+          level: mapKind === "custom" ? 0 : stage.level,
+          mode: stage.mode,
+          mapKind,
+          ...(mapKind === "custom" ? { mapHash: stage.mapHash?.trim().toLowerCase() ?? "" } : {}),
+          timeLimitMs: stage.timeLimitMs,
+          scoring: [...stage.scoring],
+          minimumScoringPlace: minimumScoringPlaceFor(stage.scoring)
+        };
+      }),
       participants: config.participants.length === 0
         ? definition.players.map((player) => ({
           id: player.id,
@@ -1521,7 +1546,8 @@ export class CompetitionService {
     return {
       ...config,
       refereeName: normalizeRefereeName(config.refereeName || loginName || "ContestConsole"),
-      playerAliases: config.playerAliases ?? []
+      playerAliases: config.playerAliases ?? [],
+      stages: config.stages.map((stage) => migrateStageMap(stage))
     };
   }
 
@@ -1540,12 +1566,15 @@ export class CompetitionService {
       points: normalizedPoints,
       minimumScoringPlace: minimumScoringPlaceFor(normalizedPoints)
     };
-    const stages = [...config.stages].sort((left, right) => left.order - right.order).map((stage, index) => ({
-      ...stage,
-      order: index + 1,
-      scoring: stage.scoring.length > 0 ? stage.scoring : scoring.points,
-      minimumScoringPlace: minimumScoringPlaceFor(stage.scoring.length > 0 ? stage.scoring : scoring.points)
-    }));
+    const stages = [...config.stages].sort((left, right) => left.order - right.order).map((stage, index) => {
+      const mapped = migrateStageMap(stage);
+      return {
+        ...mapped,
+        order: index + 1,
+        scoring: mapped.scoring.length > 0 ? mapped.scoring : scoring.points,
+        minimumScoringPlace: minimumScoringPlaceFor(mapped.scoring.length > 0 ? mapped.scoring : scoring.points)
+      };
+    });
     return { ...config, name, server: config.server.trim(), refereeName, contestType: scoring.contestType, scoring, stages };
   }
 
@@ -1555,14 +1584,21 @@ export class CompetitionService {
     const automation = new CompetitionController({
       competitionId,
       participants: definition.players.map((player) => player.id),
-      stages: [...definition.stages].sort((left, right) => left.order - right.order).map((stage) => ({
-        id: stage.id,
-        map: `level ${stage.level}`,
-        displayName: config.stages.find((candidate) => candidate.id === stage.id)?.label ?? `${stage.mode}${stage.level}`,
-        mode: stage.mode.toLowerCase() as "sr" | "hs",
-        timeLimitMs: stage.timeLimitMs,
-        minimumScoringPlace: stage.minimumScoringPlace
-      })),
+      stages: [...definition.stages].sort((left, right) => left.order - right.order).map((stage) => {
+        const configured = config.stages.find((candidate) => candidate.id === stage.id) ?? migrateStageMap({
+          ...stage,
+          label: stage.displayName ?? `${stage.mode}${stage.level}`,
+          mapKind: stage.mapKind ?? "official"
+        });
+        return {
+          id: stage.id,
+          map: stageCommandTarget(configured),
+          displayName: stageDisplayName(configured),
+          mode: stage.mode.toLowerCase() as "sr" | "hs",
+          timeLimitMs: stage.timeLimitMs,
+          minimumScoringPlace: stage.minimumScoringPlace
+        };
+      }),
       policy: automationPolicyFor(config)
     }, automationClock);
     return {
@@ -1812,12 +1848,12 @@ export class CompetitionService {
     if (runtime.automationClock.now() < dueAtMs) return;
     const prefix = this.testLogPrefix(runtime, dueAtMs);
     const stage = runtime.definition.stages.find((candidate) => candidate.id === pending.action.stageId);
-    const level = String(stage?.level ?? 0).padStart(2, "0");
+    const mapEcho = this.testStageEcho(stage);
     const referee = runtime.definition.refereeConnectionId;
     if (pending.emitted < 3) {
       const value = (3 - pending.emitted) as 3 | 2 | 1;
       runtime.automation.observeCountdown(value);
-      this.appendRawLog(runtime.competitionId, "test-referee", `${prefix} [${referee}, *ContestConsole]: Level ${level} - ${value}`, this.testOccurredAt(runtime, dueAtMs));
+      this.appendRawLog(runtime.competitionId, "test-referee", `${prefix} [${referee}, *ContestConsole]: ${mapEcho} - ${value}`, this.testOccurredAt(runtime, dueAtMs));
       pending.emitted += 1;
       return;
     }
@@ -2065,14 +2101,17 @@ export class CompetitionService {
       competitionId,
       participants: definition.players.map((player) => player.id),
       dynamicParticipants: true,
-      stages: definition.stages.map((stage) => ({
-        id: stage.id,
-        map: `level ${stage.level}`,
-        displayName: config.stages.find((candidate) => candidate.id === stage.id)?.label ?? `${stage.mode}${stage.level}`,
-        mode: stage.mode.toLowerCase() as "sr" | "hs",
-        timeLimitMs: stage.timeLimitMs,
-        minimumScoringPlace: stage.minimumScoringPlace
-      })),
+      stages: definition.stages.map((stage) => {
+        const configured = config.stages.find((candidate) => candidate.id === stage.id) as StageConfig;
+        return {
+          id: stage.id,
+          map: stageCommandTarget(configured),
+          displayName: stageDisplayName(configured),
+          mode: stage.mode.toLowerCase() as "sr" | "hs",
+          timeLimitMs: stage.timeLimitMs,
+          minimumScoringPlace: stage.minimumScoringPlace
+        };
+      }),
       policy: automationPolicyFor(config)
     }, new SystemMonotonicClock());
     const commands = new CommandQueue(
@@ -2087,6 +2126,7 @@ export class CompetitionService {
       engine: new CompetitionEngine(definition),
       commands,
       runtime: new WorkAutomationRuntime(controller, commands),
+      mapEchoPrefixes: new Map(Object.entries(this.getPayload(competitionId).work?.mapEchoPrefixes ?? {})),
       ...(transport instanceof ManagedMockClient ? { client: transport } : {}),
       ...(mockClientVersion === undefined ? {} : { mockClientVersion })
     };
@@ -2186,9 +2226,11 @@ export class CompetitionService {
     const parsed = parseLogLine(line, { year: Number(config.date.slice(0, 4)), utcOffsetMinutes: utcOffsetMinutes(config.timezone) });
     const before = runtime.controller.snapshot();
     const currentStage = config.stages.find((candidate) => candidate.id === before.currentStageId);
+    this.bindOfficialMapEcho(runtime, config, parsed.event, currentStage, before.phase);
+    const eventStage = this.resolveWorkEventStage(runtime, config, parsed.event, before.currentStageId);
     if ((parsed.event.type === "finish" || parsed.event.type === "dnf")
       && (before.phase === "running" || before.phase === "tail-intake")
-      && currentStage && parsed.event.level !== currentStage.level) {
+      && currentStage && eventStage?.id !== currentStage.id) {
       this.journal.append({ type: "work.log", competitionId: runtime.competitionId, data: parsed });
       this.saveWorkRuntimeSnapshot(runtime);
       return;
@@ -2197,9 +2239,9 @@ export class CompetitionService {
     if (parsed.event.type === "player-list-summary") {
       this.completeListReconciliation(runtime, parsed.event.clients, parsed.event.players, parsed.event.spectators);
     }
-    if (parsed.event.type === "countdown") runtime.controller.observeCountdown(parsed.event.value);
+    if (parsed.event.type === "countdown" && eventStage?.id === currentStage?.id) runtime.controller.observeCountdown(parsed.event.value);
     if (parsed.event.type === "warning") this.handleWorkWarning(runtime, config, parsed.event);
-    const event = this.domainToScenarioEvent(runtime.competitionId, config, parsed.event, before.currentStageId);
+    const event = this.domainToScenarioEvent(runtime.competitionId, config, parsed.event, eventStage);
     if (event) {
       if ("playerId" in event) {
         runtime.controller.registerParticipant(event.playerId);
@@ -2293,14 +2335,49 @@ export class CompetitionService {
     this.saveScoreboards(runtime.competitionId, runtime.engine.snapshot().scoreboardVersions);
   }
 
-  private domainToScenarioEvent(competitionId: string, config: CompetitionConfig, event: DomainEvent, preferredStageId?: string): ScenarioEvent | undefined {
-    const eventLevel = "level" in event ? event.level : undefined;
-    const preferredStage = config.stages.find((candidate) => candidate.id === preferredStageId);
-    const stage = preferredStage && eventLevel === preferredStage.level
-      ? preferredStage
-      : preferredStageId === undefined && eventLevel !== undefined
-        ? config.stages.find((candidate) => candidate.level === eventLevel)
-        : undefined;
+  private bindOfficialMapEcho(
+    runtime: WorkRuntime,
+    config: CompetitionConfig,
+    event: DomainEvent,
+    currentStage: StageConfig | undefined,
+    phase: AutomationSnapshot["phase"]
+  ): void {
+    if ((event.type !== "ready" && event.type !== "countdown" && event.type !== "go")
+      || event.mapKind !== "official" || !event.mapHashPrefix || !currentStage
+      || stageMapKind(currentStage) !== "official"
+      || normalizeRefereeName(event.refereeName) !== normalizeRefereeName(config.refereeName)) return;
+    const phaseMatches = event.type === "ready"
+      ? phase === "ready"
+      : phase === "ready" || phase === "countdown" || phase === "running";
+    if (phaseMatches) runtime.mapEchoPrefixes.set(currentStage.id, event.mapHashPrefix.toLowerCase());
+  }
+
+  private resolveWorkEventStage(
+    runtime: WorkRuntime,
+    config: CompetitionConfig,
+    event: DomainEvent,
+    preferredStageId?: string
+  ): StageConfig | undefined {
+    if (event.type !== "ready" && event.type !== "countdown" && event.type !== "go" && event.type !== "finish" && event.type !== "dnf") return undefined;
+    if (event.mapKind === "official" && event.level !== undefined) {
+      const candidates = config.stages.filter((candidate) => stageMapKind(candidate) === "official" && candidate.level === event.level);
+      return candidates.find((candidate) => candidate.id === preferredStageId) ?? (candidates.length === 1 ? candidates[0] : undefined);
+    }
+    const prefix = event.mapHashPrefix?.toLowerCase();
+    if (!prefix) return undefined;
+    if (event.mapKind === "custom") {
+      const hashes = [...new Set(config.stages
+        .filter((candidate) => stageMapKind(candidate) === "custom" && candidate.mapHash?.toLowerCase().startsWith(prefix))
+        .map((candidate) => candidate.mapHash?.toLowerCase() ?? ""))];
+      if (hashes.length !== 1) return undefined;
+      const candidates = config.stages.filter((candidate) => candidate.mapHash?.toLowerCase() === hashes[0]);
+      return candidates.find((candidate) => candidate.id === preferredStageId) ?? (candidates.length === 1 ? candidates[0] : undefined);
+    }
+    const candidates = config.stages.filter((candidate) => runtime.mapEchoPrefixes.get(candidate.id) === prefix);
+    return candidates.find((candidate) => candidate.id === preferredStageId) ?? (candidates.length === 1 ? candidates[0] : undefined);
+  }
+
+  private domainToScenarioEvent(competitionId: string, config: CompetitionConfig, event: DomainEvent, stage?: StageConfig): ScenarioEvent | undefined {
     switch (event.type) {
       case "player-login":
       case "player-listed": {
@@ -2315,12 +2392,14 @@ export class CompetitionService {
         if (!stage || normalizeRefereeName(event.refereeName) !== normalizeRefereeName(config.refereeName)) return undefined;
         return { atMs: Date.parse(event.occurredAt), sourceId: event.sourceId, type: "go", stageId: stage.id, refereeConnectionId: "work-referee" };
       case "finish": {
+        if (!stage) return undefined;
         const participant = this.observeWorkParticipant(competitionId, event.playerName, event.connectionId, true, "finished");
-        return stage && participant ? { atMs: Date.parse(event.occurredAt), sourceId: event.sourceId, type: "finish", stageId: stage.id, playerId: participant.id, score: event.score, elapsedMs: event.elapsedMs } : undefined;
+        return participant ? { atMs: Date.parse(event.occurredAt), sourceId: event.sourceId, type: "finish", stageId: stage.id, playerId: participant.id, score: event.score, elapsedMs: event.elapsedMs } : undefined;
       }
       case "dnf": {
+        if (!stage) return undefined;
         const participant = this.observeWorkParticipant(competitionId, event.playerName, event.connectionId, true, event.cheat ? "excluded" : "dnf");
-        return stage && participant ? event.cheat
+        return participant ? event.cheat
           ? { atMs: Date.parse(event.occurredAt), sourceId: event.sourceId, type: "exclude", stageId: stage.id, playerId: participant.id, reason: "cheat-dnf" }
           : { atMs: Date.parse(event.occurredAt), sourceId: event.sourceId, type: "dnf", stageId: stage.id, playerId: participant.id, reason: "dnf" }
           : undefined;
@@ -2436,6 +2515,9 @@ export class CompetitionService {
         order: stage.order,
         level: stage.level,
         mode: stage.mode,
+        mapKind: stage.mapKind,
+        ...(stage.mapHash === undefined ? {} : { mapHash: stage.mapHash }),
+        displayName: stageDisplayName(stage),
         timeLimitMs: stage.timeLimitMs,
         scoring: [...stage.scoring],
         minimumScoringPlace: stage.minimumScoringPlace
@@ -2457,6 +2539,9 @@ export class CompetitionService {
         order: stage.order,
         level: stage.level,
         mode: stage.mode,
+        mapKind: stage.mapKind,
+        ...(stage.mapHash === undefined ? {} : { mapHash: stage.mapHash }),
+        displayName: stageDisplayName(stage),
         timeLimitMs: stage.timeLimitMs,
         scoring: [...stage.scoring],
         minimumScoringPlace: stage.minimumScoringPlace
@@ -2473,7 +2558,8 @@ export class CompetitionService {
       work: {
         started: true,
         ...(runtime.mockClientVersion === undefined ? {} : { mockClientVersion: runtime.mockClientVersion }),
-        automation: runtime.controller.snapshot()
+        automation: runtime.controller.snapshot(),
+        mapEchoPrefixes: Object.fromEntries(runtime.mapEchoPrefixes)
       }
     });
   }
@@ -3110,7 +3196,7 @@ export class CompetitionService {
     const playerName = player?.displayName ?? ("playerId" in event ? event.playerId : "server");
     const connectionId = player?.connectionId ?? ("connectionId" in event ? event.connectionId : "0");
     const stage = "stageId" in event ? runtime.definition.stages.find((candidate) => candidate.id === event.stageId) : undefined;
-    const level = String(stage?.level ?? 0).padStart(2, "0");
+    const mapEcho = this.testStageEcho(stage);
     const prefix = this.testLogPrefix(runtime, event.atMs);
     switch (event.type) {
       case "login": return `${prefix} ${playerName} (#${event.connectionId}) logged in with cheat mode off.`;
@@ -3118,13 +3204,13 @@ export class CompetitionService {
       case "finish": {
         const place = (runtime.stageFinishOrdinals.get(event.stageId) ?? 0) + 1;
         runtime.stageFinishOrdinals.set(event.stageId, place);
-        return `${prefix} (#${connectionId}, ${playerName}) finished Level ${level} in ${this.ordinal(place)} place (score: ${event.score}; real time: ${this.formatElapsed(event.elapsedMs)}).`;
+        return `${prefix} (#${connectionId}, ${playerName}) finished ${mapEcho} in ${this.ordinal(place)} place (score: ${event.score}${stage?.mapKind === "custom" ? " [0]" : ""}; real time: ${this.formatElapsed(event.elapsedMs)}).`;
       }
-      case "dnf": return `${prefix} (#${connectionId}, ${playerName}) did not finish Level ${level} (furthest reach: sector 0).`;
+      case "dnf": return `${prefix} (#${connectionId}, ${playerName}) did not finish ${mapEcho} (furthest reach: sector 0).`;
       case "exclude": return `${prefix} [Warning] ${playerName} result excluded: ${event.reason}`;
       case "cheat": return `${prefix} (${connectionId}, ${playerName}) turned cheat ${event.enabled ? "on" : "off"}.`;
-      case "ready": return `${prefix} [${event.refereeConnectionId}, *ContestConsole]: Level ${level} - Get ready`;
-      case "go": return `${prefix} [${event.refereeConnectionId}, *ContestConsole]: Level ${level} - Go!`;
+      case "ready": return `${prefix} [${event.refereeConnectionId}, *ContestConsole]: ${mapEcho} - Get ready`;
+      case "go": return `${prefix} [${event.refereeConnectionId}, *ContestConsole]: ${mapEcho} - Go!`;
       case "warning": return `${prefix} [Warning] ${event.playerId ? `${playerName} ` : ""}${event.message}`;
       case "fault": return `${prefix} ${event.fault === "server-disconnect" ? "Disconnected from server." : `Fault: ${event.fault}${event.playerId ? ` (${playerName})` : ""}`}`;
     }
@@ -3134,10 +3220,10 @@ export class CompetitionService {
     const atMs = action.createdAtMs;
     const prefix = this.testLogPrefix(runtime, atMs);
     const stage = runtime.definition.stages.find((candidate) => candidate.id === action.stageId);
-    const level = String(stage?.level ?? 0).padStart(2, "0");
+    const mapEcho = this.testStageEcho(stage);
     const referee = runtime.definition.refereeConnectionId;
     switch (action.kind) {
-      case "ready": return [`${prefix} [${referee}, *ContestConsole]: Level ${level} - Get ready`];
+      case "ready": return [`${prefix} [${referee}, *ContestConsole]: ${mapEcho} - Get ready`];
       case "go": return [];
       case "bulletin": return [`${prefix} [Bulletin] *ContestConsole: ${action.message ?? "比赛流程通知"}`];
       case "notice": return [`${prefix} [Notice] (${referee}, *ContestConsole): ${action.message ?? "比赛流程通知"}`];
@@ -3145,6 +3231,11 @@ export class CompetitionService {
       case "cheat-off": return runtime.definition.players.map((player) => `${prefix} (${player.connectionId}, ${player.displayName}) turned cheat off.`);
       case "force-next-restart": return [`${prefix} [${referee}, *ContestConsole]: The next countdown will restart the level.`];
     }
+  }
+
+  private testStageEcho(stage: ScenarioDefinition["stages"][number] | undefined): string {
+    if (stage?.mapKind === "custom" && stage.mapHash) return `"${stage.mapHash.slice(0, 20).toLowerCase()}.."`;
+    return `Level ${String(stage?.level ?? 0).padStart(2, "0")}`;
   }
 
   private testOccurredAt(runtime: TestRuntime, atMs: number): string {
@@ -3189,9 +3280,9 @@ export class CompetitionService {
     if (!stage) throw new ServiceError("STATE_CONFLICT", "比赛没有可执行动作的轮次", 409);
     switch (action.type) {
       case "notification": return { type: "notification", channel: action.channel, text: action.text };
-      case "ready": return { type: "ready", map: `level ${stage.level}`, mode: stage.mode.toLowerCase() as "sr" | "hs" };
+      case "ready": return { type: "ready", map: stageCommandTarget(stage), mode: stage.mode.toLowerCase() as "sr" | "hs" };
       case "cheat-off": return { type: "cheat-off" };
-      case "manual-go": return { type: "go", map: `level ${stage.level}`, mode: stage.mode.toLowerCase() as "sr" | "hs" };
+      case "manual-go": return { type: "go", map: stageCommandTarget(stage), mode: stage.mode.toLowerCase() as "sr" | "hs" };
       case "kick": return { type: "kick", playerName: action.playerName, reason: "referee-kick" };
       case "raw-command": return { type: "raw", command: action.command };
       default: throw new ServiceError("CAPABILITY_UNSUPPORTED", `动作 ${action.type} 不需要或不支持 MockClient 命令`, 409);

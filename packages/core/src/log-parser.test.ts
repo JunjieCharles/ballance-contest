@@ -48,6 +48,20 @@ describe("parseLogLine", () => {
     }
   });
 
+  it("parses quoted custom-map and unquoted official-map hash echoes from the live server", () => {
+    const prefix = "e90b2f535c8bf881e9cb";
+    expect(parseLogLine(`[07-01 19:25:43] [270699495, *Referee]: "${prefix}.." - Get ready`, context).event)
+      .toMatchObject({ type: "ready", mapKind: "custom", mapHashPrefix: prefix });
+    expect(parseLogLine(`[07-01 19:25:46] [270699495, *Referee]: "${prefix}.." - Go!`, context).event)
+      .toMatchObject({ type: "go", mapKind: "custom", mapHashPrefix: prefix });
+    expect(parseLogLine(`[07-01 19:26:19] (#42, Player) finished "${prefix}.." in 1st place (score: 120 [20]; real time: 00:00:02.045).`, context).event)
+      .toMatchObject({ type: "finish", mapKind: "custom", mapHashPrefix: prefix, score: 120, elapsedMs: 2_045 });
+    expect(parseLogLine(`[07-01 19:26:46] (#42, Player) did not finish "${prefix}.." (furthest reach: sector 1).`, context).event)
+      .toMatchObject({ type: "dnf", mapKind: "custom", mapHashPrefix: prefix, furthestSector: 1 });
+    expect(parseLogLine("[07-01 19:57:19] [427530425, *Referee]: a364b408fffaab434480.. - Go!", context).event)
+      .toMatchObject({ type: "go", mapKind: "official", mapHashPrefix: "a364b408fffaab434480" });
+  });
+
   it("identifies only the two known player warnings as scoring violations", () => {
     expect(parseLogLine("[06-29 11:20:14] [Warning] Hurts_LM just pressed the Reset hotkey at Level 01!", context).event)
       .toMatchObject({ type: "warning", playerName: "Hurts_LM", level: 1, violationCode: "reset-hotkey" });

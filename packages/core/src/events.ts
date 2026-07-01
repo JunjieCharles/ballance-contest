@@ -4,6 +4,12 @@ export interface EventMetadata {
   rawLine?: string;
 }
 
+export interface EventMapReference {
+  mapKind: "official" | "custom";
+  level?: number;
+  mapHashPrefix?: string;
+}
+
 export type DomainEvent =
   | (EventMetadata & { type: "connected" })
   | (EventMetadata & { type: "player-list-start"; count: number })
@@ -11,12 +17,12 @@ export type DomainEvent =
   | (EventMetadata & { type: "player-login"; connectionId: string; playerName: string; cheat: boolean })
   | (EventMetadata & { type: "player-listed"; connectionId: string; playerName: string; cheat: boolean })
   | (EventMetadata & { type: "player-disconnect"; connectionId: string; playerName: string })
-  | (EventMetadata & { type: "ready"; connectionId: string; refereeName: string; level: number })
-  | (EventMetadata & { type: "countdown"; connectionId: string; refereeName: string; level: number; value: 3 | 2 | 1 })
-  | (EventMetadata & { type: "go"; connectionId: string; refereeName: string; level: number })
+  | (EventMetadata & EventMapReference & { type: "ready"; connectionId: string; refereeName: string })
+  | (EventMetadata & EventMapReference & { type: "countdown"; connectionId: string; refereeName: string; value: 3 | 2 | 1 })
+  | (EventMetadata & EventMapReference & { type: "go"; connectionId: string; refereeName: string })
   | (EventMetadata & { type: "notification"; channel: "bulletin" | "notice" | "announce"; connectionId?: string; refereeName: string; text: string })
-  | (EventMetadata & { type: "finish"; connectionId: string; playerName: string; level: number; serverPlace: number; score: number; elapsedMs: number; cheat: boolean })
-  | (EventMetadata & { type: "dnf"; connectionId: string; playerName: string; level: number; furthestSector: number; cheat: boolean })
+  | (EventMetadata & EventMapReference & { type: "finish"; connectionId: string; playerName: string; serverPlace: number; score: number; elapsedMs: number; cheat: boolean })
+  | (EventMetadata & EventMapReference & { type: "dnf"; connectionId: string; playerName: string; furthestSector: number; cheat: boolean })
   | (EventMetadata & { type: "cheat-changed"; connectionId: string; playerName: string; enabled: boolean })
   | (EventMetadata & { type: "warning"; message: string; playerName?: string; level?: number; violationCode?: "uncontrollable-restart" | "reset-hotkey" })
   | (EventMetadata & { type: "unknown"; text: string });

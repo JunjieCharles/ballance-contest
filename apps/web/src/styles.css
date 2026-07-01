@@ -327,7 +327,7 @@ header > span:last-of-type { margin-left: auto; font-size: 13px; }
 .stage-editor-list { display: grid; gap: 9px; }
 .stage-editor {
   display: grid;
-  grid-template-columns: 120px 90px 100px minmax(140px, 1fr) 120px minmax(220px, 1.5fr) auto;
+  grid-template-columns: 74px 130px minmax(100px, 1fr) minmax(180px, 1.4fr) 120px minmax(220px, 1.5fr) auto;
   gap: 8px;
   align-items: end;
   padding: 10px;
@@ -337,7 +337,9 @@ header > span:last-of-type { margin-left: auto; font-size: 13px; }
 }
 .stage-editor label { margin: 0; }
 .stage-order { display: flex; gap: 4px; align-items: center; }
-.stage-order button { min-width: 32px; padding: 4px 7px; }
+.drag-handle { min-width: 34px; padding: 7px 8px; cursor: grab; font-size: 18px; line-height: 1; letter-spacing: -3px; }
+.drag-handle:active { cursor: grabbing; }
+.drag-handle:disabled { cursor: not-allowed; }
 .stage-scoring { min-width: 220px; }
 .scoring-presets {
   display: flex;
