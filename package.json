@@ -23,6 +23,7 @@
     "test:e2e": "npm run build && playwright test",
     "test:portable": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/Test-Portable.ps1",
     "test:mock-client": "npm run build -w @ballance/server && node scripts/Test-MockClientPipe.mjs",
+    "test:live-work": "npm run build -w @ballance/server && node scripts/Test-LiveWorkMode.mjs",
     "package:portable": "node scripts/build-portable.mjs"
   },
   "devDependencies": {

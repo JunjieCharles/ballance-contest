@@ -26,6 +26,15 @@ describe("parseLogLine", () => {
       .toMatchObject({ type: "cheat-changed", enabled: true });
   });
 
+  it("parses the current MockClient list rows and trailing summary", () => {
+    expect(parseLogLine("[07-01 15:17:58] 3598759654: *ContestConsole     0ms", context).event)
+      .toMatchObject({ type: "player-listed", connectionId: "3598759654", playerName: "*ContestConsole", cheat: false });
+    expect(parseLogLine("[07-01 15:17:58] 42: Silent Snow     38ms [CHEAT]", context).event)
+      .toMatchObject({ type: "player-listed", connectionId: "42", playerName: "Silent Snow", cheat: true });
+    expect(parseLogLine("[07-01 15:17:58] 2 client(s) online: 1 player(s), 1 spectator(s).", context).event)
+      .toMatchObject({ type: "player-list-summary", clients: 2, players: 1, spectators: 1 });
+  });
+
   it("parses the three player-facing notifications and the real 3/2/1 countdown", () => {
     expect(parseLogLine("[06-29 11:20:12] [Announcement] (2717249041, *Referee): READY!", context).event)
       .toMatchObject({ type: "notification", channel: "announce", refereeName: "*Referee", text: "READY!" });

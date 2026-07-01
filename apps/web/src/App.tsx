@@ -373,9 +373,14 @@ export function App() {
   const enableAutomation = () => run(async () => {
     if (!session || !snapshot) throw new Error("请选择比赛");
     await request(`/api/v1/competitions/${snapshot.competition.id}/automation/enable`, session, {
-      method: "POST", body: JSON.stringify({ runId: snapshot.testRun?.runId, readyInMs: 0 })
+      method: "POST",
+      body: JSON.stringify({
+        runId: snapshot.testRun?.runId,
+        expectedStateVersion: snapshot.competition.stateVersion,
+        idempotencyKey: crypto.randomUUID(),
+      })
     });
-  }, "自动化已启用");
+  }, snapshot?.runtime.phase === "paused" ? "自动化已恢复" : "自动化已启动");
 
   const pauseAutomation = () => run(async () => {
     if (!session || !snapshot) throw new Error("请选择比赛");
@@ -556,7 +561,7 @@ function ConsolePanel({ snapshot, canWrite, versionKey, startWork, enableAutomat
     <div className="panel"><h2>裁判操作</h2>
       <div className="button-row action-row">
         {snapshot.competition.mode === "work" && <ActionButton runtime={runtime} action="start-work" canWrite={canWrite} onClick={() => void startWork()}>启动 MockClient</ActionButton>}
-        <ActionButton runtime={runtime} action="enable-automation" canWrite={canWrite} onClick={() => void enableAutomation()}>启用自动化</ActionButton>
+        <ActionButton runtime={runtime} action="enable-automation" canWrite={canWrite} onClick={() => void enableAutomation()}>{availabilityFor(runtime, "enable-automation")?.label ?? "启动自动化"}</ActionButton>
         <ActionButton runtime={runtime} action="pause-automation" canWrite={canWrite} className="secondary" onClick={() => void pauseAutomation()}>暂停自动化</ActionButton>
       </div>
       <h3>面向玩家的通知</h3>
@@ -582,6 +587,17 @@ function ConsolePanel({ snapshot, canWrite, versionKey, startWork, enableAutomat
       </div>
     </div>
     <div className="panel"><h2>流程动态与注意事项</h2>
+      {runtime.unconfirmedAutomationActions.length > 0 && <section className="unconfirmed-command-panel"><h3>未确认流程命令</h3>
+        <p className="muted">请逐条选择“确认已执行”或“执行重发”。原命令审计永不覆盖。</p>
+        {runtime.unconfirmedAutomationActions.map((action) => <div className="unconfirmed-command-row" key={action.id}>
+          <div><strong>{action.kind}</strong><small>{action.stageId} · {action.status}</small></div>
+          <ConfirmButton key={`confirm-executed:${action.id}:${versionKey}`} label="确认已执行" kind="automation-command-resolution" target={action.id} versionKey={versionKey}
+            requestPayload={{ actionId: action.id, resolution: "confirm-executed" }} disabled={!canWrite} requestConfirmation={requestConfirmation}
+            onConfirm={(confirmation) => performAction({ type: "resolve-automation-command", actionId: action.id, resolution: "confirm-executed", confirmationToken: confirmation.token, impactHash: confirmation.impactHash })} />
+          <ConfirmButton key={`resend:${action.id}:${versionKey}`} label="执行重发" kind="automation-command-resolution" target={action.id} versionKey={versionKey} className="danger"
+            requestPayload={{ actionId: action.id, resolution: "resend" }} disabled={!canWrite} requestConfirmation={requestConfirmation}
+            onConfirm={(confirmation) => performAction({ type: "resolve-automation-command", actionId: action.id, resolution: "resend", confirmationToken: confirmation.token, impactHash: confirmation.impactHash })} />
+        </div>)}</section>}
       {runtime.attentionItems.length === 0 && <p className="muted">暂无需要注意的流程动态。</p>}
       <div className="attention-list">{runtime.attentionItems.map((item) => <article className={`attention-card ${item.severity}`} key={item.id}>
         <div><strong>{item.title}</strong><time>{formatUtc8DateTime(item.occurredAt)}</time></div><p>{item.message}</p>

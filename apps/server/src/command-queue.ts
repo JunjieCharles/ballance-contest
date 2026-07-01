@@ -32,7 +32,11 @@ const cleanText = (text: string): string => {
 
 const encode = (action: CommandAction): { command: string; critical: boolean; acknowledge: (line: string) => boolean } => {
   switch (action.type) {
-    case "list": return { command: "list", critical: false, acknowledge: (line) => /player\(s\) online|\(#\d+\)/.test(line) };
+    case "list": return {
+      command: "list",
+      critical: false,
+      acknowledge: (line) => /player\(s\) online:|client\(s\) online:\s*\d+ player\(s\)/.test(line)
+    };
     case "notification": return {
       command: `${action.channel} ${cleanText(action.text)}`,
       critical: false,
@@ -53,7 +57,11 @@ export class CommandQueue {
   private tail: Promise<void> = Promise.resolve();
   private pending: { encoded: ReturnType<typeof encode>; record: CommandRecord; resolve: (record: CommandRecord) => void } | undefined;
 
-  public constructor(private readonly transport: CommandTransport, private readonly timeoutMs = 5_000, private readonly onChange?: (record: CommandRecord) => void) {}
+  public constructor(
+    private readonly transport: CommandTransport,
+    private readonly timeoutMs: number | ((action: CommandAction) => number) = 10_000,
+    private readonly onChange?: (record: CommandRecord) => void
+  ) {}
 
   public enqueue(action: CommandAction, idempotencyKey: string): Promise<CommandRecord> {
     const old = this.records.get(idempotencyKey);
@@ -75,7 +83,7 @@ export class CommandQueue {
               this.pending = undefined;
               const final = this.update(record, encoded.critical ? "uncertain" : "timed_out");
               resolve(final); done();
-            }, this.timeoutMs);
+            }, typeof this.timeoutMs === "function" ? this.timeoutMs(action) : this.timeoutMs);
           });
         } catch {
           resolve(this.update(record, "failed"));

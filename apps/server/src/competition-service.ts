@@ -144,7 +144,7 @@ interface WorkRuntime {
   listTimer?: ReturnType<typeof setInterval>;
   automationTimer?: ReturnType<typeof setInterval>;
   automationDispatching?: boolean;
-  listReconciliation?: { expected: number; seen: number; onlinePlayerIds: Set<string> };
+  listReconciliation?: { expected?: number; seen: number; onlinePlayerIds: Set<string> };
 }
 
 interface ConfirmationRecord {
@@ -210,6 +210,7 @@ const automationView = (
   deadlineAt?: string
 ): RuntimeSnapshot => ({
   phase: snapshot?.phase ?? "draft",
+  ...(snapshot?.pausedFromPhase === undefined ? {} : { pausedFromPhase: snapshot.pausedFromPhase }),
   stateVersion: snapshot?.stateVersion ?? 0,
   mode,
   automationEnabled: snapshot?.automationEnabled ?? false,
@@ -227,7 +228,10 @@ const automationView = (
   rejectedResults: snapshot?.rejectedResults ?? [],
   commands,
   availableActions,
-  attentionItems
+  attentionItems,
+  unconfirmedAutomationActions: snapshot?.actions
+    .filter((action): action is typeof action & { status: "failed" | "uncertain" } => action.status === "failed" || action.status === "uncertain")
+    .map((action) => ({ id: action.id, kind: action.kind, stageId: action.stageId, status: action.status })) ?? []
 });
 
 const plannedStageStartAt = (snapshot: AutomationSnapshot, epochOriginMs: number, readyBufferMs: number): string | undefined => {
@@ -703,7 +707,7 @@ export class CompetitionService {
     this.advanceTestClock(runtime, milliseconds);
     this.persistTestRuntime(runtime);
     const snapshot = runtime.automation.snapshot();
-    if (snapshot.phase === "review" || snapshot.phase === "paused" || snapshot.phase === "incident") this.stopRealtimeTestAutomation(runId);
+    if (snapshot.phase === "review") this.stopRealtimeTestAutomation(runId);
     this.journal.append({ type: "test-run.clock-advanced", competitionId, data: { runId, milliseconds, snapshot } });
     return snapshot;
   }
@@ -814,6 +818,7 @@ export class CompetitionService {
     client.start();
     this.workRuntimes.set(competitionId, runtime);
     this.startParticipantReconciliation(runtime);
+    this.startRealtimeWorkAutomation(runtime);
     this.saveWorkRuntimeSnapshot(runtime);
     this.journal.append({ type: "work.started", competitionId, data: { mockClientVersion } });
     const snapshot = runtime.controller.snapshot();
@@ -822,22 +827,49 @@ export class CompetitionService {
       this.availableActionsFor(competitionId, snapshot), this.attentionItemsFor(competitionId, snapshot), stageDeadlineAt(snapshot, origin));
   }
 
-  public async enableAutomation(competitionId: string, input: { runId?: string; readyInMs?: number }): Promise<RuntimeSnapshot> {
+  public async enableAutomation(competitionId: string, input: {
+    runId?: string;
+    readyInMs?: number;
+    expectedStateVersion?: number;
+    idempotencyKey?: string;
+    confirmationToken?: string;
+    impactHash?: string;
+  }): Promise<RuntimeSnapshot> {
     const competition = this.get(competitionId);
+    const idempotencyKey = input.idempotencyKey ? `${competitionId}:automation-enable:${input.idempotencyKey}` : undefined;
+    const old = idempotencyKey ? this.idempotency.get(idempotencyKey) : undefined;
+    if (old) return old as RuntimeSnapshot;
+    if (input.expectedStateVersion !== undefined && input.expectedStateVersion !== competition.stateVersion) {
+      throw new ServiceError("STATE_CONFLICT", "状态版本已变化", 409, { latestStateVersion: competition.stateVersion });
+    }
+    const controller = competition.mode === "test"
+      ? (() => {
+          const runId = input.runId ?? this.getPayload(competitionId).activeRunId;
+          return runId ? this.getTestRuntime(competitionId, runId).automation : undefined;
+        })()
+      : this.workRuntimes.get(competitionId)?.controller;
+    const unresolved = controller?.snapshot().actions.filter((action) => action.status === "failed" || action.status === "uncertain") ?? [];
+    if (unresolved.length > 0) {
+      throw new ServiceError("ACTION_UNAVAILABLE", "请先逐条确认已执行或执行重发，再恢复自动化", 409, { actionIds: unresolved.map((action) => action.id) });
+    }
     if (competition.mode === "test") {
       const runId = input.runId ?? this.getPayload(competitionId).activeRunId;
       if (!runId) throw new ServiceError("NOT_FOUND", "请先创建测试运行", 404);
       this.assertActionAvailable(competitionId, "enable-automation", this.getTestRuntime(competitionId, runId).automation.snapshot());
-      const readyInMs = input.readyInMs ?? 0;
+      const readyInMs = input.readyInMs ?? this.getDraftConfig(competitionId).flow.intermissionMs;
       this.startTestAutomation(competitionId, runId, readyInMs);
       const runtime = this.getTestRuntime(competitionId, runId);
       this.startRealtimeTestAutomation(runtime);
-      return this.getTestRunSnapshot(competitionId, runId).automation;
+      const result = this.getTestRunSnapshot(competitionId, runId).automation;
+      if (idempotencyKey) this.idempotency.set(idempotencyKey, result);
+      return result;
     }
     const runtime = this.workRuntimes.get(competitionId);
     this.assertActionAvailable(competitionId, "enable-automation", runtime?.controller.snapshot());
     if (!runtime) throw new ServiceError("NOT_FOUND", "请先启动工作运行", 404);
-    runtime.controller.enable(runtime.controller.snapshot().plannedReadyAtMs ?? performance.now() + (input.readyInMs ?? 0));
+    const runtimeSnapshot = runtime.controller.snapshot();
+    const initialReadyInMs = input.readyInMs ?? this.getDraftConfig(competitionId).flow.intermissionMs;
+    runtime.controller.enable(runtimeSnapshot.plannedReadyAtMs ?? performance.now() + initialReadyInMs);
     await runtime.runtime.dispatch();
     for (const action of runtime.controller.snapshot().actions.filter((candidate) => candidate.status === "acknowledged")) this.recordAutomationAttention(competitionId, action);
     this.workRuntimes.set(competitionId, runtime);
@@ -845,8 +877,10 @@ export class CompetitionService {
     this.saveWorkRuntimeSnapshot(runtime);
     const snapshot = runtime.controller.snapshot();
     const origin = Date.now() - performance.now();
-    return automationView("work", snapshot, this.commandHistory(competitionId), plannedStageStartAt(snapshot, origin, this.getDraftConfig(competitionId).flow.readyBufferMs), plannedReadyAt(snapshot, origin), undefined,
+    const result = automationView("work", snapshot, this.commandHistory(competitionId), plannedStageStartAt(snapshot, origin, this.getDraftConfig(competitionId).flow.readyBufferMs), plannedReadyAt(snapshot, origin), undefined,
       this.availableActionsFor(competitionId, snapshot), this.attentionItemsFor(competitionId, snapshot), stageDeadlineAt(snapshot, origin));
+    if (idempotencyKey) this.idempotency.set(idempotencyKey, result);
+    return result;
   }
 
   public pauseAutomation(competitionId: string): RuntimeSnapshot {
@@ -855,7 +889,6 @@ export class CompetitionService {
       const runId = this.getPayload(competitionId).activeRunId;
       if (!runId) throw new ServiceError("NOT_FOUND", "请先创建测试运行", 404);
       this.assertActionAvailable(competitionId, "pause-automation", this.getTestRuntime(competitionId, runId).automation.snapshot());
-      this.stopRealtimeTestAutomation(runId);
       const runtime = this.getTestRuntime(competitionId, runId);
       runtime.automation.pause();
       this.persistTestRuntime(runtime);
@@ -867,7 +900,6 @@ export class CompetitionService {
     const runtime = this.workRuntimes.get(competitionId);
     if (!runtime) throw new ServiceError("NOT_FOUND", "工作运行时尚未启动", 404);
     this.assertActionAvailable(competitionId, "pause-automation", runtime.controller.snapshot());
-    this.stopRealtimeWorkAutomation(runtime);
     runtime.controller.pause();
     this.saveWorkRuntimeSnapshot(runtime);
     const snapshot = runtime.controller.snapshot();
@@ -878,7 +910,17 @@ export class CompetitionService {
 
   public createConfirmation(
     competitionId: string,
-    input: { kind: ConfirmationSummary["kind"]; target?: string; playerId?: string; stageId?: string; operation?: "set-place" | "set-dnf"; place?: number; rankPolicy?: "tie" | "shift" }
+    input: {
+      kind: ConfirmationSummary["kind"];
+      target?: string;
+      playerId?: string;
+      stageId?: string;
+      operation?: "set-place" | "set-dnf";
+      place?: number;
+      rankPolicy?: "tie" | "shift";
+      actionId?: string;
+      resolution?: "confirm-executed" | "resend";
+    }
   ): ConfirmationSummary {
     const competition = this.get(competitionId);
     const runtimeSnapshot = this.runtimeAutomationSnapshot(competitionId);
@@ -887,6 +929,28 @@ export class CompetitionService {
     const target = input.target ?? (input.kind === "scoreboard-override" && input.playerId && input.stageId ? `${input.playerId}:${input.stageId}` : competition.id);
     let impactHash = createHash("sha256").update(JSON.stringify({ competitionId, target, stateVersion: competition.stateVersion, kind: input.kind, playerId: input.playerId, stageId: input.stageId, operation: input.operation, place: input.place, rankPolicy: input.rankPolicy })).digest("hex");
     let runtimeToken: string | undefined;
+    const unresolvedAutomationAction = input.kind === "automation-command-resolution"
+      ? runtimeSnapshot?.actions.find((action) => action.id === input.actionId && (action.status === "failed" || action.status === "uncertain"))
+      : undefined;
+    if (input.kind === "automation-command-resolution") {
+      if (!unresolvedAutomationAction || !input.resolution || target !== unresolvedAutomationAction.id) {
+        throw new ServiceError("CONFIRMATION_UNAVAILABLE", "目标流程命令已变化或不再需要处置", 409);
+      }
+      impactHash = createHash("sha256").update(JSON.stringify({
+        competitionId,
+        target,
+        stateVersion: competition.stateVersion,
+        kind: input.kind,
+        resolution: input.resolution,
+        action: {
+          id: unresolvedAutomationAction.id,
+          kind: unresolvedAutomationAction.kind,
+          stageId: unresolvedAutomationAction.stageId,
+          status: unresolvedAutomationAction.status,
+          idempotencyKey: unresolvedAutomationAction.idempotencyKey
+        }
+      })).digest("hex");
+    }
     if (input.kind === "restart") {
       try {
         const issued = this.controllerFor(competitionId).issueRestartConfirmation(target);
@@ -949,6 +1013,14 @@ export class CompetitionService {
     this.confirmations.set(token, record);
     const effect = input.kind === "manual-go"
       ? { title: "确认手动发令", consequences: ["将发送真实倒数命令", "只有 Go 回显后才创建尝试并启动关卡时限"], irreversible: false }
+      : input.kind === "automation-command-resolution"
+        ? {
+            title: input.resolution === "resend" ? "确认执行重发" : "确认命令已执行",
+            consequences: input.resolution === "resend"
+              ? ["生成新的命令审计记录并等待新回显", "原 uncertain/timed_out 记录不会被覆盖", "本次为裁判显式重发，不会继续自动重试"]
+              : ["原 uncertain/timed_out 记录保持不变", "流程动作标记为裁判已现场核对", "不会发送任何新命令"],
+            irreversible: input.resolution === "resend"
+          }
       : input.kind === "restart"
         ? { title: "确认重赛", consequences: ["当前尝试将作废但保留证据", "重新执行 Ready ×3、READY、关闭 cheat 和 3/2/1/Go"], irreversible: false }
         : input.kind === "scoreboard-override"
@@ -1000,6 +1072,74 @@ export class CompetitionService {
     if (old) return old as CommandRecordView;
     const competition = this.get(competitionId);
     if (competition.stateVersion !== input.expectedStateVersion) throw new ServiceError("STATE_CONFLICT", "状态版本已变化", 409, { latestStateVersion: competition.stateVersion });
+    if (input.action.type === "resolve-automation-command") {
+      const resolutionAction = input.action;
+      const controller = this.controllerFor(competitionId);
+      const unresolved = controller.snapshot().actions.find((action) =>
+        action.id === resolutionAction.actionId && (action.status === "failed" || action.status === "uncertain"));
+      if (!unresolved) throw new ServiceError("ACTION_UNAVAILABLE", "目标流程命令已变化或已完成处置", 409);
+      const currentImpactHash = createHash("sha256").update(JSON.stringify({
+        competitionId,
+        target: unresolved.id,
+        stateVersion: competition.stateVersion,
+        kind: "automation-command-resolution",
+        resolution: resolutionAction.resolution,
+        action: {
+          id: unresolved.id,
+          kind: unresolved.kind,
+          stageId: unresolved.stageId,
+          status: unresolved.status,
+          idempotencyKey: unresolved.idempotencyKey
+        }
+      })).digest("hex");
+      if (currentImpactHash !== resolutionAction.impactHash) throw new ServiceError("CONFIRMATION_STALE", "目标流程命令已变化，请重新确认", 409);
+      this.consumeConfirmation(
+        competitionId,
+        "automation-command-resolution",
+        resolutionAction.confirmationToken,
+        resolutionAction.impactHash,
+        resolutionAction.actionId
+      );
+      let view: CommandRecordView;
+      if (resolutionAction.resolution === "confirm-executed") {
+        controller.resolveUnconfirmedAction(unresolved.id, "referee-confirmed");
+        view = this.localActionRecord("automation-command-confirmed", `裁判确认 ${unresolved.kind} 已执行`, competition.mode === "test");
+        this.recordCommandView(competitionId, input.idempotencyKey, view);
+      } else if (competition.mode === "test") {
+        controller.resolveUnconfirmedAction(unresolved.id, "acknowledged");
+        view = simulatedCommand("automation-command-resend", `重新发送 ${unresolved.kind}`);
+        this.recordCommandView(competitionId, input.idempotencyKey, view);
+      } else {
+        const runtime = this.workRuntimes.get(competitionId);
+        if (!runtime) throw new ServiceError("NOT_FOUND", "工作运行时尚未启动", 404);
+        const record = await runtime.commands.enqueue(this.toAutomationCommand(unresolved), `${input.idempotencyKey}:resend`);
+        const resolvedStatus = record.status === "acknowledged" ? "acknowledged" : record.status === "uncertain" ? "uncertain" : "failed";
+        controller.resolveUnconfirmedAction(unresolved.id, resolvedStatus);
+        view = commandView(record);
+      }
+      if (competition.mode === "test") {
+        const runId = this.getPayload(competitionId).activeRunId;
+        if (runId) this.persistTestRuntime(this.getTestRuntime(competitionId, runId));
+      } else {
+        const runtime = this.workRuntimes.get(competitionId);
+        if (runtime) this.saveWorkRuntimeSnapshot(runtime);
+      }
+      this.appendAttention(competitionId, {
+        id: `automation-command-resolution:${unresolved.id}:${randomUUID()}`,
+        category: "command",
+        severity: view.status === "acknowledged" || view.status === "simulated" ? "info" : "warning",
+        title: resolutionAction.resolution === "resend" ? "流程命令已由裁判执行重发" : "流程命令已确认执行",
+        message: resolutionAction.resolution === "resend"
+          ? `${unresolved.kind} 已生成新的命令审计记录；原记录保持 ${unresolved.status}。`
+          : `${unresolved.kind} 已由裁判现场核对；未发送新命令。`,
+        occurredAt: new Date().toISOString(),
+        stageId: unresolved.stageId
+      });
+      this.bumpCompetitionVersion(competitionId);
+      this.idempotency.set(key, view);
+      this.journal.append({ type: "automation.command-resolved", competitionId, stateVersion: this.get(competitionId).stateVersion, data: { actionId: unresolved.id, resolution: resolutionAction.resolution, result: view } });
+      return view;
+    }
     if (input.action.type === "scoreboard-override") {
       return this.applyScoreboardOverride(competitionId, {
         ...input.action,
@@ -1400,7 +1540,8 @@ export class CompetitionService {
       participants: definition.players.map((player) => player.id),
       stages: [...definition.stages].sort((left, right) => left.order - right.order).map((stage) => ({
         id: stage.id,
-        map: String(stage.level),
+        map: `level ${stage.level}`,
+        displayName: config.stages.find((candidate) => candidate.id === stage.id)?.label ?? `${stage.mode}${stage.level}`,
         mode: stage.mode.toLowerCase() as "sr" | "hs",
         timeLimitMs: stage.timeLimitMs,
         minimumScoringPlace: stage.minimumScoringPlace
@@ -1801,7 +1942,7 @@ export class CompetitionService {
       this.persistTestRuntime(runtime);
       if (scoreboardVersions !== beforeScoreboardVersions) this.saveScoreboards(runtime.competitionId, runtime.engine.snapshot().scoreboardVersions);
       if (changed) this.journal.append({ type: "test-run.realtime-progress", competitionId: runtime.competitionId, data: { runId, phase: snapshot.phase } });
-      if (!snapshot.automationEnabled || snapshot.phase === "review" || snapshot.phase === "paused" || snapshot.phase === "incident") {
+      if (snapshot.phase === "review") {
         this.stopRealtimeTestAutomation(runId);
       }
     } catch (error) {
@@ -1904,14 +2045,19 @@ export class CompetitionService {
       dynamicParticipants: true,
       stages: definition.stages.map((stage) => ({
         id: stage.id,
-        map: String(stage.level),
+        map: `level ${stage.level}`,
+        displayName: config.stages.find((candidate) => candidate.id === stage.id)?.label ?? `${stage.mode}${stage.level}`,
         mode: stage.mode.toLowerCase() as "sr" | "hs",
         timeLimitMs: stage.timeLimitMs,
         minimumScoringPlace: stage.minimumScoringPlace
       })),
       policy: automationPolicyFor(config)
     }, new SystemMonotonicClock());
-    const commands = new CommandQueue(transport, 5_000, (record) => this.recordCommand(competitionId, record));
+    const commands = new CommandQueue(
+      transport,
+      (action) => action.type === "go" ? 15_000 : 10_000,
+      (record) => this.recordCommand(competitionId, record)
+    );
     return {
       competitionId,
       server: config.server,
@@ -1988,7 +2134,7 @@ export class CompetitionService {
       if (snapshot.stateVersion !== before || records.length > 0) {
         this.journal.append({ type: "work.automation-progress", competitionId: runtime.competitionId, data: { phase: snapshot.phase } });
       }
-      if (!snapshot.automationEnabled || snapshot.phase === "review" || snapshot.phase === "paused" || snapshot.phase === "incident") {
+      if (snapshot.phase === "review") {
         this.stopRealtimeWorkAutomation(runtime);
       }
     } catch (error) {
@@ -2016,9 +2162,12 @@ export class CompetitionService {
       return;
     }
     if (parsed.event.type === "player-list-start") this.beginListReconciliation(runtime, parsed.event.count);
+    if (parsed.event.type === "player-list-summary") {
+      this.completeListReconciliation(runtime, parsed.event.clients, parsed.event.players, parsed.event.spectators);
+    }
     if (parsed.event.type === "countdown") runtime.controller.observeCountdown(parsed.event.value);
     if (parsed.event.type === "warning") this.handleWorkWarning(runtime, config, parsed.event);
-    const event = this.domainToScenarioEvent(runtime.competitionId, config, parsed.event);
+    const event = this.domainToScenarioEvent(runtime.competitionId, config, parsed.event, before.currentStageId);
     if (event) {
       if ("playerId" in event) {
         runtime.controller.registerParticipant(event.playerId);
@@ -2111,8 +2260,14 @@ export class CompetitionService {
     this.saveScoreboards(runtime.competitionId, runtime.engine.snapshot().scoreboardVersions);
   }
 
-  private domainToScenarioEvent(competitionId: string, config: CompetitionConfig, event: DomainEvent): ScenarioEvent | undefined {
-    const stage = config.stages.find((candidate) => candidate.level === ("level" in event ? event.level : -1));
+  private domainToScenarioEvent(competitionId: string, config: CompetitionConfig, event: DomainEvent, preferredStageId?: string): ScenarioEvent | undefined {
+    const eventLevel = "level" in event ? event.level : undefined;
+    const preferredStage = config.stages.find((candidate) => candidate.id === preferredStageId);
+    const stage = preferredStage && eventLevel === preferredStage.level
+      ? preferredStage
+      : preferredStageId === undefined && eventLevel !== undefined
+        ? config.stages.find((candidate) => candidate.level === eventLevel)
+        : undefined;
     switch (event.type) {
       case "player-login":
       case "player-listed": {
@@ -2146,8 +2301,8 @@ export class CompetitionService {
     }
   }
 
-  private beginListReconciliation(runtime: WorkRuntime, expected: number): void {
-    runtime.listReconciliation = { expected, seen: 0, onlinePlayerIds: new Set<string>() };
+  private beginListReconciliation(runtime: WorkRuntime, expected?: number): void {
+    runtime.listReconciliation = { ...(expected === undefined ? {} : { expected }), seen: 0, onlinePlayerIds: new Set<string>() };
     if (expected === 0) this.finishListReconciliation(runtime);
   }
 
@@ -2157,7 +2312,24 @@ export class CompetitionService {
     reconciliation.seen += 1;
     const playerId = rawName.trim();
     if (playerId && !playerId.startsWith("*")) reconciliation.onlinePlayerIds.add(playerId.toLocaleLowerCase("en-US"));
-    if (reconciliation.seen >= reconciliation.expected) this.finishListReconciliation(runtime);
+    if (reconciliation.expected !== undefined && reconciliation.seen >= reconciliation.expected) this.finishListReconciliation(runtime);
+  }
+
+  private completeListReconciliation(runtime: WorkRuntime, clients: number, players: number, spectators: number): void {
+    const reconciliation = runtime.listReconciliation ?? { seen: 0, onlinePlayerIds: new Set<string>() };
+    runtime.listReconciliation = reconciliation;
+    reconciliation.expected = clients;
+    if (reconciliation.seen !== clients || reconciliation.onlinePlayerIds.size !== players) {
+      this.appendAttention(runtime.competitionId, {
+        id: `participant-list-mismatch:${Date.now()}`,
+        category: "command",
+        severity: "warning",
+        title: "在线名单汇总需要复核",
+        message: `list 汇总为 ${clients} 个连接、${players} 名玩家、${spectators} 名旁观者；已解析 ${reconciliation.seen} 个连接。`,
+        occurredAt: new Date().toISOString()
+      });
+    }
+    this.finishListReconciliation(runtime);
   }
 
   private finishListReconciliation(runtime: WorkRuntime): void {
@@ -2331,7 +2503,7 @@ export class CompetitionService {
   private controllerFor(competitionId: string): CompetitionController {
     const competition = this.get(competitionId);
     if (competition.mode === "test") {
-      const runId = this.getPayload(competitionId).activeRunId;
+      const runId = this.getPayload(competitionId).activeRunId ?? competition.activeRunId;
       if (!runId) throw new ServiceError("NOT_FOUND", "请先创建测试运行", 404);
       return this.getTestRuntime(competitionId, runId).automation;
     }
@@ -2343,7 +2515,7 @@ export class CompetitionService {
   private runtimeAutomationSnapshot(competitionId: string): AutomationSnapshot | undefined {
     const competition = this.get(competitionId);
     if (competition.mode === "work") return this.workRuntimes.get(competitionId)?.controller.snapshot();
-    const runId = this.getPayload(competitionId).activeRunId;
+    const runId = this.getPayload(competitionId).activeRunId ?? competition.activeRunId;
     return runId ? this.getTestRuntime(competitionId, runId).automation.snapshot() : undefined;
   }
 
@@ -2598,6 +2770,7 @@ export class CompetitionService {
     const phase = snapshot?.phase ?? competition.status;
     const blockers = snapshot?.blockers.filter((blocker) => blocker.code !== "AUTOMATION_PAUSED") ?? [];
     const hasBlockingIssue = blockers.some((blocker) => blocker.severity === "critical" || blocker.code === "PARTICIPANT_OFFLINE");
+    const hasUnconfirmedAutomationActions = snapshot?.actions.some((action) => action.status === "failed" || action.status === "uncertain") ?? false;
     const openAttempt = snapshot?.attempts.findLast((attempt) => attempt.intakeOpen && !attempt.voided);
     const currentStageActions = snapshot?.actions.filter((action) => action.stageId === snapshot.currentStageId) ?? [];
     const firstReadyAtMs = currentStageActions.find((action) => action.kind === "ready")?.createdAtMs;
@@ -2621,8 +2794,15 @@ export class CompetitionService {
     return [
       descriptor("start-work", "启动工作运行", "启动真实 MockClient，并立即开始在线名单对账。", competition.mode === "work" && competition.status === "published" && !hasRuntime,
         competition.mode !== "work" ? "测试比赛不启动真实 MockClient" : competition.status !== "published" ? "请先发布比赛配置" : "工作运行已经启动"),
-      descriptor("enable-automation", "启用自动化", "由状态机按固定节奏推进 Ready、倒数和关卡切换。", refereeActionsUnlocked && hasRuntime && !snapshot?.automationEnabled && !["review", "incident"].includes(phase) && !hasBlockingIssue,
-        !refereeActionsUnlocked ? "请先发布比赛配置" : !hasRuntime ? "请先启动运行" : snapshot?.automationEnabled ? "自动化已经启用" : phase === "incident" ? "请先处理当前事故" : phase === "review" ? "比赛已进入复核" : "存在未解除的流程阻断"),
+      descriptor(
+        "enable-automation",
+        phase === "paused" || snapshot?.pausedFromPhase ? "恢复自动化" : "启动自动化",
+        phase === "paused" || snapshot?.pausedFromPhase
+          ? "从暂停前阶段继续；未确认命令必须先由裁判核对，且不会自动重发。"
+          : "按轮间准备时长规划首轮 Ready，并由状态机推进后续流程。",
+        refereeActionsUnlocked && hasRuntime && !snapshot?.automationEnabled && !["review", "incident"].includes(phase) && !hasUnconfirmedAutomationActions,
+        !refereeActionsUnlocked ? "请先发布比赛配置" : !hasRuntime ? "请先启动运行" : snapshot?.automationEnabled ? "自动化已经启用" : phase === "incident" ? "请先处理当前事故" : hasUnconfirmedAutomationActions ? "请先逐条确认已执行或执行重发" : "比赛已进入复核"
+      ),
       descriptor("pause-automation", "暂停自动化", "停止自动推进；已经发出的真实命令不会自动撤回。", refereeActionsUnlocked && Boolean(snapshot?.automationEnabled),
         !refereeActionsUnlocked ? "请先发布比赛配置" : "自动化当前未启用"),
       descriptor("ready", "开始 Ready", "立即进入三次 Get ready、READY 公告和关闭 cheat 流程，不会跳过倒数。", refereeActionsUnlocked && hasRuntime && ["lobby", "preparing", "paused", "restart-preparing"].includes(phase) && !hasBlockingIssue,
@@ -2791,13 +2971,17 @@ export class CompetitionService {
       database.sqlite.prepare("INSERT INTO command_audits(id,competition_id,idempotency_key,action_type,status,payload,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(competition_id,idempotency_key) DO UPDATE SET status=excluded.status,payload=excluded.payload,updated_at=excluded.updated_at")
         .run(record.id, competitionId, record.idempotencyKey, record.action.type, record.status, JSON.stringify(record), record.createdAt, record.updatedAt);
     });
-    if (record.status === "uncertain" || record.status === "failed") {
+    if (record.action.type === "list" && record.status === "sent") {
+      const runtime = this.workRuntimes.get(competitionId);
+      if (runtime) this.beginListReconciliation(runtime);
+    }
+    if (record.status === "uncertain" || record.status === "failed" || record.status === "timed_out") {
       this.appendAttention(competitionId, {
         id: `command:${record.id}:${record.status}`,
         category: "command",
-        severity: "critical",
-        title: record.status === "uncertain" ? "命令结果不确定" : "命令发送失败",
-        message: `${record.command}；自动化已停止，不会自动重试。`,
+        severity: record.status === "timed_out" ? "warning" : "critical",
+        title: record.status === "uncertain" ? "命令结果不确定" : record.status === "timed_out" ? "命令等待回显超时" : "命令发送失败",
+        message: `${record.command}；不会自动重试，请结合服务器现场和原始日志核对。`,
         occurredAt: record.updatedAt
       });
     }
@@ -2931,12 +3115,25 @@ export class CompetitionService {
     if (!stage) throw new ServiceError("STATE_CONFLICT", "比赛没有可执行动作的轮次", 409);
     switch (action.type) {
       case "notification": return { type: "notification", channel: action.channel, text: action.text };
-      case "ready": return { type: "ready", map: String(stage.level), mode: stage.mode.toLowerCase() as "sr" | "hs" };
+      case "ready": return { type: "ready", map: `level ${stage.level}`, mode: stage.mode.toLowerCase() as "sr" | "hs" };
       case "cheat-off": return { type: "cheat-off" };
-      case "manual-go": return { type: "go", map: String(stage.level), mode: stage.mode.toLowerCase() as "sr" | "hs" };
+      case "manual-go": return { type: "go", map: `level ${stage.level}`, mode: stage.mode.toLowerCase() as "sr" | "hs" };
       case "kick": return { type: "kick", playerName: action.playerName, reason: "referee-kick" };
       case "raw-command": return { type: "raw", command: action.command };
       default: throw new ServiceError("CAPABILITY_UNSUPPORTED", `动作 ${action.type} 不需要或不支持 MockClient 命令`, 409);
+    }
+  }
+
+  private toAutomationCommand(action: AutomationAction): CommandAction {
+    switch (action.kind) {
+      case "bulletin":
+      case "notice":
+      case "announce":
+        return { type: "notification", channel: action.kind, text: action.message ?? "比赛流程通知" };
+      case "ready": return { type: "ready", map: action.map, mode: action.mode };
+      case "cheat-off": return { type: "cheat-off" };
+      case "go": return { type: "go", map: action.map, mode: action.mode };
+      case "force-next-restart": return { type: "force-next-restart" };
     }
   }
 
@@ -2949,6 +3146,7 @@ export class CompetitionService {
       case "participant-split": return action.connectionId;
       case "participant-edit": return action.participantId;
       case "player-alias-upsert": return `${action.playerId} -> ${action.displayName}`;
+      case "resolve-automation-command": return `${action.resolution}:${action.actionId}`;
       case "scoreboard-override": return `${action.playerId}:${action.stageId ?? "total"}`;
       default: return action.type;
     }

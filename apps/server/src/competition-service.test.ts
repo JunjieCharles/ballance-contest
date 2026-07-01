@@ -82,6 +82,7 @@ describe("CompetitionService dynamic participants", () => {
       workRuntimes: Map<string, WorkRuntimeHarness>;
       makeWorkRuntime(competitionId: string, config: CompetitionConfig, transport: CommandTransport): WorkRuntimeHarness;
       ingestWorkLine(runtime: WorkRuntimeHarness, line: string): void;
+      beginListReconciliation(runtime: WorkRuntimeHarness): void;
     };
     const transport: CommandTransport = { write: async () => undefined };
     const published = service.snapshot(record.id).publishedConfig as CompetitionConfig;
@@ -117,6 +118,15 @@ describe("CompetitionService dynamic participants", () => {
     }]);
     internals.ingestWorkLine(runtime, "[06-30 12:00:03] 0 player(s) online:");
     expect(service.snapshot(record.id).config.participants[0]?.online).toBe(false);
+
+    internals.beginListReconciliation(runtime);
+    internals.ingestWorkLine(runtime, "[06-30 12:00:04] 314: Modern_Player     28ms");
+    internals.ingestWorkLine(runtime, "[06-30 12:00:04] 99: *Observer     0ms");
+    internals.ingestWorkLine(runtime, "[06-30 12:00:04] 2 client(s) online: 1 player(s), 1 spectator(s).");
+    expect(service.snapshot(record.id).config.participants).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: "Silent_Snow", online: false }),
+      expect.objectContaining({ id: "Modern_Player", connectionIds: ["314"], online: true })
+    ]));
   });
 
   it("excludes cheat and known Warning results without fabricating DNF logs", () => {
@@ -283,6 +293,121 @@ describe("CompetitionService dynamic participants", () => {
       .filter((result): result is { status?: string } => Boolean(result))
       .filter((result) => result.status === "finished");
     expect(stage1Finished.length).toBeGreaterThan(3);
+  });
+
+  it("lets the referee confirm or explicitly resend each uncertain automation command", async () => {
+    const service = new CompetitionService();
+    const record = service.create({ name: "Resolve uncertain", mode: "test", idempotencyKey: "resolve-uncertain" });
+    service.publish(record.id, 0, "publish-resolve-uncertain");
+    const runId = service.createTestRunFromScenario(record.id, "normal-player-roster").runId;
+    const internals = service as unknown as {
+      testRuns: Map<string, { automation: CompetitionController }>;
+      runtimeAutomationSnapshot(competitionId: string): ReturnType<CompetitionController["snapshot"]>;
+    };
+    const controller = internals.testRuns.get(runId)?.automation as CompetitionController;
+
+    controller.enable(0);
+    const bulletin = controller.drainActions().find((action) => action.kind === "bulletin");
+    expect(bulletin).toBeDefined();
+    controller.acknowledgeAction(bulletin!.id, "uncertain");
+    expect(service.snapshot(record.id).runtime.unconfirmedAutomationActions).toEqual([
+      expect.objectContaining({ id: bulletin!.id, status: "uncertain" })
+    ]);
+    expect(internals.runtimeAutomationSnapshot(record.id).actions).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: bulletin!.id, status: "uncertain" })
+    ]));
+    const confirmExecuted = service.createConfirmation(record.id, {
+      kind: "automation-command-resolution",
+      target: bulletin!.id,
+      actionId: bulletin!.id,
+      resolution: "confirm-executed"
+    });
+    await service.performAction(record.id, {
+      expectedStateVersion: 1,
+      idempotencyKey: "confirm-bulletin",
+      action: {
+        type: "resolve-automation-command",
+        actionId: bulletin!.id,
+        resolution: "confirm-executed",
+        confirmationToken: confirmExecuted.token,
+        impactHash: confirmExecuted.impactHash
+      }
+    });
+    expect(controller.snapshot().actions.find((action) => action.id === bulletin!.id)?.status).toBe("referee-confirmed");
+
+    controller.enable();
+    controller.tick();
+    const ready = controller.drainActions().find((action) => action.kind === "ready");
+    expect(ready).toBeDefined();
+    controller.acknowledgeAction(ready!.id, "failed");
+    const resend = service.createConfirmation(record.id, {
+      kind: "automation-command-resolution",
+      target: ready!.id,
+      actionId: ready!.id,
+      resolution: "resend"
+    });
+    await service.performAction(record.id, {
+      expectedStateVersion: 2,
+      idempotencyKey: "resend-ready",
+      action: {
+        type: "resolve-automation-command",
+        actionId: ready!.id,
+        resolution: "resend",
+        confirmationToken: resend.token,
+        impactHash: resend.impactHash
+      }
+    });
+    expect(controller.snapshot().actions.find((action) => action.id === ready!.id)?.status).toBe("acknowledged");
+    expect(service.snapshot(record.id).runtime.attentionItems).toEqual(expect.arrayContaining([
+      expect.objectContaining({ title: "流程命令已确认执行" }),
+      expect.objectContaining({ title: "流程命令已由裁判执行重发" })
+    ]));
+  });
+
+  it("writes a new audited command when a work-mode referee explicitly resends", async () => {
+    const service = new CompetitionService();
+    const record = service.create({ name: "Work resend", mode: "work", idempotencyKey: "work-resend" });
+    service.publish(record.id, 0, "publish-work-resend");
+    const writes: string[] = [];
+    type ResendWorkRuntime = WorkRuntimeHarness & { commands: { observeLine(line: string): void } };
+    const runtimeHolder: { current?: ResendWorkRuntime } = {};
+    const transport: CommandTransport = {
+      write: async (command) => {
+        writes.push(command);
+        setTimeout(() => runtimeHolder.current!.commands.observeLine("success"), 0);
+      }
+    };
+    const internals = service as unknown as {
+      workRuntimes: Map<string, ResendWorkRuntime>;
+      makeWorkRuntime(competitionId: string, config: CompetitionConfig, candidate: CommandTransport): ResendWorkRuntime;
+      getDraftConfig(competitionId: string): CompetitionConfig;
+    };
+    const runtime = internals.makeWorkRuntime(record.id, internals.getDraftConfig(record.id), transport);
+    runtimeHolder.current = runtime;
+    internals.workRuntimes.set(record.id, runtime);
+    runtime.controller.enable(0);
+    const bulletin = runtime.controller.drainActions().find((action) => action.kind === "bulletin");
+    runtime.controller.acknowledgeAction(bulletin!.id, "uncertain");
+    const confirmation = service.createConfirmation(record.id, {
+      kind: "automation-command-resolution",
+      target: bulletin!.id,
+      actionId: bulletin!.id,
+      resolution: "resend"
+    });
+    const result = await service.performAction(record.id, {
+      expectedStateVersion: 1,
+      idempotencyKey: "work-bulletin-resend",
+      action: {
+        type: "resolve-automation-command",
+        actionId: bulletin!.id,
+        resolution: "resend",
+        confirmationToken: confirmation.token,
+        impactHash: confirmation.impactHash
+      }
+    });
+    expect(result).toMatchObject({ status: "acknowledged", command: expect.stringContaining("bulletin") });
+    expect(writes).toHaveLength(1);
+    expect(runtime.controller.snapshot().actions.find((action) => action.id === bulletin!.id)?.status).toBe("acknowledged");
   });
 
   it("allows multiple work competitions but blocks starting two on the same server", () => {

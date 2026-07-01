@@ -192,6 +192,7 @@ export interface CommandRecordView {
 
 export interface RuntimeSnapshot {
   phase: string;
+  pausedFromPhase?: string;
   stateVersion: number;
   mode: CompetitionMode;
   automationEnabled: boolean;
@@ -210,6 +211,12 @@ export interface RuntimeSnapshot {
   commands: readonly CommandRecordView[];
   availableActions: readonly ActionAvailability[];
   attentionItems: readonly AttentionItem[];
+  unconfirmedAutomationActions: readonly {
+    id: string;
+    kind: string;
+    stageId: string;
+    status: "failed" | "uncertain";
+  }[];
 }
 
 export type RefereeActionId =
@@ -310,7 +317,7 @@ export interface CompetitionSnapshot {
   archives: readonly { version: number; directory: string; packagePath: string; manifestHash: string; createdAt: string }[];
 }
 
-export type ConfirmationKind = "restart" | "manual-action" | "manual-go" | "scoreboard-override" | "high-risk";
+export type ConfirmationKind = "restart" | "manual-action" | "manual-go" | "scoreboard-override" | "automation-command-resolution" | "high-risk";
 
 export interface ConfirmationSummary {
   token: string;
@@ -369,6 +376,13 @@ export type CompetitionAction =
   | { type: "participant-split"; connectionId: string }
   | { type: "participant-edit"; participantId: string; displayName?: string; notes?: string }
   | { type: "player-alias-upsert"; playerId: string; displayName: string }
+  | {
+      type: "resolve-automation-command";
+      actionId: string;
+      resolution: "confirm-executed" | "resend";
+      confirmationToken: string;
+      impactHash: string;
+    }
   | ({ type: "scoreboard-override" } & ScoreboardOverrideInput)
   | { type: "kick"; playerName: string; confirmationToken: string; impactHash: string }
   | { type: "raw-command"; command: string; confirmationToken: string; impactHash: string };

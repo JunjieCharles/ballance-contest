@@ -115,14 +115,14 @@ test("runs the 20-player sandbox from the console and edits a score without losi
   await page.getByRole("button", { name: /20 人小型综合沙盒/ }).click();
   await expect(page.locator(".behavior-card")).toHaveCount(20);
   await expect(page.getByText("自动化仅在“控制台”启停。")).toBeVisible();
-  await expect(page.getByRole("button", { name: "启用自动化" })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "启动自动化" })).toHaveCount(0);
   await expect(page.getByRole("heading", { name: "故障注入" })).toHaveCount(0);
   await page.getByRole("button", { name: "创建测试运行" }).click();
   await expect(page.getByText(/虚拟时钟：0:00/)).toBeVisible();
 
   await page.getByRole("button", { name: "控制台", exact: true }).click();
-  await page.getByRole("button", { name: "启用自动化" }).click();
-  await expect(page.getByText("阶段", { exact: true }).locator("..")).toContainText("Ready");
+  await page.getByRole("button", { name: "启动自动化" }).click();
+  await expect(page.getByText("阶段", { exact: true }).locator("..")).toContainText("准备检查");
   await accelerateActiveTestRun(page, name);
   await expect(page.getByText("阶段", { exact: true }).locator("..")).toContainText("比赛复核");
   await expect(page.locator(".attention-card").first()).toBeVisible();
@@ -132,6 +132,8 @@ test("runs the 20-player sandbox from the console and edits a score without losi
   await page.getByRole("button", { name: "成绩", exact: true }).click();
   const rowsBefore = await page.locator(".scoreboard tbody tr").count();
   expect(rowsBefore).toBe(20);
+  const firstStageResults = await page.locator(".scoreboard tbody tr td:nth-child(5) .cell-button").allTextContents();
+  expect(firstStageResults.filter((value) => value.trim().startsWith("#")).length).toBeGreaterThan(12);
   const editable = page.locator(".scoreboard .cell-button").filter({ hasText: /^#/ }).first();
   await editable.click();
   const editor = page.locator(".score-cell-editor").first();
@@ -185,14 +187,15 @@ test("resizes the raw client log window from the top-left handle", async ({ page
   expect(after?.height).toBeLessThan(before.height);
 });
 
-test("shows disabled reasons, shared scheduling controls and inline end confirmation", async ({ page }, testInfo) => {
+test("shows disabled reasons, shared scheduling controls and automatic review completion", async ({ page }, testInfo) => {
   await page.goto("/#token=e2e-bootstrap-token");
   await expect(page.getByText(/已取得控制权|只读标签页/)).toBeVisible();
   await acquireControl(page);
   const name = `E2E 控制矩阵 ${testInfo.project.name}`;
   await createCompetition(page, name, "test");
   await page.getByRole("button", { name: "控制台", exact: true }).click();
-  await expect(page.getByRole("button", { name: "启用自动化" })).toBeDisabled();
+  await expect(page.getByRole("button", { name: "启动自动化" })).toBeDisabled();
+  await page.getByRole("button", { name: "比赛配置", exact: true }).click();
   await page.getByRole("button", { name: "发布比赛" }).click();
   await expect(page.locator(".competition-list button.selected")).toContainText("published");
   await page.getByRole("button", { name: "测试", exact: true }).click();
@@ -207,14 +210,10 @@ test("shows disabled reasons, shared scheduling controls and inline end confirma
   await expect(page.getByRole("button", { name: "关卡时限改期" })).toBeDisabled();
   await expect(page.getByText("当前没有开放的成绩接收窗口").first()).toBeVisible();
 
-  await page.getByRole("button", { name: "启用自动化" }).click();
+  await page.getByRole("button", { name: "启动自动化" }).click();
   await accelerateActiveTestRun(page, name);
   await expect(page.getByText("阶段", { exact: true }).locator("..")).toContainText("比赛复核");
   await page.getByRole("button", { name: "归档", exact: true }).click();
-  await page.getByRole("button", { name: "结束比赛" }).click();
-  const confirmation = page.getByRole("group", { name: "结束比赛确认" });
-  await expect(confirmation).toContainText("目标：");
-  await expect(confirmation).toContainText("状态版本");
-  await confirmation.getByRole("button", { name: "确认" }).click();
-  await expect(page.locator("header")).toContainText("比赛已结束");
+  await expect(page.locator(".competition-list button.selected")).toContainText("finished");
+  await expect(page.getByRole("button", { name: "结束比赛" })).toBeDisabled();
 });

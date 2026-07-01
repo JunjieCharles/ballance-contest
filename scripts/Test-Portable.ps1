@@ -18,23 +18,40 @@ foreach ($file in $portableManifest.files) {
     if ($actualHash -ne $file.sha256) { throw "Portable manifest hash mismatch: $($file.relativePath)" }
 }
 
+$existingListener = Get-NetTCPConnection -LocalPort 32113 -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1
+if ($null -ne $existingListener) {
+    $owner = Get-CimInstance Win32_Process -Filter "ProcessId=$($existingListener.OwningProcess)" -ErrorAction SilentlyContinue
+    throw "Portable smoke requires free port 32113; currently owned by PID $($existingListener.OwningProcess): $($owner.ExecutablePath) $($owner.CommandLine)"
+}
+
 $temporaryRoot = Join-Path ([IO.Path]::GetTempPath()) ("ballance-portable-smoke-" + [guid]::NewGuid().ToString("N"))
 $oldPath = $env:Path
 $oldLocalAppData = $env:LOCALAPPDATA
 $oldBootstrap = $env:BALLANCE_BOOTSTRAP_TOKEN
+$oldOpenBrowser = $env:BALLANCE_OPEN_BROWSER
 $process = $null
+$serverProcessId = $null
 try {
     New-Item -ItemType Directory -Path $temporaryRoot | Out-Null
-    $env:Path = "$env:SystemRoot\System32;$env:SystemRoot"
+    $env:Path = "$env:SystemRoot\System32\WindowsPowerShell\v1.0;$env:SystemRoot\System32;$env:SystemRoot"
     $env:LOCALAPPDATA = $temporaryRoot
     $env:BALLANCE_BOOTSTRAP_TOKEN = "portable-smoke-token"
+    $env:BALLANCE_OPEN_BROWSER = "0"
     if (Get-Command node -ErrorAction SilentlyContinue) { throw "Smoke environment unexpectedly found a system Node.js" }
-    $process = Start-Process -FilePath $node -ArgumentList @("app/server/main.js") -WorkingDirectory $package -WindowStyle Hidden -PassThru
+    $process = Start-Process -FilePath "$env:SystemRoot\System32\cmd.exe" -ArgumentList @("/d", "/c", "Start-ContestConsole.cmd") -WorkingDirectory $package -WindowStyle Hidden -PassThru
     $health = $null
     for ($attempt = 0; $attempt -lt 60; $attempt += 1) {
         if ($process.HasExited) { throw "Portable server exited with code $($process.ExitCode)" }
         try {
             $health = Invoke-RestMethod -Uri "http://127.0.0.1:32113/api/v1/health" -TimeoutSec 1
+            $listener = Get-NetTCPConnection -LocalPort 32113 -State Listen -ErrorAction Stop | Select-Object -First 1
+            $serverProcess = Get-CimInstance Win32_Process -Filter "ProcessId=$($listener.OwningProcess)" -ErrorAction Stop
+            $expectedNode = [IO.Path]::GetFullPath($node)
+            $actualNode = [IO.Path]::GetFullPath($serverProcess.ExecutablePath)
+            if (-not $actualNode.Equals($expectedNode, [StringComparison]::OrdinalIgnoreCase)) {
+                throw "Health response came from unexpected PID $($listener.OwningProcess): $actualNode"
+            }
+            $serverProcessId = $listener.OwningProcess
             break
         } catch {
             Start-Sleep -Milliseconds 250
@@ -66,6 +83,13 @@ try {
     $artifact | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $artifactFullPath -Encoding utf8
     Write-Host "Portable smoke test passed with bundled $($artifact.bundledNode)"
 } finally {
+    if ($null -ne $serverProcessId) {
+        $ownedServer = Get-CimInstance Win32_Process -Filter "ProcessId=$serverProcessId" -ErrorAction SilentlyContinue
+        if ($null -ne $ownedServer -and [IO.Path]::GetFullPath($ownedServer.ExecutablePath).Equals([IO.Path]::GetFullPath($node), [StringComparison]::OrdinalIgnoreCase)) {
+            Stop-Process -Id $serverProcessId -Force
+            Wait-Process -Id $serverProcessId -Timeout 10 -ErrorAction SilentlyContinue
+        }
+    }
     if ($null -ne $process -and -not $process.HasExited) {
         Stop-Process -Id $process.Id -Force
         Wait-Process -Id $process.Id -Timeout 10 -ErrorAction SilentlyContinue
@@ -73,6 +97,7 @@ try {
     $env:Path = $oldPath
     $env:LOCALAPPDATA = $oldLocalAppData
     $env:BALLANCE_BOOTSTRAP_TOKEN = $oldBootstrap
+    $env:BALLANCE_OPEN_BROWSER = $oldOpenBrowser
     $resolvedTemp = [IO.Path]::GetFullPath($temporaryRoot)
     $systemTemp = [IO.Path]::GetFullPath([IO.Path]::GetTempPath())
     if ($resolvedTemp.StartsWith($systemTemp, [StringComparison]::OrdinalIgnoreCase) -and (Test-Path -LiteralPath $resolvedTemp)) {

@@ -28,6 +28,16 @@ describe("CommandQueue", () => {
     expect(transport.writes).toEqual(["forcenextrestart"]);
   });
 
+  it("acknowledges list from the current trailing summary format", async () => {
+    const transport = new FakeTransport();
+    const queue = new CommandQueue(transport, 100);
+    transport.onWrite = () => setTimeout(() => {
+      queue.observeLine("3598759654: *ContestConsole     0ms");
+      queue.observeLine("1 client(s) online: 0 player(s), 1 spectator(s).");
+    }, 0);
+    expect((await queue.enqueue({ type: "list" }, "current-list")).status).toBe("acknowledged");
+  });
+
   it("encodes bulletin, notice and announce as distinct MockClient commands", async () => {
     const transport = new FakeTransport();
     const queue = new CommandQueue(transport, 100);

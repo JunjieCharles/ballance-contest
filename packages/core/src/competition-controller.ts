@@ -20,6 +20,7 @@ export type AutomationPhase =
 export interface AutomationStage {
   id: string;
   map: string;
+  displayName?: string;
   mode: "sr" | "hs";
   timeLimitMs: number;
   minimumScoringPlace: number;
@@ -64,7 +65,7 @@ export interface AutomationAction {
   map: string;
   mode: "sr" | "hs";
   message?: string;
-  status: "pending" | "acknowledged" | "failed" | "uncertain";
+  status: "pending" | "acknowledged" | "failed" | "uncertain" | "referee-confirmed";
 }
 
 export interface AutomationBlocker {
@@ -118,6 +119,7 @@ export interface RejectedResult {
 
 export interface AutomationSnapshot {
   phase: AutomationPhase;
+  pausedFromPhase?: Exclude<AutomationPhase, "paused">;
   stateVersion: number;
   automationEnabled: boolean;
   currentStageId: string;
@@ -215,6 +217,7 @@ export class CompetitionController {
   private readonly tokenService: RestartConfirmationTokens;
   private readonly policy: AutomationPolicy;
   private phase: AutomationPhase = "lobby";
+  private pausedFromPhase: Exclude<AutomationPhase, "paused"> | undefined;
   private stateVersion = 0;
   private automationEnabled = false;
   private stageIndex = 0;
@@ -363,24 +366,39 @@ export class CompetitionController {
       ...(attempt ? { attemptId: attempt.id } : {}), participantIds: [], recommendedRestart: false, status: "open", evidence
     });
     this.automationEnabled = false;
+    if (this.phase !== "paused") this.pausedFromPhase = this.phase;
     this.phase = "paused";
     this.bump();
   }
 
-  public enable(plannedReadyAtMs = this.clock.now() + this.policy.announcementLeadMs): void {
+  public enable(plannedReadyAtMs = this.clock.now() + this.policy.intermissionMs): void {
     if (this.automationEnabled) return;
     this.automationEnabled = true;
-    this.phase = "preparing";
-    this.plannedReadyAtMs = plannedReadyAtMs;
-    this.manualFlow = false;
-    this.queueAction("bulletin", `${this.stage.mode.toUpperCase()}${this.stage.map} 将于计划时间 Ready`);
+    if (this.pausedFromPhase) {
+      if (this.phase === "paused") this.phase = this.pausedFromPhase;
+      this.pausedFromPhase = undefined;
+    } else {
+      this.phase = "preparing";
+      this.plannedReadyAtMs = plannedReadyAtMs;
+      this.manualFlow = false;
+      this.queueAction("bulletin", `${this.stage.displayName ?? `${this.stage.mode.toUpperCase()}${this.stage.map}`} 将在 ${formatDelay(plannedReadyAtMs - this.clock.now())}后 Ready`);
+    }
     this.bump();
   }
 
   public pause(): void {
     if (!this.automationEnabled && this.phase === "paused") return;
     this.automationEnabled = false;
+    if (this.phase !== "paused") this.pausedFromPhase = this.phase;
     this.phase = "paused";
+    this.bump();
+  }
+
+  public resolveUnconfirmedAction(actionId: string, status: "acknowledged" | "failed" | "uncertain" | "referee-confirmed"): void {
+    const action = this.actions.find((candidate) => candidate.id === actionId);
+    if (!action || (action.status !== "failed" && action.status !== "uncertain")) throw new Error("AUTOMATION_ACTION_NOT_UNCONFIRMED");
+    action.status = status;
+    if ((status === "acknowledged" || status === "referee-confirmed") && action.kind === "go" && this.phase !== "running") this.startAttempt();
     this.bump();
   }
 
@@ -459,6 +477,7 @@ export class CompetitionController {
     action.status = status;
     if (status !== "acknowledged") {
       this.automationEnabled = false;
+      if (this.phase !== "paused") this.pausedFromPhase = this.phase;
       this.phase = "paused";
       this.bump();
       return;
@@ -660,6 +679,7 @@ export class CompetitionController {
   public snapshot(): AutomationSnapshot {
     return {
       phase: this.phase,
+      ...(this.pausedFromPhase === undefined ? {} : { pausedFromPhase: this.pausedFromPhase }),
       stateVersion: this.stateVersion,
       automationEnabled: this.automationEnabled,
       currentStageId: this.stage.id,
@@ -775,7 +795,8 @@ export class CompetitionController {
   }
 
   private isAcknowledged(actionId: string | undefined): boolean {
-    return actionId !== undefined && this.actions.find((action) => action.id === actionId)?.status === "acknowledged";
+    const status = actionId === undefined ? undefined : this.actions.find((action) => action.id === actionId)?.status;
+    return status === "acknowledged" || status === "referee-confirmed";
   }
 
   private readySequenceComplete(): boolean {

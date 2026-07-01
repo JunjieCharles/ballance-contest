@@ -38,6 +38,8 @@ export const parseLogLine = (input: string, context: ParseContext): ParsedLogLin
     event = { ...metadata, type: "connected" };
   } else {
     const listStart = /^(\d+) player\(s\) online:$/.exec(body);
+    const listSummary = /^(\d+) client\(s\) online:\s*(\d+) player\(s\),\s*(\d+) spectator\(s\)\.$/.exec(body);
+    const modernListed = /^(\d+):\s+(.+?)\s+(-?\d+)ms(?:\s+(\[CHEAT\]))?$/.exec(body);
     const login = /^(.*?) \(#(\d+)\) logged in with cheat mode (on|off)\.$/.exec(body);
     const disconnect = /^(.*?) \(#(\d+)\) disconnected\.$/.exec(body);
     const listed = /^(.*?) \(#(\d+)\)( \[CHEAT\])?$/.exec(body);
@@ -50,6 +52,22 @@ export const parseLogLine = (input: string, context: ParseContext): ParsedLogLin
 
     if (listStart) {
       event = { ...metadata, type: "player-list-start", count: Number(listStart[1]) };
+    } else if (listSummary) {
+      event = {
+        ...metadata,
+        type: "player-list-summary",
+        clients: Number(listSummary[1]),
+        players: Number(listSummary[2]),
+        spectators: Number(listSummary[3])
+      };
+    } else if (modernListed) {
+      event = {
+        ...metadata,
+        type: "player-listed",
+        connectionId: modernListed[1] ?? "",
+        playerName: modernListed[2]?.trim() ?? "",
+        cheat: Boolean(modernListed[4])
+      };
     } else if (login) {
       event = { ...metadata, type: "player-login", playerName: login[1] ?? "", connectionId: login[2] ?? "", cheat: login[3] === "on" };
     } else if (disconnect) {

@@ -126,6 +126,45 @@ describe("CompetitionController", () => {
     expect(controller.snapshot().rejectedResults.at(-1)?.reason).toBe("intake-closed");
   });
 
+  it("keeps result intake and the deadline active while automation is paused", () => {
+    const clock = new FakeClock();
+    const controller = new CompetitionController(configuration(), clock);
+    connectAll(controller);
+    enterRunning(controller, clock);
+    controller.pause();
+
+    expect(controller.recordResult({ stageId: "s1", playerId: "p1", status: "finished", sourceId: "paused-finish" })).toBe("accepted");
+    expect(controller.snapshot()).toMatchObject({ phase: "paused", pausedFromPhase: "running", automationEnabled: false });
+
+    clock.set(30_000);
+    controller.tick();
+    const snapshot = controller.snapshot();
+    expect(snapshot.automationEnabled).toBe(false);
+    expect(snapshot.phase).toBe("tail-intake");
+    expect(snapshot.attempts[0]?.results).toHaveLength(5);
+    expect(snapshot.attempts[0]?.results.filter((result) => result.reason === "time-limit")).toHaveLength(4);
+
+    controller.enable();
+    expect(controller.snapshot()).toMatchObject({ phase: "tail-intake", automationEnabled: true });
+  });
+
+  it("lets a referee resolve each unconfirmed action before resuming the previous phase", () => {
+    const clock = new FakeClock();
+    const controller = new CompetitionController(configuration(), clock);
+    connectAll(controller);
+    controller.enable(0);
+    controller.drainActions();
+    controller.tick();
+    const ready = action(controller, "ready");
+    controller.acknowledgeAction(ready.id, "failed");
+    expect(controller.snapshot()).toMatchObject({ phase: "paused", pausedFromPhase: "ready", automationEnabled: false });
+
+    controller.resolveUnconfirmedAction(ready.id, "referee-confirmed");
+    controller.enable();
+    expect(controller.snapshot()).toMatchObject({ phase: "ready", automationEnabled: true });
+    expect(controller.snapshot().actions.find((candidate) => candidate.id === ready.id)?.status).toBe("referee-confirmed");
+  });
+
   it("keeps the old intake open while the next Ready is blocked, but never beyond its deadline", () => {
     const clock = new FakeClock();
     const controller = new CompetitionController(configuration({

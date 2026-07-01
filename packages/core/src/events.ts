@@ -7,6 +7,7 @@ export interface EventMetadata {
 export type DomainEvent =
   | (EventMetadata & { type: "connected" })
   | (EventMetadata & { type: "player-list-start"; count: number })
+  | (EventMetadata & { type: "player-list-summary"; clients: number; players: number; spectators: number })
   | (EventMetadata & { type: "player-login"; connectionId: string; playerName: string; cheat: boolean })
   | (EventMetadata & { type: "player-listed"; connectionId: string; playerName: string; cheat: boolean })
   | (EventMetadata & { type: "player-disconnect"; connectionId: string; playerName: string })
