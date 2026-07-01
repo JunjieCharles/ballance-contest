@@ -346,7 +346,7 @@ interface ScoreboardAdjudicationBase {
 
 export type ScoreboardAdjudicationInput =
   | (ScoreboardAdjudicationBase & { operation: "set-place"; place: number; rankPolicy?: "tie" | "shift" })
-  | (ScoreboardAdjudicationBase & { operation: "set-dnf" });
+  | (ScoreboardAdjudicationBase & { operation: "set-dnf"; rankPolicy?: "tie" | "shift" });
 
 export type ScoreboardOverrideInput = ScoreboardAdjudicationInput;
 

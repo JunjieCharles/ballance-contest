@@ -154,8 +154,11 @@ test("runs the 20-player sandbox from the console and edits a score without losi
   const dnfEditorButton = page.locator(".scoreboard .cell-button").filter({ hasText: /^#/ }).nth(1);
   await dnfEditorButton.click();
   const secondEditor = page.locator(".score-cell-editor").first();
+  await secondEditor.getByLabel("其他玩家是否顺延").uncheck();
   await secondEditor.getByRole("button", { name: "设为 DNF" }).click();
-  await secondEditor.getByRole("group", { name: "设为 DNF确认" }).getByRole("button", { name: "确认" }).click();
+  const dnfConfirmation = secondEditor.getByRole("group", { name: "设为 DNF确认" });
+  await expect(dnfConfirmation).toContainText("不会顺延其他玩家");
+  await dnfConfirmation.getByRole("button", { name: "确认" }).click();
   await expect(page.locator(".scoreboard tbody tr")).toHaveCount(rowsBefore);
   expect(dialogOpened).toBe(false);
   expect(externalRequests).toEqual([]);

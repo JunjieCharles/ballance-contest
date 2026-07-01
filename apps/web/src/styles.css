@@ -367,6 +367,9 @@ header > span:last-of-type { margin-left: auto; font-size: 13px; }
 .cell-button:disabled { opacity: 1; }
 .score-cell-editor { min-width: 180px; background: #edf5fb; }
 .score-cell-editor label { margin-bottom: 4px; }
+.score-policy-row { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; white-space: nowrap; }
+.score-policy-row input { flex: 0 0 auto; }
+.score-policy-row span { color: #536170; }
 .score-cell-editor small { color: #536170; }
 .cell-actions { display: flex; gap: 5px; margin-top: 6px; }
 .cell-actions button { min-height: 30px; padding: 4px 8px; }

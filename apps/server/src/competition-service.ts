@@ -898,7 +898,7 @@ export class CompetitionService {
             stage: input.operation === "set-place"
               ? { status: "finished", place: input.place as number, reason: "referee-adjudicated-place" }
               : { status: "dnf", reason: "referee-adjudicated-dnf" },
-            ...(input.operation === "set-place" ? { rankPolicy: input.rankPolicy ?? "shift" } : {}),
+            ...(input.rankPolicy === undefined ? {} : { rankPolicy: input.rankPolicy }),
             actor: "local-referee",
             reason: input.operation === "set-place" ? `set-place:${input.place}` : "set-dnf"
           });
@@ -944,7 +944,7 @@ export class CompetitionService {
               title: "确认成绩修订",
               consequences: [
                 "生成新的榜单版本",
-                ...(input.operation === "set-place"
+                ...(input.operation === "set-place" || input.operation === "set-dnf"
                   ? [
                       input.rankPolicy === "shift"
                         ? `其他玩家将顺延重算，受影响 ${scorePreview?.affectedPlayers.length ?? 0} 名玩家`

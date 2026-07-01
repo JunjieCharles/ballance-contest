@@ -230,6 +230,32 @@ describe("local API", () => {
       }
     });
     expect(directPointsEdit.json()).toMatchObject({ error: { code: "VALIDATION_FAILED", message: expect.stringContaining("不接受前端提交") } });
+    const dnfConfirmationResponse = await app.inject({
+      method: "POST",
+      url: `/api/v1/competitions/${competitionId}/confirmations`,
+      headers: auth(token),
+      payload: { kind: "scoreboard-override", target: "p2:s3", playerId: "p2", stageId: "s3", operation: "set-dnf", rankPolicy: "shift" }
+    });
+    const dnfConfirmation = dnfConfirmationResponse.json<{ data: { token: string; impactHash: string; effect: { consequences: string[]; affectedPlayers?: Array<{ playerId: string; displayName: string }> } } }>().data;
+    expect(dnfConfirmation.effect.consequences).toContain("其他玩家将顺延重算，受影响 1 名玩家");
+    expect(dnfConfirmation.effect.affectedPlayers?.map((player) => player.playerId)).toContain("p2");
+    const dnfRevision = await app.inject({
+      method: "POST",
+      url: `/api/v1/competitions/${competitionId}/scoreboard/overrides`,
+      headers: auth(token),
+      payload: {
+        expectedStateVersion: 1,
+        idempotencyKey: "override-p2-dnf",
+        playerId: "p2",
+        stageId: "s3",
+        operation: "set-dnf",
+        rankPolicy: "shift",
+        confirmationToken: dnfConfirmation.token,
+        impactHash: dnfConfirmation.impactHash
+      }
+    });
+    expect(dnfRevision.json()).toMatchObject({ data: { version: 17 } });
+    expect(dnfRevision.json<{ data: { entries: Array<{ playerId: string; stages: Record<string, { status: string; place: number; points: number }> }> } }>().data.entries.find((entry) => entry.playerId === "p2")?.stages.s3).toMatchObject({ status: "dnf", place: 0, points: 0 });
     const fixedExport = await app.inject({
       method: "POST",
       url: `/api/v1/competitions/${competitionId}/exports/csv`,

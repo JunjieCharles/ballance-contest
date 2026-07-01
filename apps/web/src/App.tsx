@@ -31,7 +31,7 @@ interface Session { token: string; tabId: string; control: boolean }
 interface JournalMessage { sequence?: number; type: string; competitionId?: string }
 type ScoreDraft =
   | { playerId: string; stageId: string; operation: "set-place"; place: number; rankPolicy?: "tie" | "shift" }
-  | { playerId: string; stageId: string; operation: "set-dnf" };
+  | { playerId: string; stageId: string; operation: "set-dnf"; rankPolicy?: "tie" | "shift" };
 
 const sessionKey = "ballance-console-session";
 const tabId = sessionStorage.getItem("ballance-console-tab") ?? crypto.randomUUID();
@@ -734,10 +734,10 @@ function EditableScoreCell({ value, stage, playerId, playerName, canWrite, versi
   if (!editing) return <td className={`${className} editable-score-cell`}><button className="cell-button" disabled={!canWrite} title={`修改 ${playerName} 的 ${stage.label} 成绩`} onClick={() => { setPlace(String(value?.place || 1)); setShiftOthers(true); setEditing(true); }}>{!value ? "—" : value.status === "dnf" ? "DNF" : value.status === "excluded" ? `排除 · 0 分` : `#${value.place} / ${value.points} 分`}</button></td>;
   const target = `${playerId}:${stage.id}`;
   const rankPolicy = shiftOthers ? "shift" : "tie";
-  return <td className="score-cell-editor"><label>新名次<input aria-label={`${playerId} ${stage.label} 新名次`} type="number" min="1" value={place} onChange={(event) => setPlace(event.target.value)} /></label><label className="inline-checkbox"><input aria-label="其他玩家是否顺延" type="checkbox" checked={shiftOthers} onChange={(event) => setShiftOthers(event.target.checked)} />其他玩家是否顺延</label><small>{shiftOthers ? `会顺延其他玩家并按本关规则自动计 ${calculatedPoints} 分` : `不会顺延其他玩家，按本关规则直接计 ${calculatedPoints} 分`}</small>
+  return <td className="score-cell-editor"><label>新名次<input aria-label={`${playerId} ${stage.label} 新名次`} type="number" min="1" value={place} onChange={(event) => setPlace(event.target.value)} /></label><label className="score-policy-row">其他玩家是否顺延<input aria-label="其他玩家是否顺延" type="checkbox" checked={shiftOthers} onChange={(event) => setShiftOthers(event.target.checked)} /><span>{shiftOthers ? "顺延" : "不顺延"}</span></label><small>{shiftOthers ? `会顺延其他玩家并按本关规则自动计 ${calculatedPoints} 分` : `不会顺延其他玩家，按本关规则直接计 ${calculatedPoints} 分`}</small>
     <div className="score-editor-actions">
       <ConfirmButton key={`save:${target}:${versionKey}:${place}:${rankPolicy}`} label="保存名次" kind="scoreboard-override" target={target} versionKey={versionKey} requestPayload={{ playerId, stageId: stage.id, operation: "set-place", place: numericPlace, rankPolicy }} disabled={!Number.isInteger(numericPlace) || numericPlace < 1} requestConfirmation={requestConfirmation} onConfirm={async (confirmation) => { await save({ playerId, stageId: stage.id, operation: "set-place", place: numericPlace, rankPolicy }, confirmation); setEditing(false); }} />
-      <ConfirmButton key={`dnf:${target}:${versionKey}`} label="设为 DNF" kind="scoreboard-override" target={target} versionKey={versionKey} requestPayload={{ playerId, stageId: stage.id, operation: "set-dnf" }} className="danger" requestConfirmation={requestConfirmation} onConfirm={async (confirmation) => { await save({ playerId, stageId: stage.id, operation: "set-dnf" }, confirmation); setEditing(false); }} />
+      <ConfirmButton key={`dnf:${target}:${versionKey}:${rankPolicy}`} label="设为 DNF" kind="scoreboard-override" target={target} versionKey={versionKey} requestPayload={{ playerId, stageId: stage.id, operation: "set-dnf", rankPolicy }} className="danger" requestConfirmation={requestConfirmation} onConfirm={async (confirmation) => { await save({ playerId, stageId: stage.id, operation: "set-dnf", rankPolicy }, confirmation); setEditing(false); }} />
       <button className="ghost" onClick={() => setEditing(false)}>取消</button>
     </div>
   </td>;
