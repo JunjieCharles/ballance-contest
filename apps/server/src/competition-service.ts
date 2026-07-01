@@ -50,7 +50,7 @@ import type { CreatedArchive } from "./archive.js";
 import type { CommandAction, CommandRecord } from "./command-queue.js";
 import { CommandQueue } from "./command-queue.js";
 import { EventJournal } from "./event-journal.js";
-import { ManagedMockClient, readMockClientVersion, type CommandTransport } from "./mock-client.js";
+import { ManagedMockClient, readMockClientVersion, resolveMockClientUuid, type CommandTransport } from "./mock-client.js";
 import type { OpenedDatabase } from "./storage/database.js";
 
 export const seededBehaviorRandom = (seed: number, stageId: string, attemptNumber: number, playerId: string, channel: string): number => {
@@ -791,7 +791,7 @@ export class CompetitionService {
       workingDirectory: serverWindowsRoot(),
       server: config.server,
       refereeName: config.refereeName,
-      uuid: randomUUID(),
+      uuid: resolveMockClientUuid(serverWindowsRoot(), randomUUID()),
       logPath
     });
     const runtime = this.makeWorkRuntime(competitionId, config, client, mockClientVersion);

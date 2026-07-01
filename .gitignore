@@ -15,3 +15,5 @@ coverage/
 test/artifacts/*
 !test/artifacts/.gitignore
 playwright-report/
+/mock-client-uuid/
+/server-windows/.mock-client-uuid

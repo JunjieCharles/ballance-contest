@@ -1,4 +1,6 @@
 import { spawn, spawnSync, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { createInterface } from "node:readline";
 import { spectatorLoginName } from "@ballance/contracts";
 
@@ -16,6 +18,16 @@ const PRESET_SERVERS = new Set(["0.bmmo.win", "1.bmmo.win", "2.bmmo.win"]);
 export const buildMockClientArguments = (options: MockClientLaunchOptions): readonly string[] => {
   if (PRESET_SERVERS.has(options.server.split(":")[0] ?? "") && options.server.includes(":")) throw new Error("bmmo.win presets must not include a port");
   return ["-s", options.server, "-n", spectatorLoginName(options.refereeName), "-u", options.uuid, "-l", options.logPath, "--auto-flush", "--no-sound-files"];
+};
+
+export const resolveMockClientUuid = (workingDirectory: string, fallbackUuid: string): string => {
+  const uuidPath = join(workingDirectory, ".mock-client-uuid");
+  if (existsSync(uuidPath)) {
+    const persisted = readFileSync(uuidPath, "utf8").trim();
+    if (persisted) return persisted;
+  }
+  writeFileSync(uuidPath, `${fallbackUuid}\n`, "utf8");
+  return fallbackUuid;
 };
 
 export const readMockClientVersion = (executable: string, workingDirectory: string): string => {
