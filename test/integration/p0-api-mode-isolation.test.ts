@@ -188,7 +188,10 @@ describe("P0 API mode isolation and test run regression", () => {
     automaticData = advanced.json<{ data: AutomationData }>().data;
     expect(automaticData.phase).toBe("review");
     expect(automaticData.attempts).toHaveLength(13);
-    expect(automaticData.attempts.map((attempt) => attempt.results.length)).toEqual(Array.from({ length: 13 }, () => 20));
+    const resultCounts = automaticData.attempts.map((attempt) => attempt.results.length);
+    expect(resultCounts.slice(0, -1).every((count) => count >= 12 && count <= 20)).toBe(true);
+    expect(resultCounts.slice(0, -1).some((count) => count < 20)).toBe(true);
+    expect(resultCounts.at(-1)).toBe(20);
     expect(automaticData.attempts.some((attempt) => attempt.results.some((result) => result.status === "dnf" && result.reason === "time-limit"))).toBe(true);
     expect(automaticData.attempts.some((attempt) => attempt.results.some((result) => result.status === "dnf" && result.reason === "gave-up"))).toBe(true);
     expect(automaticData.attempts.some((attempt) => attempt.results.some((result) => result.status === "excluded"))).toBe(true);

@@ -723,9 +723,7 @@ export class CompetitionController {
     const allKnownParticipantsCompleted = !this.configuration.dynamicParticipants && attempt.results.length >= activeCount;
     if (!this.nextStagePending && (finished >= this.stage.minimumScoringPlace || allKnownParticipantsCompleted)) {
       this.nextStagePending = true;
-      this.plannedReadyAtMs = allKnownParticipantsCompleted
-        ? this.clock.now() + this.policy.intermissionMs
-        : Math.max(this.clock.now() + this.policy.intermissionMs, attempt.deadlineAtMs);
+      this.plannedReadyAtMs = this.clock.now() + this.policy.intermissionMs;
       this.phase = "tail-intake";
       this.queueAction("bulletin", `下一轮 Ready 计划在 ${formatDelay(this.plannedReadyAtMs - this.clock.now())}后执行`);
     }

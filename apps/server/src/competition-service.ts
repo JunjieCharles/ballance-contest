@@ -1303,11 +1303,11 @@ export class CompetitionService {
     if (!name) throw new ServiceError("VALIDATION_FAILED", "比赛名称不能为空", 400);
     const refereeName = normalizeRefereeName(config.refereeName);
     const normalizedPoints = config.scoring.points.map((point) => {
-      if (!Number.isFinite(point)) throw new ServiceError("VALIDATION_FAILED", "积分必须是有限数字", 400);
+      if (!Number.isFinite(point)) throw new ServiceError("VALIDATION_FAILED", "计分必须是有限数字", 400);
       if (point < 0 && !config.scoring.allowNegative) throw new ServiceError("VALIDATION_FAILED", "默认不允许负分", 400);
       return point;
     });
-    if (normalizedPoints.length === 0) throw new ServiceError("VALIDATION_FAILED", "积分表至少需要一个名次", 400);
+    if (normalizedPoints.length === 0) throw new ServiceError("VALIDATION_FAILED", "计分表至少需要一个名次", 400);
     const scoring = {
       ...config.scoring,
       points: normalizedPoints,
@@ -1903,6 +1903,15 @@ export class CompetitionService {
     if (!config) return;
     this.appendRawLog(runtime.competitionId, "mock-client", line);
     const parsed = parseLogLine(line, { year: Number(config.date.slice(0, 4)), utcOffsetMinutes: utcOffsetMinutes(config.timezone) });
+    const before = runtime.controller.snapshot();
+    const currentStage = config.stages.find((candidate) => candidate.id === before.currentStageId);
+    if ((parsed.event.type === "finish" || parsed.event.type === "dnf")
+      && (before.phase === "running" || before.phase === "tail-intake")
+      && currentStage && parsed.event.level !== currentStage.level) {
+      this.journal.append({ type: "work.log", competitionId: runtime.competitionId, data: parsed });
+      this.saveWorkRuntimeSnapshot(runtime);
+      return;
+    }
     if (parsed.event.type === "player-list-start") this.beginListReconciliation(runtime, parsed.event.count);
     if (parsed.event.type === "countdown") runtime.controller.observeCountdown(parsed.event.value);
     if (parsed.event.type === "warning") this.handleWorkWarning(runtime, config, parsed.event);
@@ -1924,10 +1933,16 @@ export class CompetitionService {
         this.recordExclusionAttention(runtime.competitionId, event.stageId, event.playerId, event.sourceId, event.reason);
       }
       else if (event.type === "cheat") {
-        runtime.controller.observeCheat(event.playerId, event.enabled, event.sourceId);
-        if (event.enabled) {
+        const snapshotBeforeCheat = runtime.controller.snapshot();
+        const activeAttempt = [...snapshotBeforeCheat.attempts].reverse().find((candidate) =>
+          candidate.stageId === snapshotBeforeCheat.currentStageId && candidate.intakeOpen);
+        const playerAlreadyCompleted = activeAttempt?.results.some((result) => result.playerId === event.playerId) ?? false;
+        if (!playerAlreadyCompleted) {
+          runtime.controller.observeCheat(event.playerId, event.enabled, event.sourceId);
           const snapshot = runtime.controller.snapshot();
-          if (snapshot.phase === "running" || snapshot.phase === "tail-intake") {
+          const excludedByThisEvent = snapshot.attempts.some((attempt) => attempt.results.some((result) =>
+            result.playerId === event.playerId && result.status === "excluded" && result.sourceId === event.sourceId));
+          if (event.enabled && excludedByThisEvent && (snapshot.phase === "running" || snapshot.phase === "tail-intake")) {
             runtime.engine.apply({ atMs: Date.parse(parsed.event.occurredAt), sourceId: `${event.sourceId}:excluded`, type: "exclude", stageId: snapshot.currentStageId, playerId: event.playerId, reason: "cheat-enabled" });
             this.recordExclusionAttention(runtime.competitionId, snapshot.currentStageId, event.playerId, event.sourceId, "开启 cheat");
           }
@@ -1941,7 +1956,12 @@ export class CompetitionService {
         this.recordExclusionAttention(runtime.competitionId, event.stageId, event.playerId, exclusionSourceId, "[CHEAT] 完赛");
       }
       if (event.type === "login" && (parsed.event.type === "player-login" || parsed.event.type === "player-listed") && parsed.event.cheat) {
-        runtime.controller.observeCheat(event.playerId, true, event.sourceId);
+        const snapshot = runtime.controller.snapshot();
+        const activeAttempt = [...snapshot.attempts].reverse().find((candidate) =>
+          candidate.stageId === snapshot.currentStageId && candidate.intakeOpen);
+        if (!activeAttempt?.results.some((result) => result.playerId === event.playerId)) {
+          runtime.controller.observeCheat(event.playerId, true, event.sourceId);
+        }
       }
       this.saveScoreboards(runtime.competitionId, runtime.engine.snapshot().scoreboardVersions);
     }
@@ -1951,7 +1971,7 @@ export class CompetitionService {
   }
 
   private handleWorkWarning(runtime: WorkRuntime, config: CompetitionConfig, event: Extract<DomainEvent, { type: "warning" }>): void {
-    if (!event.playerName || !event.level || !event.violationCode) {
+    if (!event.playerName || event.level === undefined || !event.violationCode) {
       this.appendAttention(runtime.competitionId, {
         id: `warning:${event.sourceId}`,
         category: "command",
@@ -1962,7 +1982,9 @@ export class CompetitionService {
       });
       return;
     }
-    const stage = config.stages.find((candidate) => candidate.level === event.level);
+    const snapshot = runtime.controller.snapshot();
+    const stage = config.stages.find((candidate) => candidate.id === snapshot.currentStageId);
+    if ((snapshot.phase !== "running" && snapshot.phase !== "tail-intake") || stage?.level !== event.level) return;
     const participant = this.getDraftConfig(runtime.competitionId).participants.find((candidate) =>
       candidate.id.toLocaleLowerCase("en-US") === event.playerName?.trim().toLocaleLowerCase("en-US"));
     if (!stage || !participant) {

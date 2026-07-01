@@ -24,6 +24,15 @@ const createCompetition = async (page: Page, name: string, mode: "work" | "test"
   await createPanel.getByLabel("模式").selectOption(mode);
   await createPanel.getByRole("button", { name: "新建比赛" }).click();
   await expect(page.getByLabel("比赛名称")).toHaveValue(name);
+  await expect(page.locator("header")).toContainText("实时已连接");
+  await expect(page.getByRole("button", { name: "发布比赛" })).toBeEnabled();
+};
+
+const selectedCompetitionVersion = async (page: Page): Promise<number> => {
+  const text = await page.locator(".competition-list button.selected").textContent();
+  const version = /v(\d+)/.exec(text ?? "")?.[1];
+  if (version === undefined) throw new Error("missing selected competition version");
+  return Number(version);
 };
 
 const accelerateActiveTestRun = async (page: Page, competitionName: string, milliseconds = 9_000_000): Promise<void> => {
@@ -67,13 +76,17 @@ test("edits per-stage scoring and replaces the stage draft through inline confir
   await createCompetition(page, name, "test");
   await expect(page.getByText("配置完整，可以发布。")).toBeVisible();
   await page.getByRole("button", { name: "大型赛事" }).click();
+  let version = await selectedCompetitionVersion(page);
   await page.getByRole("button", { name: "保存计分方案并应用到全部关卡" }).click();
+  await expect(page.locator(".competition-list button.selected")).toContainText(`v${version + 1}`);
   await expect(page.getByLabel("第 1 名计分")).toHaveValue("30");
 
+  version += 1;
   await page.getByRole("button", { name: "HS1–13 预设" }).click();
   const presetConfirmation = page.getByText("用 HS 1–13 整体替换当前关卡草稿。").locator("..");
   await expect(presetConfirmation).toBeVisible();
   await presetConfirmation.getByRole("button", { name: "确认" }).click();
+  await expect(page.locator(".competition-list button.selected")).toContainText(`v${version + 1}`);
   await expect(page.locator(".stage-editor")).toHaveCount(13);
   await expect(page.locator(".stage-editor").nth(11).getByLabel("时限（分钟）")).toHaveValue("15");
   await expect(page.locator(".stage-editor").nth(12).getByLabel("时限（分钟）")).toHaveValue("15");
@@ -83,11 +96,12 @@ test("edits per-stage scoring and replaces the stage draft through inline confir
   await firstStage.getByLabel("时限（分钟）").fill("12");
   await firstStage.getByLabel("单关计分").fill("50,30,20");
   await firstStage.getByLabel("单关计分").blur();
+  version += 1;
   await page.getByRole("button", { name: "保存关卡列表" }).click();
-  await expect(page.locator("header")).toContainText("草稿已保存");
+  await expect(page.locator(".competition-list button.selected")).toContainText(`v${version + 1}`);
 
   await page.getByRole("button", { name: "发布比赛" }).click();
-  await expect(page.locator("header")).toContainText("发布检查通过");
+  await expect(page.locator(".competition-list button.selected")).toContainText("published");
   await page.getByRole("button", { name: "玩家", exact: true }).click();
   await expect(page.getByText("尚未观察到普通玩家；无需在比赛开始前手工登记。")).toBeVisible();
 });
@@ -133,6 +147,7 @@ test("runs the 20-player sandbox from the console and edits a score without losi
   await inlineConfirmation.getByRole("button", { name: "确认" }).click();
   await expect(page.locator("header")).toContainText("成绩修订版本已生成");
   await expect(page.locator(".scoreboard tbody tr")).toHaveCount(rowsBefore);
+  await expect(page.locator(".score-cell-editor")).toHaveCount(0);
 
   const dnfEditorButton = page.locator(".scoreboard .cell-button").filter({ hasText: /^#/ }).nth(1);
   await dnfEditorButton.click();
@@ -164,6 +179,7 @@ test("shows disabled reasons, shared scheduling controls and inline end confirma
 
   await page.getByRole("button", { name: "启用自动化" }).click();
   await accelerateActiveTestRun(page, name);
+  await expect(page.getByText("阶段", { exact: true }).locator("..")).toContainText("比赛复核");
   await page.getByRole("button", { name: "归档", exact: true }).click();
   await page.getByRole("button", { name: "结束比赛" }).click();
   const confirmation = page.getByRole("group", { name: "结束比赛确认" });

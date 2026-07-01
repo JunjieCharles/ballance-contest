@@ -151,6 +151,36 @@ describe("CompetitionService dynamic participants", () => {
     expect(snapshot.runtime.attentionItems.filter((item) => item.title === "违规成绩已排除")).toHaveLength(2);
   });
 
+  it("ignores next-stage practice while the previous result window is still open", () => {
+    dataRoot = mkdtempSync(join(tmpdir(), "ballance-next-stage-practice-"));
+    database = openDatabase(join(dataRoot, "console.sqlite"));
+    const service = new CompetitionService(undefined, { database, dataRoot });
+    const record = service.create({ name: "Practice overlap", mode: "work", idempotencyKey: "create-practice-overlap" });
+    service.publish(record.id, 0, "publish-practice-overlap");
+    const internals = service as unknown as {
+      workRuntimes: Map<string, WorkRuntimeHarness>;
+      makeWorkRuntime(competitionId: string, config: CompetitionConfig, transport: CommandTransport): WorkRuntimeHarness;
+      ingestWorkLine(runtime: WorkRuntimeHarness, line: string): void;
+    };
+    const runtime = internals.makeWorkRuntime(record.id, service.snapshot(record.id).publishedConfig as CompetitionConfig, { write: async () => undefined });
+    internals.workRuntimes.set(record.id, runtime);
+
+    internals.ingestWorkLine(runtime, "[07-01 12:00:00] Practicing (#21) logged in with cheat mode off.");
+    internals.ingestWorkLine(runtime, "[07-01 12:00:01] [7, *ContestConsole]: Level 01 - Go!");
+    internals.ingestWorkLine(runtime, "[07-01 12:00:02] (#21, Practicing) finished Level 01 in 1st place (score: 100; real time: 00:00:01.000).");
+    internals.ingestWorkLine(runtime, "[07-01 12:00:03] (21, Practicing) turned cheat on.");
+    internals.ingestWorkLine(runtime, "[07-01 12:00:04] [Warning] Practicing just pressed the Reset hotkey at Level 02!");
+    internals.ingestWorkLine(runtime, "[07-01 12:00:05] [CHEAT] (#21, Practicing) finished Level 02 in 1st place (score: 999; real time: 00:00:01.000).");
+
+    const snapshot = service.snapshot(record.id);
+    const player = snapshot.currentScoreboard.find((entry) => entry.playerId === "Practicing");
+    expect(player?.stages["sr-1"]).toMatchObject({ status: "finished", place: 1, points: 20 });
+    expect(player?.stages["sr-2"]).toBeUndefined();
+    expect(snapshot.runtime.attentionItems.filter((item) => item.title === "违规成绩已排除")).toHaveLength(0);
+    expect(snapshot.runtime.blockers.some((blocker) => blocker.code === "PARTICIPANT_CHEAT")).toBe(false);
+    expect(service.getRawClientLogs(record.id).some((line) => line.rawLine.includes("finished Level 02"))).toBe(true);
+  });
+
   it("recovers sent commands as uncertain and keeps automation paused after restart", () => {
     dataRoot = mkdtempSync(join(tmpdir(), "ballance-command-recovery-"));
     database = openDatabase(join(dataRoot, "console.sqlite"));

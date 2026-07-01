@@ -157,15 +157,23 @@ function ConfirmButton({
 }
 
 function LocalConfirmButton({ label, summary, disabled, className, onConfirm }: {
-  label: string; summary: string; disabled?: boolean; className?: string; onConfirm(): void;
+  label: string; summary: string; disabled?: boolean; className?: string; onConfirm(): void | Promise<void>;
 }) {
   const [open, setOpen] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const confirm = async () => {
+    setBusy(true); setError("");
+    try { await onConfirm(); setOpen(false); }
+    catch (caught) { setError(caught instanceof Error ? caught.message : "操作失败"); }
+    finally { setBusy(false); }
+  };
   return <div className="confirm-action">
-    <button className={className} disabled={disabled} onClick={() => setOpen(true)}>{label}</button>
+    <button className={className} disabled={disabled || busy} onClick={() => setOpen(true)}>{label}</button>
     {open && <div className="inline-confirm"><strong>{label}</strong><span>{summary}</span><div className="button-row compact">
-      <button onClick={() => { onConfirm(); setOpen(false); }}>确认</button>
-      <button className="ghost" onClick={() => setOpen(false)}>取消</button>
-    </div></div>}
+      <button disabled={busy} onClick={() => void confirm()}>{busy ? "保存中…" : "确认"}</button>
+      <button className="ghost" disabled={busy} onClick={() => setOpen(false)}>取消</button>
+    </div>{error && <small className="inline-error">{error}</small>}</div>}
   </div>;
 }
 
@@ -197,6 +205,7 @@ export function App() {
   const [rawLogs, setRawLogs] = useState<RawClientLogLine[]>([]);
   const [rawLogsMinimized, setRawLogsMinimized] = useState(false);
   const lastSequence = useRef(0);
+  const snapshotRequestSequence = useRef(0);
   const canWrite = Boolean(session?.control && realtimeConnected);
 
   const refreshCompetitions = async (current: Session) => {
@@ -205,8 +214,9 @@ export function App() {
     setSelectedId((old) => old ?? records[0]?.id);
   };
   const refreshSnapshot = async (current: Session, competitionId: string) => {
+    const requestSequence = ++snapshotRequestSequence.current;
     const next = await request<CompetitionSnapshot>(`/api/v1/competitions/${competitionId}/snapshot`, current);
-    setSnapshot(next);
+    if (requestSequence === snapshotRequestSequence.current) setSnapshot(next);
     return next;
   };
   const refreshRawLogs = async (current: Session, competitionId: string) =>
@@ -266,13 +276,14 @@ export function App() {
       if (refreshing) { pending = true; return; }
       refreshing = true;
       try {
+        const snapshotSequence = selectedId ? ++snapshotRequestSequence.current : undefined;
         const [records, next] = await Promise.all([
           request<CompetitionRecordView[]>("/api/v1/competitions", session),
           selectedId ? request<CompetitionSnapshot>(`/api/v1/competitions/${selectedId}/snapshot`, session) : Promise.resolve(undefined)
         ]);
         if (!disposed) {
           setCompetitions(records);
-          if (next) setSnapshot((current) => {
+          if (next && snapshotSequence === snapshotRequestSequence.current) setSnapshot((current) => {
             if (!current || current.competition.id !== next.competition.id) return next;
             if (next.competition.stateVersion < current.competition.stateVersion) return current;
             if (next.competition.stateVersion === current.competition.stateVersion && next.runtime.stateVersion < current.runtime.stateVersion) return current;
@@ -602,10 +613,9 @@ function ConfigPanel({ snapshot, canWrite, saveDraft, publish }: {
     if (type === "small") setPoints([...SMALL_SCORING]);
     if (type === "large") setPoints([...LARGE_SCORING]);
   };
-  const replaceStages = (mode: "SR" | "HS") => {
+  const replaceStages = async (mode: "SR" | "HS") => {
     const replacement = mode === "SR" ? defaultSrStages(points, lastScoringPlace) : defaultHsStages(points, lastScoringPlace);
-    setStages(replacement);
-    void saveDraft({ stages: replacement });
+    await saveDraft({ stages: replacement });
   };
   const updateStage = (id: string, patch: Partial<StageConfig>) => setStages((current) => current.map((stage) => stage.id === id ? { ...stage, ...patch } : stage));
   const reorder = (id: string, delta: number) => setStages((current) => {
@@ -716,8 +726,8 @@ function EditableScoreCell({ value, stage, playerId, playerName, canWrite, versi
   const target = `${playerId}:${stage.id}`;
   return <td className="score-cell-editor"><label>新名次<input aria-label={`${playerId} ${stage.label} 新名次`} type="number" min="1" value={place} onChange={(event) => setPlace(event.target.value)} /></label><small>按本关规则自动计 {calculatedPoints} 分</small>
     <div className="score-editor-actions">
-      <ConfirmButton label="保存名次" kind="scoreboard-override" target={target} versionKey={versionKey} disabled={!Number.isInteger(numericPlace) || numericPlace < 1} requestConfirmation={requestConfirmation} onConfirm={(confirmation) => save({ playerId, stageId: stage.id, operation: "set-place", place: numericPlace, rankPolicy: "shift" }, confirmation)} />
-      <ConfirmButton label="设为 DNF" kind="scoreboard-override" target={target} versionKey={versionKey} className="danger" requestConfirmation={requestConfirmation} onConfirm={(confirmation) => save({ playerId, stageId: stage.id, operation: "set-dnf" }, confirmation)} />
+      <ConfirmButton label="保存名次" kind="scoreboard-override" target={target} versionKey={versionKey} disabled={!Number.isInteger(numericPlace) || numericPlace < 1} requestConfirmation={requestConfirmation} onConfirm={async (confirmation) => { await save({ playerId, stageId: stage.id, operation: "set-place", place: numericPlace, rankPolicy: "shift" }, confirmation); setEditing(false); }} />
+      <ConfirmButton label="设为 DNF" kind="scoreboard-override" target={target} versionKey={versionKey} className="danger" requestConfirmation={requestConfirmation} onConfirm={async (confirmation) => { await save({ playerId, stageId: stage.id, operation: "set-dnf" }, confirmation); setEditing(false); }} />
       <button className="ghost" onClick={() => setEditing(false)}>取消</button>
     </div>
   </td>;
