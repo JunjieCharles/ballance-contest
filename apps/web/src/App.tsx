@@ -612,6 +612,7 @@ function ConfigPanel({ snapshot, canWrite, saveDraft, publish }: {
   const editable = canWrite && snapshot.competition.status === "draft";
   const [contestType, setContestType] = useState(config.scoring.contestType);
   const [points, setPoints] = useState<number[]>([...config.scoring.points]);
+  const [scoringDirty, setScoringDirty] = useState(false);
   const [stages, setStages] = useState<StageConfig[]>(config.stages.map((stage) => ({ ...stage, scoring: [...stage.scoring] })));
   const [stagesDirty, setStagesDirty] = useState(false);
   const lastScoringPlace = minimumScoringPlaceFor(points);
@@ -621,10 +622,14 @@ function ConfigPanel({ snapshot, canWrite, saveDraft, publish }: {
     setContestType(type);
     if (type === "small") setPoints([...SMALL_SCORING]);
     if (type === "large") setPoints([...LARGE_SCORING]);
+    setScoringDirty(false);
     const nextPoints = type === "small" ? [...SMALL_SCORING] : [...LARGE_SCORING];
     void saveDraft({ contestType: type, scoring: { ...config.scoring, contestType: type, points: nextPoints, minimumScoringPlace: minimumScoringPlaceFor(nextPoints) }, stages: stages.map((stage) => ({ ...stage, scoring: [...nextPoints], minimumScoringPlace: minimumScoringPlaceFor(nextPoints) })) });
   };
-  const saveScoring = (nextPoints: number[], nextContestType: CompetitionConfig["contestType"] = contestType) => void saveDraft({ contestType: nextContestType, scoring: { ...config.scoring, contestType: nextContestType, points: nextPoints, minimumScoringPlace: minimumScoringPlaceFor(nextPoints) }, stages: stages.map((stage) => ({ ...stage, scoring: [...nextPoints], minimumScoringPlace: minimumScoringPlaceFor(nextPoints) })) });
+  const saveScoring = async (nextPoints: number[], nextContestType: CompetitionConfig["contestType"] = contestType) => {
+    await saveDraft({ contestType: nextContestType, scoring: { ...config.scoring, contestType: nextContestType, points: nextPoints, minimumScoringPlace: minimumScoringPlaceFor(nextPoints) }, stages: stages.map((stage) => ({ ...stage, scoring: [...nextPoints], minimumScoringPlace: minimumScoringPlaceFor(nextPoints) })) });
+    setScoringDirty(false);
+  };
   const replaceStages = (mode: "SR" | "HS") => {
     const replacement = (mode === "SR" ? defaultSrStages(points, lastScoringPlace) : defaultHsStages(points, lastScoringPlace)) as StageConfig[];
     setStages(replacement);
@@ -670,10 +675,14 @@ function ConfigPanel({ snapshot, canWrite, saveDraft, publish }: {
     </div>
     <div className="panel"><h2>轮次与计分</h2>
       <div className="preset-summary"><strong>当前预设：{contestType === "small" ? "小型赛事" : contestType === "large" ? "大型赛事" : "自定义"}</strong><span>点击预设会覆盖当前计分，之后仍可直接修改每个名次。</span></div>
-      <div className="scoring-presets"><button className={contestType === "small" ? "selected-preset" : "ghost"} disabled={!editable} onClick={() => selectScoringPreset("small")}>小型赛事</button><button className={contestType === "large" ? "selected-preset" : "ghost"} disabled={!editable} onClick={() => selectScoringPreset("large")}>大型赛事</button></div>
-      <div className="points-editor">{points.map((point, index) => <label key={index}>第 {index + 1} 名计分<input aria-label={`第 ${index + 1} 名计分`} type="number" value={point} disabled={!editable} onChange={(event) => { const next = points.map((value, pointIndex) => pointIndex === index ? Number(event.target.value) : value); setPoints(next); setContestType("custom"); }} onBlur={() => saveScoring(points, "custom")} /></label>)}</div>
-      <div className="button-row"><button className="ghost" disabled={!editable} onClick={() => { const next = [...points, 0]; setPoints(next); setContestType("custom"); saveScoring(next, "custom"); }}>增加名次</button><button className="ghost" disabled={!editable || points.length <= 1} onClick={() => { const next = points.slice(0, -1); setPoints(next); setContestType("custom"); saveScoring(next, "custom"); }}>删除末位</button></div>
+      <div className="scoring-presets">
+        <LocalConfirmButton label="小型赛事预设" summary="用小型赛事预设覆盖当前计分，并同步应用到全部关卡。" disabled={!editable} onConfirm={() => selectScoringPreset("small")} />
+        <LocalConfirmButton label="大型赛事预设" summary="用大型赛事预设覆盖当前计分，并同步应用到全部关卡。" disabled={!editable} onConfirm={() => selectScoringPreset("large")} />
+      </div>
+      <div className="points-editor">{points.map((point, index) => <label key={index}>第 {index + 1} 名计分<input aria-label={`第 ${index + 1} 名计分`} type="number" value={point} disabled={!editable} onChange={(event) => { const next = points.map((value, pointIndex) => pointIndex === index ? Number(event.target.value) : value); setPoints(next); setContestType("custom"); setScoringDirty(true); }} /></label>)}</div>
+      <div className="button-row"><button className="ghost" disabled={!editable} onClick={() => { const next = [...points, 0]; setPoints(next); setContestType("custom"); setScoringDirty(true); }}>增加名次</button><button className="ghost" disabled={!editable || points.length <= 1} onClick={() => { const next = points.slice(0, -1); setPoints(next); setContestType("custom"); setScoringDirty(true); }}>删除末位</button></div>
       <div className="scoring-summary"><strong>最低计分名次：第 {lastScoringPlace} 名</strong><span>第 {lastScoringPlace + 1} 名起得分为 0</span></div>
+      <button disabled={!editable || !scoringDirty} onClick={() => void saveScoring(points, contestType)}>保存计分规则并覆盖单关配置</button>
       <p className="muted">预设会覆盖当前计分，并同步应用到全部关卡；你仍然可以直接修改每个名次。</p>
     </div>
     <div className="panel wide"><div className="panel-title-row"><div><h2>单关配置</h2><p className="muted">预设会整体替换草稿；自定义模式保留当前列表。</p></div><div className="button-row compact">

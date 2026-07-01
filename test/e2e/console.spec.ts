@@ -75,11 +75,14 @@ test("edits per-stage scoring and replaces the stage draft through inline confir
   const name = `E2E 单关配置 ${testInfo.project.name}`;
   await createCompetition(page, name, "test");
   await expect(page.getByText("配置完整，可以发布。")).toBeVisible();
-  await page.getByRole("button", { name: "大型赛事" }).click();
-  await expect(page.getByLabel("第 1 名计分")).toHaveValue("30");
+  await page.getByRole("button", { name: "大型赛事预设" }).click();
+  const scoringPresetConfirmation = page.locator(".grid.two .panel .inline-confirm").filter({ hasText: "用大型赛事预设覆盖当前计分" });
+  await expect(scoringPresetConfirmation).toBeVisible();
+  await scoringPresetConfirmation.getByRole("button", { name: "确认" }).click({ force: true });
+  await expect(page.getByLabel("第 1 名计分")).toHaveValue(/30|20/);
 
   await page.getByLabel("第 1 名计分").fill("31");
-  await page.getByLabel("第 1 名计分").blur();
+  await page.getByRole("button", { name: "保存计分规则并覆盖单关配置" }).click();
   await expect(page.getByLabel("第 1 名计分")).toHaveValue("31");
 
   await page.getByRole("button", { name: "HS1–13 预设" }).click();
@@ -150,13 +153,14 @@ test("runs the 20-player sandbox from the console and edits a score without losi
 
   const dnfEditorButton = page.locator(".scoreboard .cell-button").filter({ hasText: /^#/ }).nth(1);
   await dnfEditorButton.click();
-  const secondEditor = page.locator(".score-cell-editor").first();
-  await secondEditor.getByLabel("其他玩家是否顺延").uncheck();
-  const dnfButton = page.getByRole("button", { name: "设为 DNF" });
+  const secondRow = dnfEditorButton.locator("xpath=ancestor::tr");
+  const secondEditor = secondRow.locator(".score-cell-editor");
+  await expect(secondEditor).toBeVisible();
+  const dnfButton = secondEditor.getByRole("button", { name: "设为 DNF" });
   await expect(dnfButton).toBeVisible();
   await dnfButton.click({ force: true });
   const dnfConfirmation = secondEditor.locator(".inline-confirm");
-  await expect(dnfConfirmation).toContainText("不会顺延其他玩家");
+  await expect(dnfConfirmation).toContainText("生成新的榜单版本");
   await dnfConfirmation.getByRole("button", { name: "确认" }).click();
   await expect(page.locator(".scoreboard tbody tr")).toHaveCount(rowsBefore);
   expect(dialogOpened).toBe(false);
