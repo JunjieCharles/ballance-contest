@@ -1,7 +1,6 @@
 import { spawn, spawnSync, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { createInterface } from "node:readline";
 import { spectatorLoginName } from "@ballance/contracts";
 
 export interface MockClientLaunchOptions {
@@ -30,6 +29,21 @@ export const resolveMockClientUuid = (workingDirectory: string, fallbackUuid: st
   return fallbackUuid;
 };
 
+const ANSI_ESCAPE_PATTERN = /\u001b\[[0-9;?]*[ -/]*[@-~]/g;
+
+export interface ConsumeMockClientLogChunkResult {
+  lines: readonly string[];
+  pending: string;
+}
+
+export const consumeMockClientLogChunk = (chunk: string, pending: string): ConsumeMockClientLogChunkResult => {
+  const combined = `${pending}${chunk}`;
+  const segments = combined.split(/\r?\n/);
+  const nextPending = segments.pop() ?? "";
+  const lines = segments.map((line) => line.replace(ANSI_ESCAPE_PATTERN, "").replace(/\r/g, "").trimEnd()).filter((line) => line.length > 0);
+  return { lines, pending: nextPending };
+};
+
 export const readMockClientVersion = (executable: string, workingDirectory: string): string => {
   const result = spawnSync(executable, ["-v"], { cwd: workingDirectory, encoding: "utf8", shell: false, windowsHide: true });
   if (result.status !== 0) throw new Error(`MockClient version probe failed: ${result.stderr}`);
@@ -45,6 +59,9 @@ export interface CommandTransport {
 export class ManagedMockClient implements CommandTransport {
   private process: ChildProcessWithoutNullStreams | undefined;
   private readonly listeners = new Set<(line: string) => void>();
+  private logTailTimer: NodeJS.Timeout | undefined;
+  private logOffset = 0;
+  private logPending = "";
 
   public constructor(private readonly options: MockClientLaunchOptions) {}
 
@@ -57,16 +74,42 @@ export class ManagedMockClient implements CommandTransport {
       stdio: "pipe"
     });
     this.process = child;
-    for (const stream of [child.stdout, child.stderr]) {
-      const lines = createInterface({ input: stream });
-      lines.on("line", (line) => { for (const listener of this.listeners) listener(line); });
-    }
-    child.on("exit", () => { this.process = undefined; });
+    this.startLogTail();
+    child.on("exit", () => {
+      this.stopLogTail();
+      this.process = undefined;
+    });
   }
 
   public onLine(listener: (line: string) => void): () => void {
     this.listeners.add(listener);
     return () => this.listeners.delete(listener);
+  }
+
+  private startLogTail(): void {
+    const readNewLogLines = () => {
+      if (!existsSync(this.options.logPath)) return;
+      const content = readFileSync(this.options.logPath, "utf8");
+      if (content.length < this.logOffset) this.logOffset = 0;
+      const chunk = content.slice(this.logOffset);
+      this.logOffset = content.length;
+      const parsed = consumeMockClientLogChunk(chunk, this.logPending);
+      this.logPending = parsed.pending;
+      for (const line of parsed.lines) {
+        if (line.length > 0) for (const listener of this.listeners) listener(line);
+      }
+    };
+    readNewLogLines();
+    this.logTailTimer = setInterval(readNewLogLines, 250);
+  }
+
+  private stopLogTail(): void {
+    if (this.logTailTimer) {
+      clearInterval(this.logTailTimer);
+      this.logTailTimer = undefined;
+    }
+    this.logOffset = 0;
+    this.logPending = "";
   }
 
   public async write(command: string): Promise<void> {

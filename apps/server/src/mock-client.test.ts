@@ -2,7 +2,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { buildMockClientArguments, resolveMockClientUuid } from "./mock-client.js";
+import { buildMockClientArguments, consumeMockClientLogChunk, resolveMockClientUuid } from "./mock-client.js";
 
 describe("MockClient launch", () => {
   const options = { executable: "MockClient.exe", workingDirectory: "C:/mock", server: "1.bmmo.win", refereeName: "ContestConsole", uuid: "uuid", logPath: "C:/data/logs/mock.log" };
@@ -33,5 +33,11 @@ describe("MockClient launch", () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+
+  it("strips ANSI control codes from log chunks while preserving full lines", () => {
+    const result = consumeMockClientLogChunk("\u001b[31mhello\u001b[0m\nworld\n", "");
+    expect(result.lines).toEqual(["hello", "world"]);
+    expect(result.pending).toBe("");
   });
 });
