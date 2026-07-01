@@ -49,6 +49,11 @@ import { EventJournal } from "./event-journal.js";
 import { ManagedMockClient, readMockClientVersion, type CommandTransport } from "./mock-client.js";
 import type { OpenedDatabase } from "./storage/database.js";
 
+export const seededBehaviorRandom = (seed: number, stageId: string, attemptNumber: number, playerId: string, channel: string): number => {
+  const digest = createHash("sha256").update(`${seed}:${stageId}:${attemptNumber}:${playerId}:${channel}`).digest();
+  return digest.readUInt32BE(0) / 0x1_0000_0000;
+};
+
 export interface CompetitionRecord {
   id: string;
   name: string;
@@ -97,8 +102,14 @@ interface TestRuntime {
   automationRuntime: TestAutomationRuntime;
   playedEvents: number;
   operations: PersistedTestOperation[];
+  clockAdvanceCanCoalesce: boolean;
   createdAt: string;
   updatedAt: string;
+}
+
+interface RealtimeTestTimer {
+  handle: ReturnType<typeof setInterval>;
+  lastWallAtMs: number;
 }
 
 interface WorkRuntime {
@@ -111,6 +122,8 @@ interface WorkRuntime {
   mockClientVersion?: string;
   initialListTimer?: ReturnType<typeof setTimeout>;
   listTimer?: ReturnType<typeof setInterval>;
+  automationTimer?: ReturnType<typeof setInterval>;
+  automationDispatching?: boolean;
   listReconciliation?: { expected: number; seen: number; onlinePlayerIds: Set<string> };
 }
 
@@ -169,7 +182,9 @@ const automationView = (
   mode: CompetitionMode,
   snapshot?: AutomationSnapshot,
   commands: readonly CommandRecordView[] = [],
-  plannedStageStartAt?: string
+  plannedStageStartAt?: string,
+  plannedReadyAt?: string,
+  virtualNowMs?: number
 ): RuntimeSnapshot => ({
   phase: snapshot?.phase ?? "draft",
   stateVersion: snapshot?.stateVersion ?? 0,
@@ -177,7 +192,9 @@ const automationView = (
   automationEnabled: snapshot?.automationEnabled ?? false,
   ...(snapshot?.currentStageId === undefined ? {} : { currentStageId: snapshot.currentStageId }),
   ...(snapshot?.plannedReadyAtMs === undefined ? {} : { plannedReadyAtMs: snapshot.plannedReadyAtMs }),
+  ...(plannedReadyAt === undefined ? {} : { plannedReadyAt }),
   ...(plannedStageStartAt === undefined ? {} : { plannedStageStartAt }),
+  ...(virtualNowMs === undefined ? {} : { virtualNowMs }),
   blockers: snapshot?.blockers ?? [],
   waitingParticipants: snapshot?.waitingParticipants ?? [],
   attempts: snapshot?.attempts ?? [],
@@ -198,10 +215,24 @@ const plannedStageStartAt = (snapshot: AutomationSnapshot, epochOriginMs: number
   return plannedAtMs === undefined ? undefined : new Date(epochOriginMs + plannedAtMs).toISOString();
 };
 
+const plannedReadyAt = (snapshot: AutomationSnapshot, epochOriginMs: number): string | undefined =>
+  snapshot.plannedReadyAtMs === undefined ? undefined : new Date(epochOriginMs + snapshot.plannedReadyAtMs).toISOString();
+
+const automationPolicyFor = (config: CompetitionConfig) => ({
+  announcementLeadMs: config.flow.announcementLeadMs,
+  readyBufferMs: config.flow.readyBufferMs,
+  reconnectStableMs: config.flow.reconnectStableMs,
+  preStartWaitLimitMs: config.flow.delayLimitMs,
+  intermissionMs: config.flow.intermissionMs,
+  protectionWindowMs: config.flow.protectionWindowMs,
+  groupDisconnectThreshold: config.flow.groupDisconnectThreshold
+});
+
 const scenarioSummary = (definition: ScenarioDefinition): TestScenarioSummary => ({
   id: definition.id,
   name: definition.name,
   kind: definition.kind ?? "scripted-replay",
+  randomSeed: definition.randomSeed ?? 1,
   players: definition.players.length,
   stages: definition.stages.length,
   events: definition.events.length,
@@ -273,6 +304,7 @@ const builtinScenario = (): ScenarioDefinition => ({
 const builtinPlayerSandbox = (): ScenarioDefinition => ({
   schemaVersion: 1,
   kind: "player-behavior",
+  randomSeed: 20_260_631,
   id: "independent-player-sandbox",
   name: "独立测试玩家沙盒",
   year: 2026,
@@ -282,16 +314,26 @@ const builtinPlayerSandbox = (): ScenarioDefinition => ({
     { id: "expert", displayName: "游戏高手", connectionId: "201", profile: "expert" },
     { id: "normal", displayName: "普通玩家", connectionId: "202", profile: "normal" },
     { id: "struggler", displayName: "游戏低手", connectionId: "203", profile: "struggler" },
-    { id: "disruptor", displayName: "捣乱分子", connectionId: "204", profile: "disruptor" }
+    { id: "disruptor", displayName: "捣乱分子", connectionId: "204", profile: "disruptor" },
+    ...Array.from({ length: 12 }, (_unused, index) => {
+      const profile = (["expert", "normal", "struggler", "disruptor"] as const)[index % 4] as ScenarioPlayerProfile;
+      return {
+        id: `sandbox-${profile}-${index + 1}`,
+        displayName: `${({ normal: "普通玩家", expert: "游戏高手", struggler: "游戏低手", disruptor: "捣乱分子" } as const)[profile]} ${index + 2}`,
+        connectionId: String(205 + index),
+        profile
+      };
+    })
   ],
   stages: [],
   events: [],
   expected: { attempts: 0, scoreboardVersions: 0 }
 });
 
-const builtinBehaviorScenario = (id: string, name: string, profiles: readonly ScenarioPlayerProfile[]): ScenarioDefinition => ({
+const builtinBehaviorScenario = (id: string, name: string, randomSeed: number, profiles: readonly ScenarioPlayerProfile[]): ScenarioDefinition => ({
   schemaVersion: 1,
   kind: "player-behavior",
+  randomSeed,
   id,
   name,
   year: 2026,
@@ -310,15 +352,25 @@ const builtinBehaviorScenario = (id: string, name: string, profiles: readonly Sc
 
 const builtinBehaviorScenarios = (): ScenarioDefinition[] => [
   builtinPlayerSandbox(),
-  builtinBehaviorScenario("normal-player-roster", "普通玩家场景", ["normal", "normal", "normal", "normal"]),
-  builtinBehaviorScenario("expert-player-roster", "高手竞速场景", ["expert", "expert", "expert", "normal"]),
-  builtinBehaviorScenario("timeout-player-roster", "低手超时与 DNF 场景", ["normal", "struggler", "struggler", "struggler"]),
-  builtinBehaviorScenario("disruptor-player-roster", "捣乱与违规场景", ["normal", "normal", "disruptor", "disruptor"])
+  builtinBehaviorScenario("normal-player-roster", "普通玩家场景", 10_001, Array.from({ length: 15 }, () => "normal")),
+  builtinBehaviorScenario("expert-player-roster", "高手竞速场景", 20_003, [
+    ...Array.from({ length: 12 }, () => "expert" as const),
+    ...Array.from({ length: 3 }, () => "normal" as const)
+  ]),
+  builtinBehaviorScenario("timeout-player-roster", "低手超时与 DNF 场景", 30_007, [
+    ...Array.from({ length: 10 }, () => "normal" as const),
+    ...Array.from({ length: 5 }, () => "struggler" as const)
+  ]),
+  builtinBehaviorScenario("disruptor-player-roster", "捣乱与违规场景", 40_009, [
+    ...Array.from({ length: 12 }, () => "normal" as const),
+    ...Array.from({ length: 3 }, () => "disruptor" as const)
+  ])
 ];
 
 export class CompetitionService {
   private readonly competitions = new Map<string, CompetitionRecord>();
   private readonly testRuns = new Map<string, TestRuntime>();
+  private readonly realtimeTestTimers = new Map<string, RealtimeTestTimer>();
   private readonly workRuntimes = new Map<string, WorkRuntime>();
   private readonly idempotency = new Map<string, unknown>();
   private readonly confirmations = new Map<string, ConfirmationRecord>();
@@ -445,7 +497,8 @@ export class CompetitionService {
             "work",
             workAutomation,
             this.commandHistory(id),
-            workAutomation ? plannedStageStartAt(workAutomation, Date.now() - performance.now(), config.flow.readyBufferMs) : undefined
+            workAutomation ? plannedStageStartAt(workAutomation, Date.now() - performance.now(), config.flow.readyBufferMs) : undefined,
+            workAutomation ? plannedReadyAt(workAutomation, Date.now() - performance.now()) : undefined
           ),
       scoreboardVersions,
       currentScoreboard: scoreboardVersions.at(-1)?.entries ?? [],
@@ -556,6 +609,7 @@ export class CompetitionService {
   }
 
   public resetTestRun(competitionId: string, runId: string): EngineSnapshot {
+    this.stopRealtimeTestAutomation(runId);
     const runtime = this.getTestRuntime(competitionId, runId);
     const reset = this.makeTestRuntime(competitionId, runtime.definition, runtime.id, runtime.createdAt);
     this.connectTestPlayers(reset, true);
@@ -583,9 +637,11 @@ export class CompetitionService {
     const runtime = this.getTestRuntime(competitionId, runId);
     runtime.automationClock.advanceBy(milliseconds);
     runtime.operations.push({ kind: "advance-clock", milliseconds });
+    runtime.clockAdvanceCanCoalesce = false;
     this.settleTestAutomation(runtime);
     this.persistTestRuntime(runtime);
     const snapshot = runtime.automation.snapshot();
+    if (snapshot.phase === "review" || snapshot.phase === "paused" || snapshot.phase === "incident") this.stopRealtimeTestAutomation(runId);
     this.journal.append({ type: "test-run.clock-advanced", competitionId, data: { runId, milliseconds, snapshot } });
     return snapshot;
   }
@@ -633,7 +689,7 @@ export class CompetitionService {
           responseLine: "模拟回显成功",
           simulated: true
         }))
-      ], plannedStageStartAt(automation, epochOriginMs, this.getDraftConfig(competitionId).flow.readyBufferMs))
+      ], plannedStageStartAt(automation, epochOriginMs, this.getDraftConfig(competitionId).flow.readyBufferMs), plannedReadyAt(automation, epochOriginMs), runtime.automationClock.now())
     };
   }
 
@@ -704,13 +760,15 @@ export class CompetitionService {
       if (!runId) throw new ServiceError("NOT_FOUND", "请先创建测试运行", 404);
       const readyInMs = input.readyInMs ?? 0;
       this.startTestAutomation(competitionId, runId, readyInMs);
-      if (readyInMs <= 0) this.advanceTestAutomation(competitionId, runId, this.getDraftConfig(competitionId).flow.readyBufferMs);
+      const runtime = this.getTestRuntime(competitionId, runId);
+      this.startRealtimeTestAutomation(runtime);
       return this.getTestRunSnapshot(competitionId, runId).automation;
     }
     const runtime = this.workRuntimes.get(competitionId) ?? this.makeDetachedWorkRuntime(competitionId);
     runtime.controller.enable(runtime.controller.snapshot().plannedReadyAtMs ?? performance.now() + (input.readyInMs ?? 0));
     await runtime.runtime.dispatch();
     this.workRuntimes.set(competitionId, runtime);
+    this.startRealtimeWorkAutomation(runtime);
     this.saveWorkRuntimeSnapshot(runtime);
     return automationView("work", runtime.controller.snapshot(), this.commandHistory(competitionId));
   }
@@ -720,6 +778,7 @@ export class CompetitionService {
     if (competition.mode === "test") {
       const runId = this.getPayload(competitionId).activeRunId;
       if (!runId) throw new ServiceError("NOT_FOUND", "请先创建测试运行", 404);
+      this.stopRealtimeTestAutomation(runId);
       const runtime = this.getTestRuntime(competitionId, runId);
       runtime.automation.pause();
       this.persistTestRuntime(runtime);
@@ -727,6 +786,7 @@ export class CompetitionService {
     }
     const runtime = this.workRuntimes.get(competitionId);
     if (!runtime) throw new ServiceError("NOT_FOUND", "工作运行时尚未启动", 404);
+    this.stopRealtimeWorkAutomation(runtime);
     runtime.controller.pause();
     this.saveWorkRuntimeSnapshot(runtime);
     return automationView("work", runtime.controller.snapshot(), this.commandHistory(competitionId));
@@ -947,11 +1007,15 @@ export class CompetitionService {
     if (!input.reason.trim()) throw new ServiceError("VALIDATION_FAILED", "结束比赛必须填写裁判原因", 400);
     this.consumeConfirmation(competitionId, "high-risk", input.confirmationToken, input.impactHash, competitionId);
     const runtime = this.workRuntimes.get(competitionId);
+    if (runtime) this.stopRealtimeWorkAutomation(runtime);
     runtime?.controller.pause();
     if (runtime?.initialListTimer) clearTimeout(runtime.initialListTimer);
     if (runtime?.listTimer) clearInterval(runtime.listTimer);
     await runtime?.client?.stop().catch(() => undefined);
     this.workRuntimes.delete(competitionId);
+    for (const [runId, testRuntime] of this.testRuns) {
+      if (testRuntime.competitionId === competitionId) this.stopRealtimeTestAutomation(runId);
+    }
     const updated = { ...current, status: "finished" as const, stateVersion: current.stateVersion + 1, updatedAt: new Date().toISOString() };
     this.competitions.set(competitionId, updated);
     this.withDatabase((database) => {
@@ -981,9 +1045,13 @@ export class CompetitionService {
     }
     this.consumeConfirmation(competitionId, "high-risk", input.confirmationToken, input.impactHash, competitionId);
     const runtime = this.workRuntimes.get(competitionId);
+    if (runtime) this.stopRealtimeWorkAutomation(runtime);
     await runtime?.client?.stop().catch(() => undefined);
     this.workRuntimes.delete(competitionId);
-    for (const [runId, testRuntime] of this.testRuns) if (testRuntime.competitionId === competitionId) this.testRuns.delete(runId);
+    for (const [runId, testRuntime] of this.testRuns) if (testRuntime.competitionId === competitionId) {
+      this.stopRealtimeTestAutomation(runId);
+      this.testRuns.delete(runId);
+    }
     this.withDatabase((database) => {
       database.sqlite.transaction(() => {
         database.sqlite.prepare("DELETE FROM domain_events WHERE competition_id=?").run(competitionId);
@@ -1005,7 +1073,9 @@ export class CompetitionService {
   }
 
   public close(): void {
+    for (const runId of this.realtimeTestTimers.keys()) this.stopRealtimeTestAutomation(runId);
     for (const runtime of this.workRuntimes.values()) {
+      this.stopRealtimeWorkAutomation(runtime);
       if (runtime.initialListTimer) clearTimeout(runtime.initialListTimer);
       if (runtime.listTimer) clearInterval(runtime.listTimer);
       void runtime.client?.stop().catch(() => undefined);
@@ -1142,6 +1212,7 @@ export class CompetitionService {
 
   private makeTestRuntime(competitionId: string, definition: ScenarioDefinition, id: string = randomUUID(), createdAt: string = new Date().toISOString()): TestRuntime {
     const automationClock = new VirtualClock(0);
+    const config = this.getDraftConfig(competitionId);
     const automation = new CompetitionController({
       competitionId,
       participants: definition.players.map((player) => player.id),
@@ -1151,7 +1222,8 @@ export class CompetitionService {
         mode: stage.mode.toLowerCase() as "sr" | "hs",
         timeLimitMs: stage.timeLimitMs,
         minimumScoringPlace: stage.minimumScoringPlace
-      }))
+      })),
+      policy: automationPolicyFor(config)
     }, automationClock);
     return {
       id,
@@ -1164,6 +1236,7 @@ export class CompetitionService {
       automationRuntime: new TestAutomationRuntime(automation),
       playedEvents: 0,
       operations: [],
+      clockAdvanceCanCoalesce: false,
       createdAt,
       updatedAt: createdAt
     };
@@ -1186,31 +1259,69 @@ export class CompetitionService {
     const attempt = [...snapshot.attempts].reverse().find((candidate) => candidate.stageId === stageId && candidate.intakeOpen);
     if (!attempt) return;
     const completed = new Set(attempt.results.map((result) => result.playerId));
-    const ordered = [...runtime.definition.players].sort((left, right) =>
-      this.profileOrder(left.profile) - this.profileOrder(right.profile) || left.id.localeCompare(right.id));
-    let finishIndex = 0;
-    for (const player of ordered) {
+    const planned = runtime.definition.players.map((player) => ({ player, plan: this.testPlayerPlan(runtime, attempt, player) }))
+      .sort((left, right) => left.plan.dueAtMs - right.plan.dueAtMs || left.player.id.localeCompare(right.player.id));
+    for (const { player, plan } of planned) {
       if (completed.has(player.id)) continue;
-      const profile = player.profile ?? "normal";
+      if (plan.kind === "timeout" || plan.dueAtMs > runtime.automationClock.now()) continue;
       const sourceId = `agent:${runtime.id}:${attempt.id}:${player.id}`;
-      if (profile === "struggler") {
-        this.applyTestEvent(runtime, { atMs: runtime.automationClock.now(), sourceId, type: "dnf", stageId, playerId: player.id, reason: "time-limit" }, false);
+      if (plan.kind === "disrupt") {
+        this.applyTestEvent(runtime, { atMs: plan.dueAtMs, sourceId: `${sourceId}:cheat`, type: "cheat", playerId: player.id, enabled: true }, false, true, false);
+        this.applyTestEvent(runtime, { atMs: plan.dueAtMs, sourceId, type: "dnf", stageId, playerId: player.id, reason: "cheat-enabled" }, false, true, false);
+        this.applyTestEvent(runtime, { atMs: plan.dueAtMs, sourceId: `${sourceId}:cheat-off`, type: "cheat", playerId: player.id, enabled: false }, false, true, false);
         continue;
       }
-      if (profile === "disruptor") {
-        this.applyTestEvent(runtime, { atMs: runtime.automationClock.now(), sourceId: `${sourceId}:cheat`, type: "cheat", playerId: player.id, enabled: true }, false);
-        this.applyTestEvent(runtime, { atMs: runtime.automationClock.now(), sourceId, type: "dnf", stageId, playerId: player.id, reason: "cheat-enabled" }, false);
+      if (plan.kind === "dnf") {
+        this.applyTestEvent(runtime, { atMs: plan.dueAtMs, sourceId, type: "dnf", stageId, playerId: player.id, reason: "gave-up" }, false, true, false);
         continue;
       }
-      finishIndex += 1;
-      const elapsedMs = (profile === "expert" ? 45_000 : 90_000) + finishIndex * 1_000;
-      const score = profile === "expert" ? 10_000 - finishIndex : 5_000 - finishIndex;
-      this.applyTestEvent(runtime, { atMs: runtime.automationClock.now(), sourceId, type: "finish", stageId, playerId: player.id, elapsedMs, score }, false);
+      this.applyTestEvent(runtime, {
+        atMs: plan.dueAtMs,
+        sourceId,
+        type: "finish",
+        stageId,
+        playerId: player.id,
+        elapsedMs: plan.elapsedMs,
+        score: plan.score
+      }, false, true, false);
     }
   }
 
-  private profileOrder(profile: ScenarioPlayerProfile | undefined): number {
-    return ({ expert: 0, normal: 1, struggler: 2, disruptor: 3 } as const)[profile ?? "normal"];
+  private testPlayerPlan(
+    runtime: TestRuntime,
+    attempt: AutomationSnapshot["attempts"][number],
+    player: ScenarioDefinition["players"][number]
+  ): { kind: "finish"; dueAtMs: number; elapsedMs: number; score: number }
+    | { kind: "dnf"; dueAtMs: number }
+    | { kind: "disrupt"; dueAtMs: number }
+    | { kind: "timeout"; dueAtMs: number } {
+    if (runtime.definition.kind !== "player-behavior") {
+      return { kind: "finish", dueAtMs: attempt.goAtMs, elapsedMs: 90_000, score: 5_000 };
+    }
+    const stage = runtime.definition.stages.find((candidate) => candidate.id === attempt.stageId);
+    const timeLimitMs = stage?.timeLimitMs ?? 10 * 60_000;
+    const profile = player.profile ?? "normal";
+    const random = (channel: string) => seededBehaviorRandom(runtime.definition.randomSeed ?? 1, attempt.stageId, attempt.attemptNumber, player.id, channel);
+    const boundedDelay = (milliseconds: number) => Math.min(Math.max(1_000, Math.round(milliseconds)), Math.max(1_000, timeLimitMs - 1));
+    if (profile === "struggler") {
+      if (random("outcome") < 0.65) return { kind: "timeout", dueAtMs: attempt.deadlineAtMs };
+      const delay = boundedDelay(timeLimitMs * (0.55 + random("dnf-time") * 0.35));
+      return { kind: "dnf", dueAtMs: attempt.goAtMs + delay };
+    }
+    if (profile === "disruptor") {
+      const delay = boundedDelay(20_000 + random("disrupt-time") * 70_000);
+      return { kind: "disrupt", dueAtMs: attempt.goAtMs + delay };
+    }
+    const delay = boundedDelay(profile === "expert"
+      ? 30_000 + random("finish-time") * 45_000
+      : 75_000 + random("finish-time") * 150_000);
+    const scoreBase = profile === "expert" ? 9_000 : 4_000;
+    return {
+      kind: "finish",
+      dueAtMs: attempt.goAtMs + delay,
+      elapsedMs: delay,
+      score: scoreBase + Math.floor(random("score") * 1_000)
+    };
   }
 
   private scoringContestType(points: readonly number[]): CompetitionConfig["contestType"] {
@@ -1279,9 +1390,9 @@ export class CompetitionService {
     if (record) this.competitions.set(runtime.competitionId, { ...record, activeRunId: runtime.id });
   }
 
-  private applyTestEvent(runtime: TestRuntime, event: ScenarioEvent, countEvent: boolean, writeLog = true): void {
+  private applyTestEvent(runtime: TestRuntime, event: ScenarioEvent, countEvent: boolean, writeLog = true, settleAutomation = true): void {
     runtime.engine.apply(event);
-    this.applyAutomationEvent(runtime, event);
+    this.applyAutomationEvent(runtime, event, settleAutomation);
     if (countEvent) runtime.playedEvents += 1;
     if (writeLog) {
       const source = event.type === "ready" || event.type === "go" ? "test-referee" : "test-player";
@@ -1292,8 +1403,13 @@ export class CompetitionService {
 
   private settleTestAutomation(runtime: TestRuntime): void {
     for (let iteration = 0; iteration < 8; iteration += 1) {
-      const before = runtime.automation.snapshot().stateVersion;
+      const beforeSnapshot = runtime.automation.snapshot();
+      const before = beforeSnapshot.stateVersion;
+      this.driveTestPlayers(runtime);
+      const preTickSnapshot = runtime.automation.snapshot();
+      const knownResultSources = new Set(preTickSnapshot.attempts.flatMap((attempt) => attempt.results.map((result) => result.sourceId)));
       runtime.automation.tick();
+      this.mirrorDeadlineResults(runtime, knownResultSources);
       const actions = runtime.automationRuntime.dispatch();
       for (const action of actions) {
         for (const line of this.testAutomationActionLogLines(runtime, action)) {
@@ -1309,12 +1425,87 @@ export class CompetitionService {
           });
         }
       }
-      if (actions.some((action) => action.kind === "go")) this.driveTestPlayers(runtime);
       if (runtime.automation.snapshot().stateVersion === before) break;
     }
   }
 
-  private applyAutomationEvent(runtime: TestRuntime, event: ScenarioDefinition["events"][number]): void {
+  private mirrorDeadlineResults(runtime: TestRuntime, knownResultSources: ReadonlySet<string>): void {
+    for (const attempt of runtime.automation.snapshot().attempts) {
+      for (const result of attempt.results) {
+        if (knownResultSources.has(result.sourceId) || !result.sourceId.startsWith("deadline:")) continue;
+        const event: ScenarioEvent = {
+          atMs: result.receivedAtMs,
+          sourceId: result.sourceId,
+          type: "dnf",
+          stageId: attempt.stageId,
+          playerId: result.playerId,
+          reason: result.reason ?? "time-limit"
+        };
+        runtime.engine.apply(event);
+        this.appendRawLog(runtime.competitionId, "test-player", this.testEventLogLine(runtime, event), this.testOccurredAt(runtime, event.atMs));
+        this.journal.append({ type: "test-run.event", competitionId: runtime.competitionId, data: event });
+      }
+    }
+  }
+
+  private startRealtimeTestAutomation(runtime: TestRuntime): void {
+    if (this.realtimeTestTimers.has(runtime.id)) return;
+    const timer: RealtimeTestTimer = {
+      lastWallAtMs: performance.now(),
+      handle: setInterval(() => this.tickRealtimeTestAutomation(runtime.id), 500)
+    };
+    timer.handle.unref?.();
+    this.realtimeTestTimers.set(runtime.id, timer);
+  }
+
+  private stopRealtimeTestAutomation(runId: string): void {
+    const timer = this.realtimeTestTimers.get(runId);
+    if (!timer) return;
+    clearInterval(timer.handle);
+    this.realtimeTestTimers.delete(runId);
+  }
+
+  private tickRealtimeTestAutomation(runId: string): void {
+    const timer = this.realtimeTestTimers.get(runId);
+    const runtime = this.testRuns.get(runId);
+    if (!timer || !runtime) {
+      this.stopRealtimeTestAutomation(runId);
+      return;
+    }
+    const wallNow = performance.now();
+    const milliseconds = Math.max(0, Math.round(wallNow - timer.lastWallAtMs));
+    timer.lastWallAtMs = wallNow;
+    if (milliseconds === 0) return;
+    const beforeStateVersion = runtime.automation.snapshot().stateVersion;
+    const beforeScoreboardVersions = runtime.engine.snapshot().scoreboardVersions.length;
+    const lastOperation = runtime.operations.at(-1);
+    if (runtime.clockAdvanceCanCoalesce && lastOperation?.kind === "advance-clock") {
+      lastOperation.milliseconds = (lastOperation.milliseconds ?? 0) + milliseconds;
+    } else {
+      runtime.operations.push({ kind: "advance-clock", milliseconds });
+    }
+    runtime.automationClock.advanceBy(milliseconds);
+    try {
+      this.settleTestAutomation(runtime);
+      const snapshot = runtime.automation.snapshot();
+      const scoreboardVersions = runtime.engine.snapshot().scoreboardVersions.length;
+      const changed = snapshot.stateVersion !== beforeStateVersion || scoreboardVersions !== beforeScoreboardVersions;
+      runtime.clockAdvanceCanCoalesce = !changed;
+      this.persistTestRuntime(runtime);
+      if (scoreboardVersions !== beforeScoreboardVersions) this.saveScoreboards(runtime.competitionId, runtime.engine.snapshot().scoreboardVersions);
+      if (changed) this.journal.append({ type: "test-run.realtime-progress", competitionId: runtime.competitionId, data: { runId, phase: snapshot.phase } });
+      if (!snapshot.automationEnabled || snapshot.phase === "review" || snapshot.phase === "paused" || snapshot.phase === "incident") {
+        this.stopRealtimeTestAutomation(runId);
+      }
+    } catch (error) {
+      runtime.automation.pause();
+      this.persistTestRuntime(runtime);
+      this.stopRealtimeTestAutomation(runId);
+      this.journal.append({ type: "test-run.realtime-error", competitionId: runtime.competitionId, data: { runId, message: error instanceof Error ? error.message : "unknown" } });
+    }
+  }
+
+  private applyAutomationEvent(runtime: TestRuntime, event: ScenarioDefinition["events"][number], settleAutomation = true): void {
     if (event.atMs > runtime.automationClock.now()) runtime.automationClock.advanceBy(event.atMs - runtime.automationClock.now());
     switch (event.type) {
       case "login": runtime.automation.observeConnection(event.playerId, true); break;
@@ -1325,7 +1516,7 @@ export class CompetitionService {
       case "fault": this.applyFault(runtime, event); break;
       default: break;
     }
-    this.settleTestAutomation(runtime);
+    if (settleAutomation) this.settleTestAutomation(runtime);
   }
 
   private applyFault(runtime: TestRuntime, input: { fault: string; playerId?: string; milliseconds?: number }): void {
@@ -1361,15 +1552,7 @@ export class CompetitionService {
         timeLimitMs: stage.timeLimitMs,
         minimumScoringPlace: stage.minimumScoringPlace
       })),
-      policy: {
-        announcementLeadMs: config.flow.announcementLeadMs,
-        readyBufferMs: config.flow.readyBufferMs,
-        reconnectStableMs: config.flow.reconnectStableMs,
-        preStartWaitLimitMs: config.flow.delayLimitMs,
-        intermissionMs: config.flow.intermissionMs,
-        protectionWindowMs: config.flow.protectionWindowMs,
-        groupDisconnectThreshold: config.flow.groupDisconnectThreshold
-      }
+      policy: automationPolicyFor(config)
     }, new SystemMonotonicClock());
     const commands = new CommandQueue(transport, 5_000, (record) => this.recordCommand(competitionId, record));
     return { competitionId, controller, engine: new CompetitionEngine(definition), commands, runtime: new WorkAutomationRuntime(controller, commands), ...(transport instanceof ManagedMockClient ? { client: transport } : {}), ...(mockClientVersion === undefined ? {} : { mockClientVersion }) };
@@ -1395,6 +1578,44 @@ export class CompetitionService {
     runtime.initialListTimer.unref?.();
     runtime.listTimer = setInterval(requestList, 30_000);
     runtime.listTimer.unref?.();
+  }
+
+  private startRealtimeWorkAutomation(runtime: WorkRuntime): void {
+    if (runtime.automationTimer) return;
+    runtime.automationTimer = setInterval(() => void this.tickRealtimeWorkAutomation(runtime), 500);
+    runtime.automationTimer.unref?.();
+  }
+
+  private stopRealtimeWorkAutomation(runtime: WorkRuntime): void {
+    if (!runtime.automationTimer) return;
+    clearInterval(runtime.automationTimer);
+    delete runtime.automationTimer;
+    delete runtime.automationDispatching;
+  }
+
+  private async tickRealtimeWorkAutomation(runtime: WorkRuntime): Promise<void> {
+    if (runtime.automationDispatching || this.workRuntimes.get(runtime.competitionId) !== runtime) return;
+    runtime.automationDispatching = true;
+    const before = runtime.controller.snapshot().stateVersion;
+    try {
+      runtime.controller.tick();
+      const records = await runtime.runtime.dispatch();
+      const snapshot = runtime.controller.snapshot();
+      this.saveWorkRuntimeSnapshot(runtime);
+      if (snapshot.stateVersion !== before || records.length > 0) {
+        this.journal.append({ type: "work.automation-progress", competitionId: runtime.competitionId, data: { phase: snapshot.phase } });
+      }
+      if (!snapshot.automationEnabled || snapshot.phase === "review" || snapshot.phase === "paused" || snapshot.phase === "incident") {
+        this.stopRealtimeWorkAutomation(runtime);
+      }
+    } catch (error) {
+      runtime.controller.pause();
+      this.saveWorkRuntimeSnapshot(runtime);
+      this.stopRealtimeWorkAutomation(runtime);
+      this.journal.append({ type: "work.automation-error", competitionId: runtime.competitionId, data: { message: error instanceof Error ? error.message : "unknown" } });
+    } finally {
+      runtime.automationDispatching = false;
+    }
   }
 
   private ingestWorkLine(runtime: WorkRuntime, line: string): void {

@@ -185,6 +185,45 @@ export function App() {
     let disposed = false;
     let socket: WebSocket | undefined;
     let reconnectTimer: number | undefined;
+    let refreshTimer: number | undefined;
+    let refreshRunning = false;
+    let refreshPending = false;
+    const runRealtimeRefresh = async () => {
+      if (refreshRunning) {
+        refreshPending = true;
+        return;
+      }
+      refreshRunning = true;
+      try {
+        const [records, nextSnapshot] = await Promise.all([
+          request<CompetitionRecordView[]>("/api/v1/competitions", session),
+          selectedId ? request<CompetitionSnapshot>(`/api/v1/competitions/${selectedId}/snapshot`, session) : Promise.resolve(undefined)
+        ]);
+        if (!disposed) {
+          setCompetitions(records);
+          if (nextSnapshot) setSnapshot(nextSnapshot);
+        }
+      } catch (error) {
+        if (!disposed) setMessage(error instanceof Error ? error.message : "实时快照刷新失败");
+      } finally {
+        refreshRunning = false;
+        if (refreshPending && !disposed) {
+          refreshPending = false;
+          scheduleRealtimeRefresh();
+        }
+      }
+    };
+    const scheduleRealtimeRefresh = () => {
+      if (refreshRunning) {
+        refreshPending = true;
+        return;
+      }
+      if (refreshTimer !== undefined) window.clearTimeout(refreshTimer);
+      refreshTimer = window.setTimeout(() => {
+        refreshTimer = undefined;
+        void runRealtimeRefresh();
+      }, 100);
+    };
     const connect = () => {
       const protocol = location.protocol === "https:" ? "wss:" : "ws:";
       socket = new WebSocket(`${protocol}//${location.host}/api/v1/ws?token=${encodeURIComponent(session.token)}&after=${lastSequence.current}`);
@@ -195,14 +234,7 @@ export function App() {
         if (disposed || typeof event.data !== "string") return;
         const update = JSON.parse(event.data) as JournalMessage;
         if (update.sequence !== undefined) lastSequence.current = Math.max(lastSequence.current, update.sequence);
-        if (update.type === "snapshot-required" || update.competitionId === selectedId) {
-          if (selectedId) {
-            void request<CompetitionSnapshot>(`/api/v1/competitions/${selectedId}/snapshot`, session)
-              .then(setSnapshot)
-              .catch((error: unknown) => setMessage(error instanceof Error ? error.message : "实时快照刷新失败"));
-          }
-        }
-        if (update.competitionId) void refreshCompetitions(session);
+        if (update.type === "snapshot-required" || update.competitionId) scheduleRealtimeRefresh();
       });
       socket.addEventListener("close", () => {
         if (disposed) return;
@@ -215,6 +247,7 @@ export function App() {
     return () => {
       disposed = true;
       if (reconnectTimer !== undefined) window.clearTimeout(reconnectTimer);
+      if (refreshTimer !== undefined) window.clearTimeout(refreshTimer);
       socket?.close();
     };
   }, [session, selectedId]);
@@ -468,7 +501,7 @@ export function App() {
               <div><span>轮次</span><strong>{stageTitle(snapshot.config, runtime?.currentStageId)}</strong></div>
               <div><span>本轮计划起跑（UTC+8）</span><strong>{formatUtc8DateTime(runtime?.plannedStageStartAt ?? snapshot.config.stages.find((stage) => stage.id === runtime?.currentStageId)?.plannedStartAt)}</strong></div>
               <div><span>自动化</span><strong>{runtime?.automationEnabled ? "启用" : "暂停"}</strong></div>
-              <div><span>下一 Ready</span><strong>{formatMs(runtime?.plannedReadyAtMs)}</strong></div>
+              <div><span>下一 Ready（UTC+8）</span><strong>{formatUtc8DateTime(runtime?.plannedReadyAt)}</strong></div>
             </section>
             <div className="tabs">
               {(["config", "console", "players", "scoreboard", "test", "archive"] as const).map((item) =>
@@ -849,18 +882,20 @@ function TestPanel({ snapshot, scenarios, scenarioDetail, loadScenario, createRu
       <div className="scenario-grid">{scenarios.map((scenario) => <button className={run?.scenario.id === scenario.id ? "scenario selected-card" : "scenario"} key={scenario.id} onClick={() => loadScenario(scenario.id)}>
         <strong>{scenario.name}</strong><span>{scenario.players} 名独立玩家 · 比赛流程沿用当前配置</span>
         <small>玩家类型：{scenario.playerProfiles.map(profileLabel).join("、")}</small>
+        <small>固定随机种子：{scenario.randomSeed}</small>
         <small>点击查看时间线</small>
       </button>)}</div>
       {scenarioDetail && <button disabled={!canWrite} onClick={() => createRun(scenarioDetail.id)}>创建测试运行</button>}
     </div>
     <div className="panel">
       <h2>裁判流程控制</h2>
+      <p><strong>虚拟时钟：{formatMs(run?.automation.virtualNowMs)}</strong> · {run?.automation.phase === "review" ? "已到比赛复核" : run?.automation.automationEnabled ? "1× 实时运行中" : "已暂停"}</p>
       <div className="button-row">
         <button disabled={!canWrite || !run} onClick={enableAutomation}>启用自动化</button>
         <button disabled={!canWrite || !run} onClick={() => advanceClock(15_000)}>+15 秒</button>
         <button disabled={!canWrite || !run} onClick={() => advanceClock(180_000)}>+3 分钟</button>
       </div>
-      <p className="muted">自动或手动 Go 一旦由裁判系统确认，测试玩家会自行完成、超时或触发违规，无需由场景替裁判发令。</p>
+      <p className="muted">启用自动化后按 1× 真实时间运行：15 秒 Ready 缓冲就是实际 15 秒，玩家也会在固定种子生成的各自时刻行动。上方按钮仅用于裁判主动快进演练；低手可能提前 DNF，也可能一直无动作到关卡时限。</p>
       <h3>故障注入</h3>
       <div className="button-row wrap">
         <button disabled={!canWrite || !run} onClick={() => injectFault("server-disconnect")}>服务器断线</button>
@@ -873,7 +908,7 @@ function TestPanel({ snapshot, scenarios, scenarioDetail, loadScenario, createRu
     <div className="panel wide">
       <h2>{scenarioDetail?.kind === "player-behavior" ? "玩家行为" : "高级回放时间线"}</h2>
       {scenarioDetail?.kind === "player-behavior"
-        ? <div className="behavior-grid">{scenarioDetail.players.map((player) => <div className="behavior-card" key={player.id}><strong>{player.displayName}</strong><span>{profileLabel(player.profile ?? "normal")}</span><small>{player.profile === "expert" ? "快速稳定完赛" : player.profile === "struggler" ? "通常超时或 DNF" : player.profile === "disruptor" ? "比赛中开启 cheat 并触发处置" : "按正常水平完赛"}</small></div>)}</div>
+        ? <div className="behavior-grid">{scenarioDetail.players.map((player) => <div className="behavior-card" key={player.id}><strong>{player.displayName}</strong><span>{profileLabel(player.profile ?? "normal")}</span><small>{player.profile === "expert" ? "较快完赛，具体用时由固定种子决定" : player.profile === "struggler" ? "可能提前 DNF，也可能等待关卡超时" : player.profile === "disruptor" ? "在固定种子决定的时刻开启 cheat" : "按普通区间随机完赛"}</small></div>)}</div>
         : <div className="timeline">{(scenarioDetail?.events ?? []).map((event, index) => <div className={run && index < run.nextEventIndex ? "timeline-row played" : "timeline-row"} key={event.sourceId}>
           <span>{formatMs(event.atMs)}</span><strong>{eventLabel(event)}</strong><small>{event.sourceId}</small>
         </div>)}</div>}

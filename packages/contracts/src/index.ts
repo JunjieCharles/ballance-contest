@@ -194,7 +194,9 @@ export interface RuntimeSnapshot {
   automationEnabled: boolean;
   currentStageId?: string;
   plannedReadyAtMs?: number;
+  plannedReadyAt?: string;
   plannedStageStartAt?: string;
+  virtualNowMs?: number;
   blockers: readonly { code: string; severity: "warning" | "critical"; suggestion: string; autoRecoverable: boolean; participantId?: string }[];
   waitingParticipants: readonly string[];
   attempts: readonly unknown[];
@@ -241,6 +243,7 @@ export interface TestScenarioSummary {
   id: string;
   name: string;
   kind: "player-behavior" | "scripted-replay";
+  randomSeed: number;
   players: number;
   stages: number;
   events: number;
@@ -447,6 +450,7 @@ export type ScenarioEvent = Static<typeof ScenarioEventSchema>;
 export const ScenarioDefinitionSchema = Type.Object({
   schemaVersion: Type.Literal(1),
   kind: Type.Optional(Type.Union([Type.Literal("player-behavior"), Type.Literal("scripted-replay")])),
+  randomSeed: Type.Optional(Type.Integer({ minimum: 0, maximum: 2_147_483_647 })),
   id: Type.String({ minLength: 1 }),
   name: Type.String({ minLength: 1 }),
   year: Type.Integer({ minimum: 2000, maximum: 9999 }),

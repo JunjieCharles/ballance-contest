@@ -2,10 +2,10 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { CompetitionConfig } from "@ballance/contracts";
-import type { CompetitionController, CompetitionEngine } from "@ballance/core";
+import { CompetitionController, type CompetitionEngine } from "@ballance/core";
 import { afterEach, describe, expect, it } from "vitest";
 import type { CommandTransport } from "./mock-client.js";
-import { CompetitionService } from "./competition-service.js";
+import { CompetitionService, seededBehaviorRandom } from "./competition-service.js";
 import { openDatabase, type OpenedDatabase } from "./storage/database.js";
 
 interface WorkRuntimeHarness {
@@ -14,6 +14,45 @@ interface WorkRuntimeHarness {
 }
 
 describe("CompetitionService dynamic participants", () => {
+  it("uses a fixed seed for varied but reproducible player behavior", () => {
+    const first = seededBehaviorRandom(20_260_631, "sr-1", 1, "expert", "finish-time");
+    expect(seededBehaviorRandom(20_260_631, "sr-1", 1, "expert", "finish-time")).toBe(first);
+    expect(seededBehaviorRandom(20_260_632, "sr-1", 1, "expert", "finish-time")).not.toBe(first);
+    expect(seededBehaviorRandom(20_260_631, "sr-1", 1, "normal", "finish-time")).not.toBe(first);
+  });
+
+  it("keeps work automation ticking on the same one-timescale controller", async () => {
+    const service = new CompetitionService();
+    const record = service.create({ name: "Realtime work", mode: "work", idempotencyKey: "realtime-work" });
+    const controller = new CompetitionController({
+      competitionId: record.id,
+      participants: ["p1"],
+      stages: [{ id: "sr-1", map: "1", mode: "sr", timeLimitMs: 60_000, minimumScoringPlace: 1 }],
+      policy: { announcementLeadMs: 0, readyBufferMs: 10 }
+    }, { now: () => performance.now() });
+    controller.observeConnection("p1", true);
+    const runtime = {
+      competitionId: record.id,
+      controller,
+      runtime: {
+        dispatch: async () => {
+          const actions = controller.drainActions();
+          for (const action of actions) controller.acknowledgeAction(action.id, "acknowledged");
+          return actions;
+        }
+      }
+    };
+    const internals = service as unknown as {
+      workRuntimes: Map<string, typeof runtime>;
+      startRealtimeWorkAutomation(candidate: typeof runtime): void;
+    };
+    internals.workRuntimes.set(record.id, runtime);
+    controller.enable(performance.now());
+    internals.startRealtimeWorkAutomation(runtime);
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 1_200));
+    expect(controller.snapshot().phase).toBe("running");
+    service.close();
+  });
   let dataRoot = "";
   let database: OpenedDatabase | undefined;
 

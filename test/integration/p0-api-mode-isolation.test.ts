@@ -111,9 +111,13 @@ describe("P0 API mode isolation and test run regression", () => {
       headers: auth(token),
       payload: { milliseconds: 15_000 }
     });
-    const runningSnapshot = running.json<{ data: { phase: string; attempts: Array<{ attemptNumber: number; results: unknown[] }> } }>().data;
+    const runningSnapshot = running.json<{ data: { phase: string; attempts: Array<{ attemptNumber: number; results: unknown[] }>; actions: Array<{ message?: string }> } }>().data;
     expect(runningSnapshot).toMatchObject({ phase: "tail-intake", attempts: [expect.objectContaining({ attemptNumber: 1 })] });
     expect(runningSnapshot.attempts[0]?.results).toHaveLength(5);
+    expect(runningSnapshot.actions.some((action) => action.message === "下一轮 Ready 计划在 3 分钟后执行")).toBe(true);
+    expect(runningSnapshot.actions.every((action) => !action.message?.includes("195000"))).toBe(true);
+    const scheduledSnapshot = await app.inject({ method: "GET", url: `/api/v1/competitions/${competitionId}/snapshot`, headers: auth(token) });
+    expect(scheduledSnapshot.json()).toMatchObject({ data: { runtime: { plannedReadyAt: expect.stringMatching(/Z$/) } } });
     const fault = await app.inject({
       method: "POST",
       url: `/api/v1/competitions/${competitionId}/test-runs/${runId}/faults`,
@@ -139,8 +143,12 @@ describe("P0 API mode isolation and test run regression", () => {
     });
     const competitionId = created.json<{ data: { id: string } }>().data.id;
     const scenarios = await app.inject({ method: "GET", url: "/api/v1/test-scenarios", headers: auth(token) });
+    const scenarioData = scenarios.json<{ data: Array<{ id: string; players: number; randomSeed: number; playerProfiles: string[] }> }>().data;
+    expect(scenarioData.every((scenario) => scenario.players >= 15)).toBe(true);
+    expect(new Set(scenarioData.map((scenario) => scenario.randomSeed)).size).toBe(scenarioData.length);
     expect(scenarios.json()).toMatchObject({ data: expect.arrayContaining([expect.objectContaining({
       id: "independent-player-sandbox",
+      randomSeed: 20_260_631,
       playerProfiles: ["expert", "normal", "struggler", "disruptor"]
     })]) });
     const run = await app.inject({
@@ -156,7 +164,36 @@ describe("P0 API mode isolation and test run regression", () => {
       headers: auth(token),
       payload: { runId, readyInMs: 0 }
     });
-    expect(automaticStart.json()).toMatchObject({ data: { phase: "tail-intake", attempts: [expect.objectContaining({ results: expect.any(Array) })] } });
+    expect(automaticStart.json()).toMatchObject({ data: { phase: "ready", attempts: [] } });
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 650));
+    const realtimeSnapshot = await app.inject({ method: "GET", url: `/api/v1/competitions/${competitionId}/snapshot`, headers: auth(token) });
+    expect(realtimeSnapshot.json()).toMatchObject({ data: { runtime: { phase: "ready", virtualNowMs: expect.any(Number) } } });
+    const realtimeNow = realtimeSnapshot.json<{ data: { runtime: { virtualNowMs: number } } }>().data.runtime.virtualNowMs;
+    expect(realtimeNow).toBeGreaterThanOrEqual(400);
+    expect(realtimeNow).toBeLessThan(5_000);
+
+    type AutomationData = { phase: string; attempts: Array<{ results: Array<{ status: string; reason?: string }> }> };
+    let automaticData = automaticStart.json<{ data: AutomationData }>().data;
+    for (let stage = 1; stage <= 13; stage += 1) {
+      await app.inject({
+        method: "POST",
+        url: `/api/v1/competitions/${competitionId}/test-runs/${runId}/automation/advance`,
+        headers: auth(token),
+        payload: { milliseconds: 15_000 }
+      });
+      const advanced = await app.inject({
+        method: "POST",
+        url: `/api/v1/competitions/${competitionId}/test-runs/${runId}/automation/advance`,
+        headers: auth(token),
+        payload: { milliseconds: stage === 13 ? 900_000 : 600_000 }
+      });
+      automaticData = advanced.json<{ data: AutomationData }>().data;
+    }
+    expect(automaticData.phase).toBe("review");
+    expect(automaticData.attempts).toHaveLength(13);
+    expect(automaticData.attempts.every((attempt) => attempt.results.length === 16)).toBe(true);
+    expect(automaticData.attempts.some((attempt) => attempt.results.some((result) => result.status === "dnf" && result.reason === "time-limit"))).toBe(true);
+    expect(automaticData.attempts.some((attempt) => attempt.results.some((result) => result.status === "dnf" && result.reason === "gave-up"))).toBe(true);
     await app.inject({ method: "POST", url: `/api/v1/competitions/${competitionId}/test-runs/${runId}/reset`, headers: auth(token), payload: {} });
     const ready = await app.inject({
       method: "POST",
@@ -178,10 +215,16 @@ describe("P0 API mode isolation and test run regression", () => {
       }
     });
     expect(manualGo.statusCode).toBe(200);
+    await app.inject({
+      method: "POST",
+      url: `/api/v1/competitions/${competitionId}/test-runs/${runId}/automation/advance`,
+      headers: auth(token),
+      payload: { milliseconds: 240_000 }
+    });
     const snapshot = await app.inject({ method: "GET", url: `/api/v1/competitions/${competitionId}/snapshot`, headers: auth(token) });
     const snapshotData = snapshot.json<{ data: { runtime: { phase: string }; currentScoreboard: unknown[]; competition: { stateVersion: number } } }>().data;
-    expect(snapshotData.runtime.phase).toBe("tail-intake");
-    expect(snapshotData.currentScoreboard).toHaveLength(4);
+    expect(snapshotData.runtime.phase).toBe("running");
+    expect(snapshotData.currentScoreboard).toHaveLength(16);
 
     const logs = await app.inject({ method: "GET", url: `/api/v1/competitions/${competitionId}/logs/raw`, headers: auth(token) });
     expect(logs.json()).toMatchObject({ data: expect.arrayContaining([

@@ -67,6 +67,7 @@ describe("CompetitionController", () => {
       expect(controller.recordResult({ stageId: "s1", playerId, status: "finished", sourceId: `finish-${playerId}` })).toBe("accepted");
     }
     expect(controller.snapshot()).toMatchObject({ phase: "tail-intake", plannedReadyAtMs: 4_000 });
+    expect(controller.snapshot().actions.at(-1)?.message).toBe("下一轮 Ready 计划在 3 秒后执行");
 
     clock.set(3_999);
     expect(controller.recordResult({ stageId: "s1", playerId: "p4", status: "finished", sourceId: "finish-p4" })).toBe("accepted");

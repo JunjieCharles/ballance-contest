@@ -18,6 +18,33 @@ const acquireControl = async (page: Page): Promise<void> => {
   await expect(page.getByText("已取得控制权")).toBeVisible();
 };
 
+const accelerateActiveTestRun = async (page: Page, competitionName: string): Promise<void> => {
+  await page.evaluate(async (name) => {
+    const stored = sessionStorage.getItem("ballance-console-session");
+    if (!stored) throw new Error("missing local session");
+    const session = JSON.parse(stored) as { token: string };
+    const headers = { authorization: `Bearer ${session.token}`, "content-type": "application/json" };
+    const competitionsResponse = await fetch("/api/v1/competitions", { headers });
+    const competitions = await competitionsResponse.json() as { data: Array<{ id: string; name: string }> };
+    const competitionId = competitions.data.find((competition) => competition.name === name)?.id;
+    if (!competitionId) throw new Error("missing competition");
+    const snapshotResponse = await fetch(`/api/v1/competitions/${competitionId}/snapshot`, { headers });
+    const snapshot = await snapshotResponse.json() as { data: { testRun?: { runId: string } } };
+    const runId = snapshot.data.testRun?.runId;
+    if (!runId) throw new Error("missing test run");
+    for (let stage = 1; stage <= 13; stage += 1) {
+      for (const milliseconds of [15_000, stage === 13 ? 900_000 : 600_000]) {
+        const response = await fetch(`/api/v1/competitions/${competitionId}/test-runs/${runId}/automation/advance`, {
+          method: "POST",
+          headers,
+          body: JSON.stringify({ milliseconds })
+        });
+        if (!response.ok) throw new Error(`advance failed ${response.status}`);
+      }
+    }
+  }, competitionName);
+};
+
 test("opens the authenticated two-mode console without external requests", async ({ page }) => {
   const externalRequests: string[] = [];
   page.on("request", (request) => {
@@ -80,9 +107,11 @@ test("keeps the current competition selected and publishes without preregistrati
 
 test("creates a visual test run, plays the scenario, exports, and keeps work mode isolated", async ({ page }) => {
   const externalRequests: string[] = [];
+  let snapshotRequests = 0;
   page.on("request", (request) => {
     const url = new URL(request.url());
     if (url.hostname !== "127.0.0.1") externalRequests.push(request.url());
+    if (url.pathname.endsWith("/snapshot")) snapshotRequests += 1;
   });
 
   await page.goto("/#token=e2e-bootstrap-token");
@@ -105,13 +134,16 @@ test("creates a visual test run, plays the scenario, exports, and keeps work mod
   await expect(page.getByText("场景只定义玩家的行为模型")).toBeVisible();
   await page.getByRole("button", { name: "创建测试运行" }).click();
   await page.getByRole("button", { name: "启用自动化" }).click();
-  await expect(page.getByText("阶段").locator("..")).toContainText("成绩接收中");
+  await expect(page.getByText("阶段").locator("..")).toContainText("Ready");
+  await expect(page.getByText(/1× 实时运行中/)).toBeVisible();
+  await accelerateActiveTestRun(page, "E2E 测试模式");
+  await expect(page.getByText("阶段").locator("..")).toContainText("比赛复核");
   await expect(page.getByText("本轮计划起跑（UTC+8）").locator("..")).not.toContainText("未设置");
 
   await page.getByRole("button", { name: "展开" }).click();
   await expect(page.locator(".raw-log-body")).toContainText("游戏高手");
-  await expect(page.locator(".raw-log-body")).toContainText("did not finish Level 01");
-  await expect(page.locator(".raw-log-body")).toContainText("Level 01 - Go!");
+  await expect(page.locator(".raw-log-body")).toContainText("did not finish Level 13");
+  await expect(page.locator(".raw-log-body")).toContainText("Level 13 - Go!");
 
   const logWindow = page.locator(".raw-log-window");
   const logTitle = page.locator(".raw-log-title");
@@ -129,7 +161,7 @@ test("creates a visual test run, plays the scenario, exports, and keeps work mod
   await page.getByRole("button", { name: "最小化" }).click();
 
   await page.getByRole("button", { name: "成绩", exact: true }).click();
-  await expect(page.getByRole("cell", { name: "游戏高手" })).toBeVisible();
+  await expect(page.getByRole("cell", { name: "游戏高手", exact: true })).toBeVisible();
   await page.getByTitle("修改 游戏高手 的 SR 1 名次").click();
   await page.getByLabel("expert SR 1 新名次").fill("2");
   page.once("dialog", (dialog) => dialog.accept());
@@ -148,5 +180,6 @@ test("creates a visual test run, plays the scenario, exports, and keeps work mod
   await expect(page.locator(".watermark")).toHaveCount(0);
   await page.getByRole("button", { name: "测试", exact: true }).click();
   await expect(page.getByText("工作模式不提供测试运行控制。")).toBeVisible();
+  expect(snapshotRequests).toBeLessThan(20);
   expect(externalRequests).toEqual([]);
 });

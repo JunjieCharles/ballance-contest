@@ -45,6 +45,14 @@ export interface AutomationConfiguration {
   confirmationSecret?: string;
 }
 
+const formatDelay = (milliseconds: number): string => {
+  const totalSeconds = Math.max(0, Math.round(milliseconds / 1_000));
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  if (minutes === 0) return `${seconds} 秒`;
+  return seconds === 0 ? `${minutes} 分钟` : `${minutes} 分 ${seconds} 秒`;
+};
+
 export type AutomationActionKind = "announcement" | "ready" | "cheat-off" | "go" | "force-next-restart";
 
 export interface AutomationAction {
@@ -607,7 +615,7 @@ export class CompetitionController {
       this.nextStagePending = true;
       this.plannedReadyAtMs = this.clock.now() + this.policy.intermissionMs;
       this.phase = "tail-intake";
-      this.queueAction("announcement", `下一轮 Ready 计划于 ${this.plannedReadyAtMs} 执行`);
+      this.queueAction("announcement", `下一轮 Ready 计划在 ${formatDelay(this.policy.intermissionMs)}后执行`);
     }
   }
 
