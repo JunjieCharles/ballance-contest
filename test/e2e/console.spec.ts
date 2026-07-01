@@ -76,17 +76,16 @@ test("edits per-stage scoring and replaces the stage draft through inline confir
   await createCompetition(page, name, "test");
   await expect(page.getByText("配置完整，可以发布。")).toBeVisible();
   await page.getByRole("button", { name: "大型赛事" }).click();
-  let version = await selectedCompetitionVersion(page);
-  await page.getByRole("button", { name: "保存计分方案并应用到全部关卡" }).click();
-  await expect(page.locator(".competition-list button.selected")).toContainText(`v${version + 1}`);
   await expect(page.getByLabel("第 1 名计分")).toHaveValue("30");
 
-  version += 1;
+  await page.getByLabel("第 1 名计分").fill("31");
+  await page.getByLabel("第 1 名计分").blur();
+  await expect(page.getByLabel("第 1 名计分")).toHaveValue("31");
+
   await page.getByRole("button", { name: "HS1–13 预设" }).click();
   const presetConfirmation = page.getByText("用 HS 1–13 整体替换当前关卡草稿。").locator("..");
   await expect(presetConfirmation).toBeVisible();
   await presetConfirmation.getByRole("button", { name: "确认" }).click();
-  await expect(page.locator(".competition-list button.selected")).toContainText(`v${version + 1}`);
   await expect(page.locator(".stage-editor")).toHaveCount(13);
   await expect(page.locator(".stage-editor").nth(11).getByLabel("时限（分钟）")).toHaveValue("15");
   await expect(page.locator(".stage-editor").nth(12).getByLabel("时限（分钟）")).toHaveValue("15");
@@ -96,9 +95,9 @@ test("edits per-stage scoring and replaces the stage draft through inline confir
   await firstStage.getByLabel("时限（分钟）").fill("12");
   await firstStage.getByLabel("单关计分").fill("50,30,20");
   await firstStage.getByLabel("单关计分").blur();
-  version += 1;
+  await expect(page.getByText("请先保存关卡列表")).toBeVisible();
+  await expect(page.getByRole("button", { name: "发布比赛" })).toBeDisabled();
   await page.getByRole("button", { name: "保存关卡列表" }).click();
-  await expect(page.locator(".competition-list button.selected")).toContainText(`v${version + 1}`);
 
   await page.getByRole("button", { name: "发布比赛" }).click();
   await expect(page.locator(".competition-list button.selected")).toContainText("published");
@@ -156,12 +155,35 @@ test("runs the 20-player sandbox from the console and edits a score without losi
   const secondEditor = page.locator(".score-cell-editor").first();
   await secondEditor.getByLabel("其他玩家是否顺延").uncheck();
   await secondEditor.getByRole("button", { name: "设为 DNF" }).click();
-  const dnfConfirmation = secondEditor.getByRole("group", { name: "设为 DNF确认" });
+  const dnfConfirmation = secondEditor.locator(".inline-confirm");
   await expect(dnfConfirmation).toContainText("不会顺延其他玩家");
   await dnfConfirmation.getByRole("button", { name: "确认" }).click();
   await expect(page.locator(".scoreboard tbody tr")).toHaveCount(rowsBefore);
   expect(dialogOpened).toBe(false);
   expect(externalRequests).toEqual([]);
+});
+
+test("resizes the raw client log window from the top-left handle", async ({ page }, testInfo) => {
+  await page.goto("/#token=e2e-bootstrap-token");
+  await expect(page.getByText(/已取得控制权|只读标签页/)).toBeVisible();
+  await acquireControl(page);
+  const name = `E2E 日志浮窗 ${testInfo.project.name}`;
+  await createCompetition(page, name, "test");
+  const rawLog = page.getByRole("complementary", { name: "原始客户端日志" });
+  const handle = page.getByRole("button", { name: "拖动左上角缩放原始客户端日志" });
+  const before = await rawLog.boundingBox();
+  const handleBox = await handle.boundingBox();
+  expect(before).not.toBeNull();
+  expect(handleBox).not.toBeNull();
+  if (!before || !handleBox) return;
+  await page.mouse.move(handleBox.x + handleBox.width / 2, handleBox.y + handleBox.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(handleBox.x + 30, handleBox.y + 20);
+  await page.mouse.up();
+  const after = await rawLog.boundingBox();
+  expect(after).not.toBeNull();
+  expect(after?.width).toBeLessThan(before.width);
+  expect(after?.height).toBeLessThan(before.height);
 });
 
 test("shows disabled reasons, shared scheduling controls and inline end confirmation", async ({ page }, testInfo) => {

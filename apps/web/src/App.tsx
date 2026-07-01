@@ -613,30 +613,51 @@ function ConfigPanel({ snapshot, canWrite, saveDraft, publish }: {
   const [contestType, setContestType] = useState(config.scoring.contestType);
   const [points, setPoints] = useState<number[]>([...config.scoring.points]);
   const [stages, setStages] = useState<StageConfig[]>(config.stages.map((stage) => ({ ...stage, scoring: [...stage.scoring] })));
+  const [stagesDirty, setStagesDirty] = useState(false);
   const lastScoringPlace = minimumScoringPlaceFor(points);
   const draft = { ...config, contestType, scoring: { ...config.scoring, contestType, points, minimumScoringPlace: lastScoringPlace }, stages };
-  const publishIssues = validateCompetitionConfigForPublish(draft);
+  const publishIssues = [...validateCompetitionConfigForPublish(draft), ...(stagesDirty ? ["请先保存关卡列表"] : [])];
   const selectScoringPreset = (type: CompetitionConfig["contestType"]) => {
     setContestType(type);
     if (type === "small") setPoints([...SMALL_SCORING]);
     if (type === "large") setPoints([...LARGE_SCORING]);
+    const nextPoints = type === "small" ? [...SMALL_SCORING] : [...LARGE_SCORING];
+    void saveDraft({ contestType: type, scoring: { ...config.scoring, contestType: type, points: nextPoints, minimumScoringPlace: minimumScoringPlaceFor(nextPoints) }, stages: stages.map((stage) => ({ ...stage, scoring: [...nextPoints], minimumScoringPlace: minimumScoringPlaceFor(nextPoints) })) });
   };
-  const replaceStages = async (mode: "SR" | "HS") => {
-    const replacement = mode === "SR" ? defaultSrStages(points, lastScoringPlace) : defaultHsStages(points, lastScoringPlace);
-    await saveDraft({ stages: replacement });
+  const saveScoring = (nextPoints: number[], nextContestType: CompetitionConfig["contestType"] = contestType) => void saveDraft({ contestType: nextContestType, scoring: { ...config.scoring, contestType: nextContestType, points: nextPoints, minimumScoringPlace: minimumScoringPlaceFor(nextPoints) }, stages: stages.map((stage) => ({ ...stage, scoring: [...nextPoints], minimumScoringPlace: minimumScoringPlaceFor(nextPoints) })) });
+  const replaceStages = (mode: "SR" | "HS") => {
+    const replacement = (mode === "SR" ? defaultSrStages(points, lastScoringPlace) : defaultHsStages(points, lastScoringPlace)) as StageConfig[];
+    setStages(replacement);
+    setStagesDirty(false);
+    void saveDraft({ stages: replacement });
   };
-  const updateStage = (id: string, patch: Partial<StageConfig>) => setStages((current) => current.map((stage) => stage.id === id ? { ...stage, ...patch } : stage));
+  const saveStages = async (nextStages: StageConfig[]) => {
+    await saveDraft({ stages: nextStages });
+    setStagesDirty(false);
+  };
+  const updateStage = (id: string, patch: Partial<StageConfig>) => {
+    setStages((current) => current.map((stage) => stage.id === id ? { ...stage, ...patch } : stage));
+    setStagesDirty(true);
+  };
+  const persistStage = (id: string, patch: Partial<StageConfig>) => {
+    setStages((current) => current.map((stage) => stage.id === id ? { ...stage, ...patch } : stage));
+    setStagesDirty(true);
+  };
   const reorder = (id: string, delta: number) => setStages((current) => {
     const index = current.findIndex((stage) => stage.id === id);
     const target = index + delta;
     if (index < 0 || target < 0 || target >= current.length) return current;
     const copy = [...current];
     [copy[index], copy[target]] = [copy[target] as StageConfig, copy[index] as StageConfig];
-    return copy.map((stage, order) => ({ ...stage, order: order + 1 }));
+    const nextStages = copy.map((stage, order) => ({ ...stage, order: order + 1 }));
+    setStagesDirty(true);
+    return nextStages;
   });
   const addStage = () => {
     const order = stages.length + 1;
-    setStages([...stages, { id: `custom-${crypto.randomUUID()}`, order, label: `SR ${order}`, level: Math.min(13, order), mode: "SR", timeLimitMs: order === 13 ? 900_000 : 600_000, scoring: [...points], minimumScoringPlace: lastScoringPlace }]);
+    const nextStages: StageConfig[] = [...stages, { id: `custom-${crypto.randomUUID()}`, order, label: `SR ${order}`, level: Math.min(13, order), mode: "SR", timeLimitMs: order === 13 ? 900_000 : 600_000, scoring: [...points], minimumScoringPlace: lastScoringPlace }];
+    setStages(nextStages);
+    setStagesDirty(true);
   };
   return <section className="grid two">
     <div className="panel"><h2>基本信息</h2>
@@ -648,34 +669,35 @@ function ConfigPanel({ snapshot, canWrite, saveDraft, publish }: {
       <button disabled={!editable || publishIssues.length > 0} onClick={() => void publish()}>发布比赛</button>
     </div>
     <div className="panel"><h2>轮次与计分</h2>
-      <div className="scoring-presets"><button className={contestType === "small" ? "selected-preset" : "ghost"} disabled={!editable} onClick={() => selectScoringPreset("small")}>小型赛事</button><button className={contestType === "large" ? "selected-preset" : "ghost"} disabled={!editable} onClick={() => selectScoringPreset("large")}>大型赛事</button><button className={contestType === "custom" ? "selected-preset" : "ghost"} disabled={!editable} onClick={() => setContestType("custom")}>自定义</button></div>
-      <div className="points-editor">{points.map((point, index) => <label key={index}>第 {index + 1} 名计分<input aria-label={`第 ${index + 1} 名计分`} type="number" value={point} disabled={!editable || contestType !== "custom"} onChange={(event) => setPoints(points.map((value, pointIndex) => pointIndex === index ? Number(event.target.value) : value))} /></label>)}</div>
-      {contestType === "custom" && <div className="button-row"><button className="ghost" disabled={!editable} onClick={() => setPoints([...points, 0])}>增加名次</button><button className="ghost" disabled={!editable || points.length <= 1} onClick={() => setPoints(points.slice(0, -1))}>删除末位</button></div>}
+      <div className="preset-summary"><strong>当前预设：{contestType === "small" ? "小型赛事" : contestType === "large" ? "大型赛事" : "自定义"}</strong><span>点击预设会覆盖当前计分，之后仍可直接修改每个名次。</span></div>
+      <div className="scoring-presets"><button className={contestType === "small" ? "selected-preset" : "ghost"} disabled={!editable} onClick={() => selectScoringPreset("small")}>小型赛事</button><button className={contestType === "large" ? "selected-preset" : "ghost"} disabled={!editable} onClick={() => selectScoringPreset("large")}>大型赛事</button></div>
+      <div className="points-editor">{points.map((point, index) => <label key={index}>第 {index + 1} 名计分<input aria-label={`第 ${index + 1} 名计分`} type="number" value={point} disabled={!editable} onChange={(event) => { const next = points.map((value, pointIndex) => pointIndex === index ? Number(event.target.value) : value); setPoints(next); setContestType("custom"); }} onBlur={() => saveScoring(points, "custom")} /></label>)}</div>
+      <div className="button-row"><button className="ghost" disabled={!editable} onClick={() => { const next = [...points, 0]; setPoints(next); setContestType("custom"); saveScoring(next, "custom"); }}>增加名次</button><button className="ghost" disabled={!editable || points.length <= 1} onClick={() => { const next = points.slice(0, -1); setPoints(next); setContestType("custom"); saveScoring(next, "custom"); }}>删除末位</button></div>
       <div className="scoring-summary"><strong>最低计分名次：第 {lastScoringPlace} 名</strong><span>第 {lastScoringPlace + 1} 名起得分为 0</span></div>
-      <button disabled={!editable} onClick={() => void saveDraft({ contestType, scoring: draft.scoring, stages: stages.map((stage) => ({ ...stage, scoring: [...points], minimumScoringPlace: lastScoringPlace })) })}>保存计分方案并应用到全部关卡</button>
-      <p className="muted">此操作会覆盖每关的自定义计分规则。</p>
+      <p className="muted">预设会覆盖当前计分，并同步应用到全部关卡；你仍然可以直接修改每个名次。</p>
     </div>
     <div className="panel wide"><div className="panel-title-row"><div><h2>单关配置</h2><p className="muted">预设会整体替换草稿；自定义模式保留当前列表。</p></div><div className="button-row compact">
       <LocalConfirmButton label="SR1–13 预设" summary="用 SR 1–13 整体替换当前关卡草稿。SR13 默认 15 分钟，其余 10 分钟。" disabled={!editable} onConfirm={() => replaceStages("SR")} />
       <LocalConfirmButton label="HS1–13 预设" summary="用 HS 1–13 整体替换当前关卡草稿。HS12/13 默认 15 分钟，其余 10 分钟。" disabled={!editable} onConfirm={() => replaceStages("HS")} />
-      <button className="ghost" disabled={!editable} title="保留当前关卡列表并继续逐关编辑">自定义（保留当前）</button>
       <button className="ghost" disabled={!editable} onClick={addStage}>添加关卡</button>
-      <button disabled={!editable || stages.length === 0} onClick={() => void saveDraft({ stages })}>保存关卡列表</button>
+      <button disabled={!editable || !stagesDirty || stages.length === 0} onClick={() => void saveStages(stages)}>保存关卡列表</button>
     </div></div>
       <div className="stage-editor-list">{stages.map((stage, index) => <div className="stage-editor" key={stage.id}>
         <div className="stage-order"><strong>#{index + 1}</strong><button className="ghost" disabled={!editable || index === 0} onClick={() => reorder(stage.id, -1)}>↑</button><button className="ghost" disabled={!editable || index === stages.length - 1} onClick={() => reorder(stage.id, 1)}>↓</button></div>
-        <label>模式<select value={stage.mode} disabled={!editable} onChange={(event) => updateStage(stage.id, { mode: event.target.value as "SR" | "HS" })}><option>SR</option><option>HS</option></select></label>
-        <label>关卡号<input type="number" min="0" max="13" value={stage.level} disabled={!editable} onChange={(event) => updateStage(stage.id, { level: Number(event.target.value) })} /></label>
-        <label>名称<input value={stage.label} disabled={!editable} onChange={(event) => updateStage(stage.id, { label: event.target.value })} /></label>
-        <label>时限（分钟）<input type="number" min="1" value={Math.round(stage.timeLimitMs / 60_000)} disabled={!editable} onChange={(event) => updateStage(stage.id, { timeLimitMs: Number(event.target.value) * 60_000 })} /></label>
+        <label>模式<select value={stage.mode} disabled={!editable} onChange={(event) => persistStage(stage.id, { mode: event.target.value as "SR" | "HS" })}><option>SR</option><option>HS</option></select></label>
+        <label>关卡号<input type="number" min="0" max="13" value={stage.level} disabled={!editable} onChange={(event) => updateStage(stage.id, { level: Number(event.target.value) })} onBlur={(event) => persistStage(stage.id, { level: Number(event.target.value) })} /></label>
+        <label>名称<input value={stage.label} disabled={!editable} onChange={(event) => updateStage(stage.id, { label: event.target.value })} onBlur={(event) => persistStage(stage.id, { label: event.target.value })} /></label>
+        <label>时限（分钟）<input type="number" min="1" value={Math.round(stage.timeLimitMs / 60_000)} disabled={!editable} onChange={(event) => updateStage(stage.id, { timeLimitMs: Number(event.target.value) * 60_000 })} onBlur={(event) => persistStage(stage.id, { timeLimitMs: Number(event.target.value) * 60_000 })} /></label>
         <label className="stage-scoring">单关计分<input defaultValue={stage.scoring.join(",")} disabled={!editable} onBlur={(event) => {
           const scoring = event.target.value.split(",").map((value) => Number(value.trim())).filter(Number.isFinite);
-          updateStage(stage.id, { scoring, minimumScoringPlace: minimumScoringPlaceFor(scoring) });
+          persistStage(stage.id, { scoring, minimumScoringPlace: minimumScoringPlaceFor(scoring) });
         }} /></label>
         <div className="button-row compact"><button className="ghost" disabled={!editable} onClick={() => {
           const copy = { ...stage, id: `copy-${crypto.randomUUID()}`, label: `${stage.label} 副本`, scoring: [...stage.scoring] };
-          setStages([...stages.slice(0, index + 1), copy, ...stages.slice(index + 1)].map((item, order) => ({ ...item, order: order + 1 })));
-        }}>复制</button><button className="danger" disabled={!editable} onClick={() => setStages(stages.filter((candidate) => candidate.id !== stage.id).map((item, order) => ({ ...item, order: order + 1 })))}>删除</button></div>
+          const nextStages = [...stages.slice(0, index + 1), copy, ...stages.slice(index + 1)].map((item, order) => ({ ...item, order: order + 1 }));
+          setStages(nextStages);
+          setStagesDirty(true);
+        }}>复制</button><button className="danger" disabled={!editable} onClick={() => { const nextStages = stages.filter((candidate) => candidate.id !== stage.id).map((item, order) => ({ ...item, order: order + 1 })); setStages(nextStages); setStagesDirty(true); }}>删除</button></div>
       </div>)}</div>
     </div>
   </section>;
@@ -788,19 +810,43 @@ function ArchivePanel({ snapshot, canWrite, versionKey, requestConfirmation, arc
 function RawLogWindow({ logs, minimized, setMinimized, refresh, mode }: { logs: readonly RawClientLogLine[]; minimized: boolean; setMinimized(value: boolean): void; refresh(): void; mode: CompetitionMode }) {
   const bodyRef = useRef<HTMLDivElement>(null);
   const dragRef = useRef<{ pointerId: number; offsetX: number; offsetY: number } | null>(null);
-  const [position, setPosition] = useState<{ x: number; y: number } | null>(null);
+  const resizeRef = useRef<{ pointerId: number; startX: number; startY: number; startLeft: number; startTop: number; startWidth: number; startHeight: number } | null>(null);
+  const [box, setBox] = useState<{ x: number; y: number; width: number; height: number } | null>(null);
   useEffect(() => { if (!minimized) bodyRef.current?.scrollTo({ top: bodyRef.current.scrollHeight }); }, [logs, minimized]);
-  return <aside className={minimized ? "raw-log-window minimized" : "raw-log-window"} aria-label="原始客户端日志" style={position ? { left: position.x, top: position.y, right: "auto", bottom: "auto" } : undefined}>
+  return <aside className={minimized ? "raw-log-window minimized" : "raw-log-window"} aria-label="原始客户端日志" style={box ? { left: box.x, top: box.y, width: box.width, height: box.height, right: "auto", bottom: "auto" } : undefined}>
+    <button className="raw-log-resize-handle" aria-label="拖动左上角缩放原始客户端日志" onPointerDown={(event) => {
+      const bounds = event.currentTarget.parentElement?.getBoundingClientRect();
+      if (!bounds) return;
+      resizeRef.current = { pointerId: event.pointerId, startX: event.clientX, startY: event.clientY, startLeft: bounds.left, startTop: bounds.top, startWidth: bounds.width, startHeight: bounds.height };
+      setBox({ x: bounds.left, y: bounds.top, width: bounds.width, height: bounds.height });
+      event.currentTarget.setPointerCapture(event.pointerId); event.preventDefault(); event.stopPropagation();
+    }} onPointerMove={(event) => {
+      const drag = resizeRef.current;
+      if (!drag || drag.pointerId !== event.pointerId) return;
+      const minWidth = 420;
+      const minHeight = 220;
+      const right = drag.startLeft + drag.startWidth;
+      const bottom = drag.startTop + drag.startHeight;
+      const nextLeft = Math.max(0, Math.min(right - minWidth, drag.startLeft + (event.clientX - drag.startX)));
+      const nextTop = Math.max(0, Math.min(bottom - minHeight, drag.startTop + (event.clientY - drag.startY)));
+      const nextWidth = Math.max(minWidth, Math.min(window.innerWidth - nextLeft, right - nextLeft));
+      const nextHeight = Math.max(minHeight, Math.min(window.innerHeight - nextTop, bottom - nextTop));
+      setBox({ x: nextLeft, y: nextTop, width: nextWidth, height: nextHeight });
+    }} onPointerUp={(event) => {
+      if (resizeRef.current?.pointerId === event.pointerId) resizeRef.current = null;
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }} />
     <div className="raw-log-title" onPointerDown={(event) => {
       if ((event.target as HTMLElement).closest("button")) return;
       const bounds = event.currentTarget.parentElement?.getBoundingClientRect();
       if (!bounds) return;
       dragRef.current = { pointerId: event.pointerId, offsetX: event.clientX - bounds.left, offsetY: event.clientY - bounds.top };
+      setBox({ x: bounds.left, y: bounds.top, width: bounds.width, height: bounds.height });
       event.currentTarget.setPointerCapture(event.pointerId); event.preventDefault();
     }} onPointerMove={(event) => {
       const drag = dragRef.current; const element = event.currentTarget.parentElement;
       if (!drag || drag.pointerId !== event.pointerId || !element) return;
-      setPosition({ x: Math.max(0, Math.min(window.innerWidth - element.offsetWidth, event.clientX - drag.offsetX)), y: Math.max(0, Math.min(window.innerHeight - element.offsetHeight, event.clientY - drag.offsetY)) });
+      setBox({ x: Math.max(0, Math.min(window.innerWidth - element.offsetWidth, event.clientX - drag.offsetX)), y: Math.max(0, Math.min(window.innerHeight - element.offsetHeight, event.clientY - drag.offsetY)), width: element.offsetWidth, height: element.offsetHeight });
     }} onPointerUp={(event) => { if (dragRef.current?.pointerId === event.pointerId) dragRef.current = null; event.currentTarget.releasePointerCapture(event.pointerId); }}>
       <strong>原始 Client 日志</strong><span>{mode === "work" ? "真实 MockClient" : "模拟玩家/裁判"} · {logs.length} 行</span><button className="ghost" onClick={refresh}>刷新</button><button onClick={() => setMinimized(!minimized)}>{minimized ? "展开" : "最小化"}</button>
     </div>

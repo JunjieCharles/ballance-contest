@@ -481,13 +481,27 @@ header > span:last-of-type { margin-left: auto; font-size: 13px; }
   color: #e7edf3;
   background: #18212c;
   box-shadow: 0 12px 38px rgb(0 0 0 / 35%);
-  resize: both;
   min-width: 420px;
   min-height: 220px;
   max-width: calc(100vw - 8px);
   max-height: calc(100vh - 8px);
 }
 .raw-log-window.minimized { width: min(560px, calc(100vw - 32px)); height: auto; min-height: 0; resize: none; }
+.raw-log-resize-handle {
+  position: absolute;
+  top: -1px;
+  left: -1px;
+  z-index: 2;
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  border: 0;
+  border-radius: 0 0 2px 0;
+  background: linear-gradient(135deg, #b8c4d0 0 0, #b8c4d0 35%, transparent 35%, transparent 100%);
+  cursor: nwse-resize;
+  touch-action: none;
+}
+.raw-log-resize-handle:hover { background: linear-gradient(135deg, #f0f4f8 0 0, #f0f4f8 35%, transparent 35%, transparent 100%); }
 .raw-log-title {
   min-height: 48px;
   display: flex;
@@ -503,6 +517,8 @@ header > span:last-of-type { margin-left: auto; font-size: 13px; }
 .raw-log-title button { min-height: 32px; padding: 4px 9px; }
 .raw-log-title .ghost { color: #dfe7ee; background: #3b4a59; }
 .raw-log-body { overflow: auto; padding: 8px 0; font-family: Consolas, "Cascadia Mono", monospace; font-size: 12px; }
+.preset-summary { display: flex; flex-direction: column; gap: 3px; margin-bottom: 8px; color: #536170; }
+.preset-summary strong { color: #26313d; }
 .raw-log-line { display: grid; grid-template-columns: 78px 88px minmax(0, 1fr); gap: 8px; padding: 3px 12px; }
 .raw-log-line:hover { background: #24303c; }
 .raw-log-line time, .raw-log-line span { color: #8da1b4; }
