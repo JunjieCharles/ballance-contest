@@ -151,6 +151,38 @@ describe("CompetitionService dynamic participants", () => {
     expect(snapshot.runtime.attentionItems.filter((item) => item.title === "违规成绩已排除")).toHaveLength(2);
   });
 
+  it("keeps raw test finish logs sequential when earlier finisher is excluded", () => {
+    dataRoot = mkdtempSync(join(tmpdir(), "ballance-test-log-order-"));
+    database = openDatabase(join(dataRoot, "console.sqlite"));
+    const service = new CompetitionService(undefined, { database, dataRoot });
+    const record = service.create({ name: "Test log order", mode: "work", idempotencyKey: "create-test-log-order" });
+    service.publish(record.id, 0, "publish-test-log-order");
+    const internals = service as unknown as {
+      workRuntimes: Map<string, WorkRuntimeHarness>;
+      makeWorkRuntime(competitionId: string, config: CompetitionConfig, transport: CommandTransport): WorkRuntimeHarness;
+      ingestWorkLine(runtime: WorkRuntimeHarness, line: string): void;
+    };
+    const runtime = internals.makeWorkRuntime(record.id, service.snapshot(record.id).publishedConfig as CompetitionConfig, { write: async () => undefined });
+    internals.workRuntimes.set(record.id, runtime);
+
+    for (const [id, name] of [["11", "Cheater"], ["12", "Valid"]]) {
+      internals.ingestWorkLine(runtime, `[07-01 12:00:00] ${name} (#${id}) logged in with cheat mode off.`);
+    }
+    internals.ingestWorkLine(runtime, "[07-01 12:00:01] [7, *ContestConsole]: Level 01 - Go!");
+    internals.ingestWorkLine(runtime, "[07-01 12:00:02] (11, Cheater) turned cheat on.");
+    internals.ingestWorkLine(runtime, "[07-01 12:00:03] (#11, Cheater) finished Level 01 in 1st place (score: 100; real time: 00:00:03.000).");
+    internals.ingestWorkLine(runtime, "[07-01 12:00:04] (#12, Valid) finished Level 01 in 2nd place (score: 90; real time: 00:00:04.000).");
+
+    const logs = service.getRawClientLogs(record.id).map((line) => line.rawLine);
+    expect(logs.filter((line) => line.includes("finished Level 01"))).toEqual([
+      expect.stringContaining("1st place"),
+      expect.stringContaining("2nd place")
+    ]);
+    const snapshot = service.snapshot(record.id);
+    expect(snapshot.currentScoreboard.find((entry) => entry.playerId === "Cheater")?.stages["sr-1"]).toMatchObject({ status: "excluded", points: 0 });
+    expect(snapshot.currentScoreboard.find((entry) => entry.playerId === "Valid")?.stages["sr-1"]).toMatchObject({ status: "finished", place: 1, points: 20 });
+  });
+
   it("ignores next-stage practice while the previous result window is still open", () => {
     dataRoot = mkdtempSync(join(tmpdir(), "ballance-next-stage-practice-"));
     database = openDatabase(join(dataRoot, "console.sqlite"));

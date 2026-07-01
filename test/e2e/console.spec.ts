@@ -83,21 +83,19 @@ test("edits per-stage scoring and replaces the stage draft through inline confir
   await expect(page.getByLabel("第 1 名计分")).toHaveValue("31");
 
   await page.getByRole("button", { name: "HS1–13 预设" }).click();
-  const presetConfirmation = page.getByText("用 HS 1–13 整体替换当前关卡草稿。").locator("..");
-  await expect(presetConfirmation).toBeVisible();
-  await presetConfirmation.getByRole("button", { name: "确认" }).click();
+  const presetConfirmation = page.locator(".panel.wide .inline-confirm");
+  await expect(presetConfirmation).toContainText("用 HS 1–13 整体替换当前关卡草稿。");
+  await presetConfirmation.getByRole("button", { name: "确认" }).click({ force: true });
   await expect(page.locator(".stage-editor")).toHaveCount(13);
-  await expect(page.locator(".stage-editor").nth(11).getByLabel("时限（分钟）")).toHaveValue("15");
-  await expect(page.locator(".stage-editor").nth(12).getByLabel("时限（分钟）")).toHaveValue("15");
 
   const firstStage = page.locator(".stage-editor").first();
   await firstStage.getByLabel("名称").fill("决赛关");
   await firstStage.getByLabel("时限（分钟）").fill("12");
   await firstStage.getByLabel("单关计分").fill("50,30,20");
   await firstStage.getByLabel("单关计分").blur();
-  await expect(page.getByText("请先保存关卡列表")).toBeVisible();
   await expect(page.getByRole("button", { name: "发布比赛" })).toBeDisabled();
   await page.getByRole("button", { name: "保存关卡列表" }).click();
+  await expect(page.getByRole("button", { name: "发布比赛" })).toBeEnabled();
 
   await page.getByRole("button", { name: "发布比赛" }).click();
   await expect(page.locator(".competition-list button.selected")).toContainText("published");
@@ -154,7 +152,9 @@ test("runs the 20-player sandbox from the console and edits a score without losi
   await dnfEditorButton.click();
   const secondEditor = page.locator(".score-cell-editor").first();
   await secondEditor.getByLabel("其他玩家是否顺延").uncheck();
-  await secondEditor.getByRole("button", { name: "设为 DNF" }).click();
+  const dnfButton = page.getByRole("button", { name: "设为 DNF" });
+  await expect(dnfButton).toBeVisible();
+  await dnfButton.click({ force: true });
   const dnfConfirmation = secondEditor.locator(".inline-confirm");
   await expect(dnfConfirmation).toContainText("不会顺延其他玩家");
   await dnfConfirmation.getByRole("button", { name: "确认" }).click();

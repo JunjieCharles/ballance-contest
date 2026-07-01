@@ -119,6 +119,7 @@ interface TestRuntime {
   clockAdvanceCanCoalesce: boolean;
   pendingCountdown?: PendingTestCountdown;
   appliedFaultIds: Set<string>;
+  stageFinishOrdinals: Map<string, number>;
   phaseStartedAt: Map<string, number>;
   recoveries: ScheduledTestRecovery[];
   createdAt: string;
@@ -1408,6 +1409,7 @@ export class CompetitionService {
       operations: [],
       clockAdvanceCanCoalesce: false,
       appliedFaultIds: new Set(),
+      stageFinishOrdinals: new Map(),
       phaseStartedAt: new Map(),
       recoveries: [],
       createdAt,
@@ -2799,11 +2801,8 @@ export class CompetitionService {
       case "login": return `${prefix} ${playerName} (#${event.connectionId}) logged in with cheat mode off.`;
       case "disconnect": return `${prefix} ${playerName} (#${event.connectionId}) disconnected.`;
       case "finish": {
-        const result = runtime.engine.snapshot().currentScoreboard.find((entry) => entry.playerId === event.playerId)?.stages[event.stageId];
-        const finished = runtime.engine.snapshot().currentScoreboard
-          .map((entry) => entry.stages[event.stageId])
-          .filter((candidate) => candidate?.status === "finished");
-        const place = result?.status === "finished" ? result.place : finished.length + 1;
+        const place = (runtime.stageFinishOrdinals.get(event.stageId) ?? 0) + 1;
+        runtime.stageFinishOrdinals.set(event.stageId, place);
         return `${prefix} (#${connectionId}, ${playerName}) finished Level ${level} in ${this.ordinal(place)} place (score: ${event.score}; real time: ${this.formatElapsed(event.elapsedMs)}).`;
       }
       case "dnf": return `${prefix} (#${connectionId}, ${playerName}) did not finish Level ${level} (furthest reach: sector 0).`;
