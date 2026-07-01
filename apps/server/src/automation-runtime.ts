@@ -7,7 +7,9 @@ export interface CommandQueuePort {
 
 const toCommand = (action: AutomationAction): CommandAction => {
   switch (action.kind) {
-    case "announcement": return { type: "announcement", text: action.message ?? "比赛流程通知" };
+    case "bulletin":
+    case "notice":
+    case "announce": return { type: "notification", channel: action.kind, text: action.message ?? "比赛流程通知" };
     case "ready": return { type: "ready", map: action.map, mode: action.mode };
     case "cheat-off": return { type: "cheat-off" };
     case "go": return { type: "go", map: action.map, mode: action.mode };
@@ -33,9 +35,11 @@ export class WorkAutomationRuntime {
 export class TestAutomationRuntime {
   public constructor(private readonly controller: CompetitionController) {}
 
-  public dispatch(): readonly AutomationAction[] {
+  public dispatch(deferGo = false): readonly AutomationAction[] {
     const actions = this.controller.drainActions();
-    for (const action of actions) this.controller.acknowledgeAction(action.id, "acknowledged");
+    for (const action of actions) {
+      if (!deferGo || action.kind !== "go") this.controller.acknowledgeAction(action.id, "acknowledged");
+    }
     return actions;
   }
 }

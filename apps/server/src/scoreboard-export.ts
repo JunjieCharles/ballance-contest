@@ -29,8 +29,9 @@ const safeName = (value: string): string => [...value.normalize("NFKC")]
 
 const rowValues = (input: ScoreboardExportInput, entry: ScoreboardEntry): readonly (string | number)[] => {
   const stages = Object.entries(entry.stages).sort(([left], [right]) => left.localeCompare(right)).map(([stageId, result]) =>
-    `${stageId}:${result.status === "dnf" ? `DNF(${result.reason ?? ""})` : `#${result.place}/${result.points}`}`).join("; ");
-  const status = Object.values(entry.stages).some((result) => result.status === "dnf") ? "DNF" : "有效";
+    `${stageId}:${result.status === "dnf" ? `DNF(${result.reason ?? ""})` : result.status === "excluded" ? `排除(${result.reason ?? ""})` : `#${result.place}/${result.points}`}`).join("; ");
+  const status = Object.values(entry.stages).some((result) => result.status === "excluded") ? "排除"
+    : Object.values(entry.stages).some((result) => result.status === "dnf") ? "DNF" : "有效";
   return [input.mode === "test" ? "测试数据" : "工作数据", entry.rank, entry.displayName, entry.points, entry.change ?? "", status, stages];
 };
 

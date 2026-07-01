@@ -8,13 +8,13 @@ class ManualClock {
   public advanceBy(milliseconds: number): void { this.currentMs += milliseconds; }
 }
 
-const makeController = (clock: ManualClock, policy: Partial<AutomationPolicy> = {}, participants = ["p1", "p2", "p3"]): CompetitionController =>
+const makeController = (clock: ManualClock, policy: Partial<AutomationPolicy> = {}, participants = ["p1", "p2", "p3"], timeLimitMs = 600_000): CompetitionController =>
   new CompetitionController({
     competitionId: "competition-automation",
     participants,
     stages: [
-      { id: "s1", map: "1", mode: "sr", timeLimitMs: 600_000, minimumScoringPlace: 1 },
-      { id: "s2", map: "2", mode: "sr", timeLimitMs: 600_000, minimumScoringPlace: 1 }
+      { id: "s1", map: "1", mode: "sr", timeLimitMs, minimumScoringPlace: 1 },
+      { id: "s2", map: "2", mode: "sr", timeLimitMs, minimumScoringPlace: 1 }
     ],
     policy: { announcementLeadMs: 0, readyBufferMs: 15_000, reconnectStableMs: 15_000, intermissionMs: 3_000, ...policy },
     confirmationSecret: "secret"
@@ -76,7 +76,7 @@ describe("P0 centralized automation and command regression", () => {
 
   it("BE-WINDOW-001/002: keeps tail intake open until the next actual Ready boundary", () => {
     const clock = new ManualClock();
-    const controller = makeController(clock, { readyBufferMs: 0 });
+    const controller = makeController(clock, { readyBufferMs: 0 }, ["p1", "p2", "p3"], 3_000);
     putEveryoneOnline(controller);
     startRunning(controller, clock, 0);
     expect(controller.snapshot().phase).toBe("running");
@@ -90,7 +90,8 @@ describe("P0 centralized automation and command regression", () => {
     settle(controller);
     expect(controller.snapshot().currentStageId).toBe("s2");
     expect(controller.snapshot().attempts[0]).toMatchObject({ stageId: "s1", intakeOpen: false });
-    expect(controller.recordResult({ stageId: "s1", playerId: "p3", status: "finished", sourceId: "s1-p3-after-ready" })).toBe("intake-closed");
+    expect(controller.snapshot().attempts[0]?.results).toContainEqual(expect.objectContaining({ playerId: "p3", status: "dnf", reason: "time-limit" }));
+    expect(controller.recordResult({ stageId: "s1", playerId: "p3", status: "finished", sourceId: "s1-p3-after-ready" })).toBe("duplicate");
   });
 
   it("BE-CHEAT-001/002: excludes in-race cheat while leaving completed players untouched", () => {

@@ -560,6 +560,7 @@ export class CompetitionController {
 
   public requestManualGo(): void {
     if (this.phase !== "ready" || !this.manualFlow || !this.readySequenceComplete()) throw new Error("MANUAL_GO_NOT_AVAILABLE");
+    if (this.readyAtMs === undefined || this.clock.now() < this.readyAtMs + this.policy.readyBufferMs) throw new Error("MANUAL_GO_TOO_EARLY");
     if (this.startBlockers(false).length > 0) throw new Error("MANUAL_GO_BLOCKED");
     this.goActionId = this.queueAction("go").id;
     this.phase = "countdown";
@@ -722,9 +723,11 @@ export class CompetitionController {
     const allKnownParticipantsCompleted = !this.configuration.dynamicParticipants && attempt.results.length >= activeCount;
     if (!this.nextStagePending && (finished >= this.stage.minimumScoringPlace || allKnownParticipantsCompleted)) {
       this.nextStagePending = true;
-      this.plannedReadyAtMs = this.clock.now() + this.policy.intermissionMs;
+      this.plannedReadyAtMs = allKnownParticipantsCompleted
+        ? this.clock.now() + this.policy.intermissionMs
+        : Math.max(this.clock.now() + this.policy.intermissionMs, attempt.deadlineAtMs);
       this.phase = "tail-intake";
-      this.queueAction("bulletin", `下一轮 Ready 计划在 ${formatDelay(this.policy.intermissionMs)}后执行`);
+      this.queueAction("bulletin", `下一轮 Ready 计划在 ${formatDelay(this.plannedReadyAtMs - this.clock.now())}后执行`);
     }
   }
 

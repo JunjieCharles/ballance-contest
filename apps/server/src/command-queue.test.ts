@@ -28,10 +28,20 @@ describe("CommandQueue", () => {
     expect(transport.writes).toEqual(["forcenextrestart"]);
   });
 
+  it("encodes bulletin, notice and announce as distinct MockClient commands", async () => {
+    const transport = new FakeTransport();
+    const queue = new CommandQueue(transport, 100);
+    transport.onWrite = () => setTimeout(() => queue.observeLine("success"), 0);
+    await queue.enqueue({ type: "notification", channel: "bulletin", text: "SR1 20:10" }, "bulletin");
+    await queue.enqueue({ type: "notification", channel: "notice", text: "wait Player" }, "notice");
+    await queue.enqueue({ type: "notification", channel: "announce", text: "READY!" }, "announce");
+    expect(transport.writes).toEqual(["bulletin SR1 20:10", "notice wait Player", "announce READY!"]);
+  });
+
   it("rejects control characters before writing", async () => {
     const transport = new FakeTransport();
     const queue = new CommandQueue(transport);
-    expect(() => queue.enqueue({ type: "announcement", text: "hello\nstop" }, "unsafe")).toThrow("control characters");
+    expect(() => queue.enqueue({ type: "notification", channel: "notice", text: "hello\nstop" }, "unsafe")).toThrow("control characters");
     expect(transport.writes).toEqual([]);
   });
 });

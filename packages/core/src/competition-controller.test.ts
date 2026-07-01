@@ -109,20 +109,21 @@ describe("CompetitionController", () => {
     for (const playerId of ["p1", "p2", "p3"]) {
       expect(controller.recordResult({ stageId: "s1", playerId, status: "finished", sourceId: `finish-${playerId}` })).toBe("accepted");
     }
-    expect(controller.snapshot()).toMatchObject({ phase: "tail-intake", plannedReadyAtMs: 9_000 });
-    expect(controller.snapshot().actions.at(-1)?.message).toBe("下一轮 Ready 计划在 3 秒后执行");
+    expect(controller.snapshot()).toMatchObject({ phase: "tail-intake", plannedReadyAtMs: 26_000 });
+    expect(controller.snapshot().actions.at(-1)?.message).toBe("下一轮 Ready 计划在 20 秒后执行");
 
-    clock.set(8_999);
+    clock.set(25_999);
     expect(controller.recordResult({ stageId: "s1", playerId: "p4", status: "finished", sourceId: "finish-p4" })).toBe("accepted");
-    clock.set(9_000);
+    clock.set(26_000);
     controller.tick();
 
     const snapshot = controller.snapshot();
     expect(snapshot.phase).toBe("ready");
     expect(snapshot.currentStageId).toBe("s2");
-    expect(snapshot.attempts[0]).toMatchObject({ stageId: "s1", intakeOpen: false, intakeClosedAtMs: 9_000 });
-    expect(controller.recordResult({ stageId: "s1", playerId: "p5", status: "finished", sourceId: "finish-p5" })).toBe("intake-closed");
-    expect(controller.snapshot().rejectedResults.at(-1)?.reason).toBe("intake-closed");
+    expect(snapshot.attempts[0]).toMatchObject({ stageId: "s1", intakeOpen: false, intakeClosedAtMs: 26_000 });
+    expect(snapshot.attempts[0]?.results).toContainEqual(expect.objectContaining({ playerId: "p5", status: "dnf", reason: "time-limit" }));
+    expect(controller.recordResult({ stageId: "s1", playerId: "p5", status: "finished", sourceId: "finish-p5" })).toBe("duplicate");
+    expect(controller.snapshot().rejectedResults.at(-1)?.reason).toBe("duplicate");
   });
 
   it("keeps the old intake open while the next Ready is blocked, but never beyond its deadline", () => {

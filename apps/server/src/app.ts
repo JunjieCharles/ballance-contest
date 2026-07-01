@@ -218,10 +218,6 @@ export const buildApp = async (options: BuildAppOptions): Promise<FastifyInstanc
     requireSession(request, true);
     return { data: service.advanceTestAutomation(request.params.competitionId, request.params.runId, request.body.milliseconds) };
   });
-  app.post<{ Params: { competitionId: string; runId: string }; Body: { fault: string; playerId?: string; milliseconds?: number } }>("/api/v1/competitions/:competitionId/test-runs/:runId/faults", async (request) => {
-    requireSession(request, true);
-    return { data: service.injectTestFault(request.params.competitionId, request.params.runId, request.body) };
-  });
   app.get<{ Params: { competitionId: string; runId: string; format: string }; Querystring: { version?: string } }>("/api/v1/competitions/:competitionId/test-runs/:runId/exports/:format", async (request, reply) => {
     requireSession(request, false);
     const requestedVersion = request.query.version === undefined ? undefined : Number(request.query.version);
@@ -247,6 +243,7 @@ export const buildApp = async (options: BuildAppOptions): Promise<FastifyInstanc
   });
   app.post<{ Params: { competitionId: string; runId: string }; Body: { version: number } }>("/api/v1/competitions/:competitionId/test-runs/:runId/archive", async (request) => {
     requireSession(request, true);
+    service.assertArchiveAvailable(request.params.competitionId);
     const fixed = service.getTestScoreboardVersion(request.params.competitionId, request.params.runId);
     const generatedAt = new Date().toISOString();
     const exports = createScoreboardExports({
@@ -268,6 +265,7 @@ export const buildApp = async (options: BuildAppOptions): Promise<FastifyInstanc
         "runtime/automation.json": fixed.automation,
         "audit/commands.json": fixed.automation.actions,
         "audit/incidents.json": fixed.automation.incidents,
+        "audit/attention-items.json": service.snapshot(fixed.competition.id).runtime.attentionItems,
         "audit/overrides.json": []
       },
       exports
@@ -290,6 +288,7 @@ export const buildApp = async (options: BuildAppOptions): Promise<FastifyInstanc
   });
   app.post<{ Params: { competitionId: string }; Body: { version: number } }>("/api/v1/competitions/:competitionId/archive", async (request) => {
     requireSession(request, true);
+    service.assertArchiveAvailable(request.params.competitionId);
     const competition = service.get(request.params.competitionId);
     const snapshot = service.snapshot(request.params.competitionId);
     const fixed = service.getLatestScoreboard(request.params.competitionId);
@@ -310,7 +309,8 @@ export const buildApp = async (options: BuildAppOptions): Promise<FastifyInstanc
         "runtime/snapshot.json": snapshot.runtime,
         "results/scoreboard.json": fixed,
         "audit/commands.json": snapshot.runtime.commands,
-        "audit/incidents.json": snapshot.runtime.incidents
+        "audit/incidents.json": snapshot.runtime.incidents,
+        "audit/attention-items.json": snapshot.runtime.attentionItems
       },
       exports
     });
@@ -320,14 +320,14 @@ export const buildApp = async (options: BuildAppOptions): Promise<FastifyInstanc
   });
   app.post<{
     Params: { competitionId: string };
-    Body: { expectedStateVersion: number; idempotencyKey: string; confirmationToken: string; impactHash: string; reason: string };
+    Body: { expectedStateVersion: number; idempotencyKey: string; confirmationToken: string; impactHash: string };
   }>("/api/v1/competitions/:competitionId/finish", async (request) => {
     requireSession(request, true);
     return { data: await service.finishCompetition(request.params.competitionId, request.body) };
   });
   app.delete<{
     Params: { competitionId: string };
-    Body: { expectedStateVersion: number; idempotencyKey: string; confirmationToken: string; impactHash: string; reason: string };
+    Body: { expectedStateVersion: number; idempotencyKey: string; confirmationToken: string; impactHash: string };
   }>("/api/v1/competitions/:competitionId", async (request) => {
     requireSession(request, true);
     return { data: await service.deleteCompetition(request.params.competitionId, request.body) };

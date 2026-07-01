@@ -161,3 +161,16 @@ export const archiveVersions = sqliteTable("archive_versions", {
   manifestHash: text("manifest_hash").notNull(),
   createdAt: text("created_at").notNull()
 }, (table) => [uniqueIndex("archive_versions_competition_version").on(table.competitionId, table.version)]);
+
+export const attentionItems = sqliteTable("attention_items", {
+  id: text("id").primaryKey(),
+  competitionId: text("competition_id").notNull().references(() => competitions.id),
+  category: text("category", { enum: ["flow", "result", "blocker", "incident", "command"] }).notNull(),
+  severity: text("severity", { enum: ["info", "warning", "critical"] }).notNull(),
+  title: text("title").notNull(),
+  message: text("message").notNull(),
+  occurredAt: text("occurred_at").notNull(),
+  stageId: text("stage_id"),
+  participantIds: text("participant_ids", { mode: "json" }),
+  action: text("action")
+}, (table) => [index("attention_items_competition_time").on(table.competitionId, table.occurredAt)]);

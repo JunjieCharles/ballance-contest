@@ -1,17 +1,17 @@
 import { randomUUID } from "node:crypto";
 import type { CommandTransport } from "./mock-client.js";
+import type { NotificationChannel } from "@ballance/contracts";
 
 export type CommandStatus = "queued" | "sent" | "acknowledged" | "failed" | "timed_out" | "uncertain";
 export type CommandAction =
   | { type: "list" }
-  | { type: "announcement"; text: string }
+  | { type: "notification"; channel: NotificationChannel; text: string }
   | { type: "ready"; map: string; mode: "sr" | "hs" }
   | { type: "cheat-off" }
   | { type: "go"; map: string; mode: "sr" | "hs" }
   | { type: "force-next-restart" }
   | { type: "scores"; map: string; mode: "sr" | "hs" }
   | { type: "kick"; playerName: string; reason: string }
-  | { type: "crash"; playerName: string; reason: string }
   | { type: "raw"; command: string };
 
 export interface CommandRecord {
@@ -33,14 +33,17 @@ const cleanText = (text: string): string => {
 const encode = (action: CommandAction): { command: string; critical: boolean; acknowledge: (line: string) => boolean } => {
   switch (action.type) {
     case "list": return { command: "list", critical: false, acknowledge: (line) => /player\(s\) online|\(#\d+\)/.test(line) };
-    case "announcement": return { command: `announce ${cleanText(action.text)}`, critical: false, acknowledge: (line) => line.includes(action.text) || /success/i.test(line) };
+    case "notification": return {
+      command: `${action.channel} ${cleanText(action.text)}`,
+      critical: false,
+      acknowledge: (line) => line.includes(action.text) || line.includes(`[${action.channel === "announce" ? "Announcement" : action.channel === "notice" ? "Notice" : "Bulletin"}]`) || /success/i.test(line)
+    };
     case "ready": return { command: `countdown ${cleanText(action.map)} ${action.mode} 4`, critical: false, acknowledge: (line) => /Get ready/.test(line) };
     case "cheat-off": return { command: "cheat off", critical: false, acknowledge: (line) => /cheat.*off/i.test(line) };
     case "go": return { command: `countdown ${cleanText(action.map)} ${action.mode}`, critical: true, acknowledge: (line) => / - Go!$/.test(line) };
     case "force-next-restart": return { command: "forcenextrestart", critical: true, acknowledge: (line) => /force.*restart|success/i.test(line) };
     case "scores": return { command: `scores ${action.mode} ${cleanText(action.map)}`, critical: false, acknowledge: (line) => /place|score|ranking/i.test(line) };
     case "kick": return { command: `kick ${cleanText(action.playerName)} ${cleanText(action.reason)}`, critical: true, acknowledge: (line) => /kick|disconnect|success/i.test(line) };
-    case "crash": return { command: `crash ${cleanText(action.playerName)} ${cleanText(action.reason)}`, critical: true, acknowledge: (line) => /crash|disconnect|success/i.test(line) };
     case "raw": return { command: cleanText(action.command), critical: true, acknowledge: (line) => /success|error|warning|ready|go|disconnect/i.test(line) };
   }
 };

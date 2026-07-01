@@ -27,6 +27,21 @@ const MIGRATIONS: readonly string[] = [
   CREATE TABLE recovery_audits (id TEXT PRIMARY KEY, competition_id TEXT NOT NULL REFERENCES competitions(id), state_version INTEGER NOT NULL, status TEXT NOT NULL, report TEXT NOT NULL, created_at TEXT NOT NULL, confirmed_at TEXT, confirmed_by TEXT, confirmation_reason TEXT) STRICT;
   CREATE TABLE observation_gaps (id TEXT PRIMARY KEY, competition_id TEXT NOT NULL REFERENCES competitions(id), code TEXT NOT NULL, detail TEXT NOT NULL, status TEXT NOT NULL, created_at TEXT NOT NULL, resolved_at TEXT) STRICT;
   CREATE TABLE archive_versions (id TEXT PRIMARY KEY, competition_id TEXT NOT NULL REFERENCES competitions(id), version INTEGER NOT NULL, mode TEXT NOT NULL CHECK(mode IN ('work','test')), relative_path TEXT NOT NULL, manifest_hash TEXT NOT NULL, created_at TEXT NOT NULL, UNIQUE(competition_id, version)) STRICT;
+  `,
+  `
+  CREATE TABLE attention_items (
+    id TEXT PRIMARY KEY,
+    competition_id TEXT NOT NULL REFERENCES competitions(id),
+    category TEXT NOT NULL,
+    severity TEXT NOT NULL,
+    title TEXT NOT NULL,
+    message TEXT NOT NULL,
+    occurred_at TEXT NOT NULL,
+    stage_id TEXT,
+    participant_ids TEXT,
+    action TEXT
+  ) STRICT;
+  CREATE INDEX attention_items_competition_time ON attention_items(competition_id, occurred_at DESC);
   `
 ];
 
