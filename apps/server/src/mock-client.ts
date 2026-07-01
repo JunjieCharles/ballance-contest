@@ -29,7 +29,8 @@ export const resolveMockClientUuid = (workingDirectory: string, fallbackUuid: st
   return fallbackUuid;
 };
 
-const ANSI_ESCAPE_PATTERN = /\u001b\[[0-9;?]*[ -/]*[@-~]/g;
+// eslint-disable-next-line no-control-regex
+const ANSI_ESCAPE_PATTERN = new RegExp("\\u001b\\[[0-9;?]*[ -/]*[@-~]", "g");
 
 export interface ConsumeMockClientLogChunkResult {
   lines: readonly string[];

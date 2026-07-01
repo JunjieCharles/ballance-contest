@@ -91,6 +91,7 @@ describe("local API", () => {
     const scenario = JSON.parse(readFileSync(resolve("test/fixtures/scenarios/three-stage-main/scenario.json"), "utf8")) as Record<string, unknown>;
     const created = await app.inject({ method: "POST", url: "/api/v1/competitions", headers: auth(token), payload: { name: "Scheduling", mode: "test", idempotencyKey: "scheduling" } });
     const competitionId = created.json<{ data: { id: string } }>().data.id;
+    await app.inject({ method: "POST", url: `/api/v1/competitions/${competitionId}/publish`, headers: auth(token), payload: { expectedStateVersion: 0, idempotencyKey: "publish-scheduling" } });
     const run = await app.inject({ method: "POST", url: `/api/v1/competitions/${competitionId}/test-runs`, headers: auth(token), payload: scenario });
     const runId = run.json<{ data: { runId: string } }>().data.runId;
     await app.inject({ method: "POST", url: `/api/v1/competitions/${competitionId}/test-runs/${runId}/automation/start`, headers: auth(token), payload: {} });
@@ -112,12 +113,12 @@ describe("local API", () => {
         payload: { expectedStateVersion: stateVersion, idempotencyKey, action: { ...action, confirmationToken: confirmation.token, impactHash: confirmation.impactHash } }
       });
     };
-    expect((await act(0, { type: "delay-ready", milliseconds: 60_000 }, "delay-ready")).statusCode).toBe(200);
-    expect((await act(1, { type: "extend-stage-deadline", milliseconds: 60_000 }, "extend-deadline")).statusCode).toBe(200);
+    expect((await act(1, { type: "delay-ready", milliseconds: 60_000 }, "delay-ready")).statusCode).toBe(200);
+    expect((await act(2, { type: "extend-stage-deadline", milliseconds: 60_000 }, "extend-deadline")).statusCode).toBe(200);
     const readyTarget = new Date(Date.parse(before.plannedReadyAt) + 120_000).toISOString();
     const deadlineTarget = new Date(Date.parse(before.stageDeadlineAt) + 180_000).toISOString();
-    expect((await act(2, { type: "reschedule", plannedReadyAt: readyTarget }, "reschedule-ready")).statusCode).toBe(200);
-    expect((await act(3, { type: "reschedule-stage-deadline", deadlineAt: deadlineTarget }, "reschedule-deadline")).statusCode).toBe(200);
+    expect((await act(3, { type: "reschedule", plannedReadyAt: readyTarget }, "reschedule-ready")).statusCode).toBe(200);
+    expect((await act(4, { type: "reschedule-stage-deadline", deadlineAt: deadlineTarget }, "reschedule-deadline")).statusCode).toBe(200);
     const afterResponse = await app.inject({ method: "GET", url: `/api/v1/competitions/${competitionId}/snapshot`, headers: auth(token) });
     const after = afterResponse.json<{ data: { runtime: { plannedReadyAt: string; stageDeadlineAt: string; attentionItems: Array<{ title: string }> } } }>().data.runtime;
     expect(after.plannedReadyAt).toBe(readyTarget);
@@ -128,6 +129,7 @@ describe("local API", () => {
   it("triggers faults from the selected scenario instead of a manual fault endpoint", async () => {
     const created = await app.inject({ method: "POST", url: "/api/v1/competitions", headers: auth(token), payload: { name: "Fault scenario", mode: "test", idempotencyKey: "fault-scenario" } });
     const competitionId = created.json<{ data: { id: string } }>().data.id;
+    await app.inject({ method: "POST", url: `/api/v1/competitions/${competitionId}/publish`, headers: auth(token), payload: { expectedStateVersion: 0, idempotencyKey: "publish-fault-scenario" } });
     const run = await app.inject({ method: "POST", url: `/api/v1/competitions/${competitionId}/test-runs/from-scenario`, headers: auth(token), payload: { scenarioId: "protected-crash-fault" } });
     const runId = run.json<{ data: { runId: string } }>().data.runId;
     await app.inject({ method: "POST", url: `/api/v1/competitions/${competitionId}/automation/enable`, headers: auth(token), payload: { runId } });
@@ -142,6 +144,7 @@ describe("local API", () => {
     const scenario = JSON.parse(readFileSync(resolve("test/fixtures/scenarios/three-stage-main/scenario.json"), "utf8")) as Record<string, unknown>;
     const created = await app.inject({ method: "POST", url: "/api/v1/competitions", headers: auth(token), payload: { name: "Export", mode: "test", idempotencyKey: "export" } });
     const competitionId = created.json<{ data: { id: string } }>().data.id;
+    await app.inject({ method: "POST", url: `/api/v1/competitions/${competitionId}/publish`, headers: auth(token), payload: { expectedStateVersion: 0, idempotencyKey: "publish-export" } });
     const run = await app.inject({ method: "POST", url: `/api/v1/competitions/${competitionId}/test-runs`, headers: auth(token), payload: scenario });
     const runId = run.json<{ data: { runId: string } }>().data.runId;
     await app.inject({ method: "POST", url: `/api/v1/competitions/${competitionId}/test-runs/${runId}/play`, headers: auth(token) });
@@ -154,7 +157,7 @@ describe("local API", () => {
     const confirmation = confirmationResponse.json<{ data: { token: string; impactHash: string } }>().data;
     await app.inject({
       method: "POST", url: `/api/v1/competitions/${competitionId}/finish`, headers: auth(token),
-      payload: { expectedStateVersion: 0, idempotencyKey: "finish-for-archive", confirmationToken: confirmation.token, impactHash: confirmation.impactHash }
+      payload: { expectedStateVersion: 1, idempotencyKey: "finish-for-archive", confirmationToken: confirmation.token, impactHash: confirmation.impactHash }
     });
     const archived = await app.inject({ method: "POST", url: `/api/v1/competitions/${competitionId}/test-runs/${runId}/archive`, headers: auth(token), payload: { version: 1 } });
     const archive = archived.json<{ data: { directory: string; packagePath: string; manifestHash: string } }>().data;
@@ -306,5 +309,61 @@ describe("local API", () => {
     expect(restored.scoreboardVersions.at(-1)?.version).toBe(16);
     expect(restored.scoreboardVersions.at(-1)?.entries).toHaveLength(5);
     expect(new Set(restored.scoreboardVersions.at(-1)?.entries.map((entry) => entry.playerId))).toEqual(new Set(["p1", "p2", "p3", "p4", "p5"]));
+  });
+
+  it("locks referee actions before publish but still allows deleting a draft competition", async () => {
+    const created = await app.inject({ method: "POST", url: "/api/v1/competitions", headers: auth(token), payload: { name: "Draft lock", mode: "test", idempotencyKey: "draft-lock" } });
+    const competitionId = created.json<{ data: { id: string } }>().data.id;
+    await app.inject({ method: "POST", url: `/api/v1/competitions/${competitionId}/test-runs/from-scenario`, headers: auth(token), payload: { scenarioId: "independent-player-sandbox" } });
+    const snapshot = await app.inject({ method: "GET", url: `/api/v1/competitions/${competitionId}/snapshot`, headers: auth(token) });
+    const actions = snapshot.json<{ data: { runtime: { availableActions: Array<{ action: string; enabled: boolean; disabledReason?: string }> } } }>().data.runtime.availableActions;
+    expect(actions).toEqual(expect.arrayContaining([
+      expect.objectContaining({ action: "enable-automation", enabled: false, disabledReason: "请先发布比赛配置" }),
+      expect.objectContaining({ action: "ready", enabled: false, disabledReason: "请先发布比赛配置" }),
+      expect.objectContaining({ action: "manual-go", enabled: false, disabledReason: "请先发布比赛配置" }),
+      expect.objectContaining({ action: "delete", enabled: true })
+    ]));
+
+    const confirmationResponse = await app.inject({ method: "POST", url: `/api/v1/competitions/${competitionId}/confirmations`, headers: auth(token), payload: { kind: "high-risk", target: competitionId } });
+    const confirmation = confirmationResponse.json<{ data: { token: string; impactHash: string } }>().data;
+    const removed = await app.inject({
+      method: "DELETE",
+      url: `/api/v1/competitions/${competitionId}`,
+      headers: auth(token),
+      payload: {
+        expectedStateVersion: 0,
+        idempotencyKey: "delete-draft",
+        confirmationToken: confirmation.token,
+        impactHash: confirmation.impactHash
+      }
+    });
+    expect(removed.statusCode).toBe(200);
+    expect((await app.inject({ method: "GET", url: "/api/v1/competitions", headers: auth(token) })).json<{ data: Array<{ id: string }> }>().data.some((item) => item.id === competitionId)).toBe(false);
+  });
+
+  it("auto-marks competition finished when runtime reaches review phase", async () => {
+    const created = await app.inject({ method: "POST", url: "/api/v1/competitions", headers: auth(token), payload: { name: "Auto finish", mode: "test", idempotencyKey: "auto-finish" } });
+    const competitionId = created.json<{ data: { id: string } }>().data.id;
+    await app.inject({
+      method: "PATCH",
+      url: `/api/v1/competitions/${competitionId}/draft`,
+      headers: auth(token),
+      payload: {
+        expectedStateVersion: 0,
+        idempotencyKey: "shorten-stages",
+        stages: [{ id: "sr-1", order: 1, label: "SR 1", level: 1, mode: "SR", timeLimitMs: 30_000, scoring: [20], minimumScoringPlace: 1 }]
+      }
+    });
+    await app.inject({ method: "POST", url: `/api/v1/competitions/${competitionId}/publish`, headers: auth(token), payload: { expectedStateVersion: 1, idempotencyKey: "publish-auto-finish" } });
+    const run = await app.inject({ method: "POST", url: `/api/v1/competitions/${competitionId}/test-runs/from-scenario`, headers: auth(token), payload: { scenarioId: "normal-player-roster" } });
+    const runId = run.json<{ data: { runId: string } }>().data.runId;
+    await app.inject({ method: "POST", url: `/api/v1/competitions/${competitionId}/automation/enable`, headers: auth(token), payload: { runId } });
+    await app.inject({ method: "POST", url: `/api/v1/competitions/${competitionId}/test-runs/${runId}/automation/advance`, headers: auth(token), payload: { milliseconds: 240_000 } });
+
+    const snapshot = await app.inject({ method: "GET", url: `/api/v1/competitions/${competitionId}/snapshot`, headers: auth(token) });
+    const data = snapshot.json<{ data: { competition: { status: string }; runtime: { phase: string; availableActions: Array<{ action: string; enabled: boolean }> } } }>().data;
+    expect(data.runtime.phase).toBe("review");
+    expect(data.competition.status).toBe("finished");
+    expect(data.runtime.availableActions.find((item) => item.action === "archive")?.enabled).toBe(true);
   });
 });

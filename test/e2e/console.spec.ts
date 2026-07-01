@@ -28,13 +28,6 @@ const createCompetition = async (page: Page, name: string, mode: "work" | "test"
   await expect(page.getByRole("button", { name: "发布比赛" })).toBeEnabled();
 };
 
-const selectedCompetitionVersion = async (page: Page): Promise<number> => {
-  const text = await page.locator(".competition-list button.selected").textContent();
-  const version = /v(\d+)/.exec(text ?? "")?.[1];
-  if (version === undefined) throw new Error("missing selected competition version");
-  return Number(version);
-};
-
 const accelerateActiveTestRun = async (page: Page, competitionName: string, milliseconds = 9_000_000): Promise<void> => {
   await page.evaluate(async ({ name, duration }) => {
     const stored = sessionStorage.getItem("ballance-console-session");
@@ -116,6 +109,8 @@ test("runs the 20-player sandbox from the console and edits a score without losi
   await acquireControl(page);
   const name = `E2E 综合沙盒 ${testInfo.project.name}`;
   await createCompetition(page, name, "test");
+  await page.getByRole("button", { name: "发布比赛" }).click();
+  await expect(page.locator(".competition-list button.selected")).toContainText("published");
   await page.getByRole("button", { name: "测试", exact: true }).click();
   await page.getByRole("button", { name: /20 人小型综合沙盒/ }).click();
   await expect(page.locator(".behavior-card")).toHaveCount(20);
@@ -196,6 +191,10 @@ test("shows disabled reasons, shared scheduling controls and inline end confirma
   await acquireControl(page);
   const name = `E2E 控制矩阵 ${testInfo.project.name}`;
   await createCompetition(page, name, "test");
+  await page.getByRole("button", { name: "控制台", exact: true }).click();
+  await expect(page.getByRole("button", { name: "启用自动化" })).toBeDisabled();
+  await page.getByRole("button", { name: "发布比赛" }).click();
+  await expect(page.locator(".competition-list button.selected")).toContainText("published");
   await page.getByRole("button", { name: "测试", exact: true }).click();
   await page.getByRole("button", { name: /30 人大型综合沙盒/ }).click();
   await expect(page.getByText("30 人 · 2 个场景故障")).toBeVisible();

@@ -133,6 +133,7 @@ interface RealtimeTestTimer {
 
 interface WorkRuntime {
   competitionId: string;
+  server: string;
   controller: CompetitionController;
   engine: CompetitionEngine;
   commands: CommandQueue;
@@ -522,6 +523,7 @@ export class CompetitionService {
   }
 
   public snapshot(id: string): CompetitionSnapshot {
+    this.autoFinishOnReview(id);
     const competition = this.toRecordView(this.get(id));
     const payload = this.getPayload(id);
     const config = this.getDraftConfig(id);
@@ -780,6 +782,15 @@ export class CompetitionService {
         this.availableActionsFor(competitionId, snapshot), this.attentionItemsFor(competitionId, snapshot), stageDeadlineAt(snapshot, origin));
     }
     this.assertActionAvailable(competitionId, "start-work");
+    for (const [otherCompetitionId, running] of this.workRuntimes.entries()) {
+      if (otherCompetitionId === competitionId) continue;
+      if (running.server === config.server) {
+        throw new ServiceError("STATE_CONFLICT", `服务器 ${config.server} 已有工作运行`, 409, {
+          server: config.server,
+          blockingCompetitionId: otherCompetitionId
+        });
+      }
+    }
 
     const executable = resolve(serverWindowsRoot(), "BallanceMMOMockClient.exe");
     if (!existsSync(executable)) throw new ServiceError("MOCK_CLIENT_MISSING", "未找到 BallanceMMOMockClient.exe", 500, { executable });
@@ -1901,7 +1912,39 @@ export class CompetitionService {
       policy: automationPolicyFor(config)
     }, new SystemMonotonicClock());
     const commands = new CommandQueue(transport, 5_000, (record) => this.recordCommand(competitionId, record));
-    return { competitionId, controller, engine: new CompetitionEngine(definition), commands, runtime: new WorkAutomationRuntime(controller, commands), ...(transport instanceof ManagedMockClient ? { client: transport } : {}), ...(mockClientVersion === undefined ? {} : { mockClientVersion }) };
+    return {
+      competitionId,
+      server: config.server,
+      controller,
+      engine: new CompetitionEngine(definition),
+      commands,
+      runtime: new WorkAutomationRuntime(controller, commands),
+      ...(transport instanceof ManagedMockClient ? { client: transport } : {}),
+      ...(mockClientVersion === undefined ? {} : { mockClientVersion })
+    };
+  }
+
+  private autoFinishOnReview(competitionId: string): void {
+    const current = this.get(competitionId);
+    if (current.status !== "published") return;
+    const phase = this.runtimeAutomationSnapshot(competitionId)?.phase;
+    if (phase !== "review") return;
+    const updated = { ...current, status: "finished" as const, stateVersion: current.stateVersion + 1, updatedAt: new Date().toISOString() };
+    this.competitions.set(competitionId, updated);
+    this.withDatabase((database) => {
+      database.sqlite.prepare("UPDATE competitions SET status=?,state_version=?,updated_at=? WHERE id=?")
+        .run(updated.status, updated.stateVersion, updated.updatedAt, competitionId);
+    });
+    this.appendAttention(competitionId, {
+      id: `competition-finished:auto-review:${updated.stateVersion}`,
+      category: "flow",
+      severity: "info",
+      title: "比赛已结束",
+      message: "比赛进入复核阶段，已自动标记为结束，可直接归档或删除。",
+      occurredAt: updated.updatedAt,
+      action: "archive"
+    });
+    this.journal.append({ type: "competition.finished", competitionId, stateVersion: updated.stateVersion, data: { reason: "competition-auto-finished-on-review" } });
   }
 
   private startParticipantReconciliation(runtime: WorkRuntime): void {
@@ -2551,6 +2594,7 @@ export class CompetitionService {
 
   private availableActionsFor(competitionId: string, snapshot?: AutomationSnapshot): ActionAvailability[] {
     const competition = this.get(competitionId);
+    const refereeActionsUnlocked = competition.status !== "draft";
     const phase = snapshot?.phase ?? competition.status;
     const blockers = snapshot?.blockers.filter((blocker) => blocker.code !== "AUTOMATION_PAUSED") ?? [];
     const hasBlockingIssue = blockers.some((blocker) => blocker.severity === "critical" || blocker.code === "PARTICIPANT_OFFLINE");
@@ -2577,27 +2621,40 @@ export class CompetitionService {
     return [
       descriptor("start-work", "启动工作运行", "启动真实 MockClient，并立即开始在线名单对账。", competition.mode === "work" && competition.status === "published" && !hasRuntime,
         competition.mode !== "work" ? "测试比赛不启动真实 MockClient" : competition.status !== "published" ? "请先发布比赛配置" : "工作运行已经启动"),
-      descriptor("enable-automation", "启用自动化", "由状态机按固定节奏推进 Ready、倒数和关卡切换。", hasRuntime && !snapshot?.automationEnabled && !["review", "incident"].includes(phase) && !hasBlockingIssue,
-        !hasRuntime ? "请先启动运行" : snapshot?.automationEnabled ? "自动化已经启用" : phase === "incident" ? "请先处理当前事故" : phase === "review" ? "比赛已进入复核" : "存在未解除的流程阻断"),
-      descriptor("pause-automation", "暂停自动化", "停止自动推进；已经发出的真实命令不会自动撤回。", Boolean(snapshot?.automationEnabled), "自动化当前未启用"),
-      descriptor("ready", "开始 Ready", "立即进入三次 Get ready、READY 公告和关闭 cheat 流程，不会跳过倒数。", hasRuntime && ["lobby", "preparing", "paused", "restart-preparing"].includes(phase) && !hasBlockingIssue,
-        !hasRuntime ? "请先启动运行" : !["lobby", "preparing", "paused", "restart-preparing"].includes(phase) ? `当前阶段 ${phase} 不能开始 Ready` : "存在离线、cheat、事故或不确定命令"),
-      descriptor("cheat-off", "关闭 cheat", "向服务器发送关闭 cheat 命令。", hasRuntime && !["review", "incident"].includes(phase), !hasRuntime ? "请先启动运行" : "当前阶段不可发送"),
-      descriptor("manual-go", "手动发令", "完成真实 3/2/1 倒数；只有 Go 回显后才创建比赛尝试并启动时限。", phase === "ready" && readySequenceComplete && readyBufferElapsed && !hasBlockingIssue,
-        phase !== "ready" ? "仅 Ready 阶段可手动发令" : !readySequenceComplete ? "三次 Ready、READY 公告或关闭 cheat 尚未全部确认" : !readyBufferElapsed ? "Ready 起点尚未满配置缓冲时间" : "存在流程阻断"),
-      descriptor("delay-ready", "Ready 延后 1 分钟", "将下一次已安排的 Ready 时间顺延 1 分钟。", snapshot?.plannedReadyAtMs !== undefined && ["preparing", "pre-start-wait", "tail-intake", "restart-preparing"].includes(phase), "当前没有可延后的 Ready 计划"),
-      descriptor("reschedule", "Ready 改期", "把下一次 Ready 改到指定时间，不改变本关时限。", snapshot?.plannedReadyAtMs !== undefined && ["preparing", "pre-start-wait", "tail-intake", "restart-preparing"].includes(phase), "当前没有可改期的 Ready 计划"),
-      descriptor("extend-stage-deadline", "本关时限延长 1 分钟", "立即把当前关卡最晚结束时间顺延 1 分钟。", Boolean(openAttempt) && ["running", "tail-intake"].includes(phase), "当前没有开放的成绩接收窗口"),
-      descriptor("reschedule-stage-deadline", "关卡时限改期", "把当前关卡最晚结束时间改到指定时间，不改变下一次 Ready。", Boolean(openAttempt) && ["running", "tail-intake"].includes(phase), "当前没有开放的成绩接收窗口"),
-      descriptor("end-stage", "提前结束本关", "关闭成绩窗口，未完成且未排除的选手记为 DNF。", Boolean(openAttempt) && ["running", "tail-intake"].includes(phase), "当前没有可结束的开放关卡"),
-      descriptor("restart", "重赛", "作废当前尝试，公告重赛并重新执行完整 Ready 与倒数。", Boolean(snapshot?.incidents.some((incident) => (incident as { status?: string; recommendedRestart?: boolean }).status === "open" && (incident as { recommendedRestart?: boolean }).recommendedRestart)), "当前没有建议重赛的开放事故"),
-      descriptor("void-attempt", "作废尝试", "关闭并作废目标尝试，保留原始成绩证据。", Boolean(snapshot?.attempts.some((attempt) => !attempt.voided)), "当前没有可作废的尝试"),
-      descriptor("restore-attempt", "恢复尝试", "恢复已作废尝试；同关已有有效尝试时会拒绝。", Boolean(snapshot?.attempts.some((attempt) => attempt.voided)), "当前没有已作废尝试"),
-      descriptor("kick", "Kick 玩家", "从服务器移除目标玩家；结果不确定时不会自动重试。", competition.mode === "work" && hasRuntime, competition.mode !== "work" ? "测试模式不发送真实 Kick" : "请先启动工作运行"),
-      descriptor("raw-command", "发送原始命令", "原样发送一条 MockClient 命令；结果不确定时不会自动重试。", competition.mode === "work" && hasRuntime, competition.mode !== "work" ? "测试模式不发送真实命令" : "请先启动工作运行"),
-      descriptor("finish", "结束比赛", "停止运行并固定比赛为已结束状态，之后可归档。", !["finished", "archived"].includes(competition.status) && (competition.status !== "draft" || hasRuntime), competition.status === "draft" && !hasRuntime ? "草稿比赛尚未开始" : "比赛已经结束"),
+      descriptor("enable-automation", "启用自动化", "由状态机按固定节奏推进 Ready、倒数和关卡切换。", refereeActionsUnlocked && hasRuntime && !snapshot?.automationEnabled && !["review", "incident"].includes(phase) && !hasBlockingIssue,
+        !refereeActionsUnlocked ? "请先发布比赛配置" : !hasRuntime ? "请先启动运行" : snapshot?.automationEnabled ? "自动化已经启用" : phase === "incident" ? "请先处理当前事故" : phase === "review" ? "比赛已进入复核" : "存在未解除的流程阻断"),
+      descriptor("pause-automation", "暂停自动化", "停止自动推进；已经发出的真实命令不会自动撤回。", refereeActionsUnlocked && Boolean(snapshot?.automationEnabled),
+        !refereeActionsUnlocked ? "请先发布比赛配置" : "自动化当前未启用"),
+      descriptor("ready", "开始 Ready", "立即进入三次 Get ready、READY 公告和关闭 cheat 流程，不会跳过倒数。", refereeActionsUnlocked && hasRuntime && ["lobby", "preparing", "paused", "restart-preparing"].includes(phase) && !hasBlockingIssue,
+        !refereeActionsUnlocked ? "请先发布比赛配置" : !hasRuntime ? "请先启动运行" : !["lobby", "preparing", "paused", "restart-preparing"].includes(phase) ? `当前阶段 ${phase} 不能开始 Ready` : "存在离线、cheat、事故或不确定命令"),
+      descriptor("cheat-off", "关闭 cheat", "向服务器发送关闭 cheat 命令。", refereeActionsUnlocked && hasRuntime && !["review", "incident"].includes(phase),
+        !refereeActionsUnlocked ? "请先发布比赛配置" : !hasRuntime ? "请先启动运行" : "当前阶段不可发送"),
+      descriptor("manual-go", "手动发令", "完成真实 3/2/1 倒数；只有 Go 回显后才创建比赛尝试并启动时限。", refereeActionsUnlocked && phase === "ready" && readySequenceComplete && readyBufferElapsed && !hasBlockingIssue,
+        !refereeActionsUnlocked ? "请先发布比赛配置" : phase !== "ready" ? "仅 Ready 阶段可手动发令" : !readySequenceComplete ? "三次 Ready、READY 公告或关闭 cheat 尚未全部确认" : !readyBufferElapsed ? "Ready 起点尚未满配置缓冲时间" : "存在流程阻断"),
+      descriptor("delay-ready", "Ready 延后 1 分钟", "将下一次已安排的 Ready 时间顺延 1 分钟。", refereeActionsUnlocked && snapshot?.plannedReadyAtMs !== undefined && ["preparing", "pre-start-wait", "tail-intake", "restart-preparing"].includes(phase),
+        !refereeActionsUnlocked ? "请先发布比赛配置" : "当前没有可延后的 Ready 计划"),
+      descriptor("reschedule", "Ready 改期", "把下一次 Ready 改到指定时间，不改变本关时限。", refereeActionsUnlocked && snapshot?.plannedReadyAtMs !== undefined && ["preparing", "pre-start-wait", "tail-intake", "restart-preparing"].includes(phase),
+        !refereeActionsUnlocked ? "请先发布比赛配置" : "当前没有可改期的 Ready 计划"),
+      descriptor("extend-stage-deadline", "本关时限延长 1 分钟", "立即把当前关卡最晚结束时间顺延 1 分钟。", refereeActionsUnlocked && Boolean(openAttempt) && ["running", "tail-intake"].includes(phase),
+        !refereeActionsUnlocked ? "请先发布比赛配置" : "当前没有开放的成绩接收窗口"),
+      descriptor("reschedule-stage-deadline", "关卡时限改期", "把当前关卡最晚结束时间改到指定时间，不改变下一次 Ready。", refereeActionsUnlocked && Boolean(openAttempt) && ["running", "tail-intake"].includes(phase),
+        !refereeActionsUnlocked ? "请先发布比赛配置" : "当前没有开放的成绩接收窗口"),
+      descriptor("end-stage", "提前结束本关", "关闭成绩窗口，未完成且未排除的选手记为 DNF。", refereeActionsUnlocked && Boolean(openAttempt) && ["running", "tail-intake"].includes(phase),
+        !refereeActionsUnlocked ? "请先发布比赛配置" : "当前没有可结束的开放关卡"),
+      descriptor("restart", "重赛", "作废当前尝试，公告重赛并重新执行完整 Ready 与倒数。", refereeActionsUnlocked && Boolean(snapshot?.incidents.some((incident) => (incident as { status?: string; recommendedRestart?: boolean }).status === "open" && (incident as { recommendedRestart?: boolean }).recommendedRestart)),
+        !refereeActionsUnlocked ? "请先发布比赛配置" : "当前没有建议重赛的开放事故"),
+      descriptor("void-attempt", "作废尝试", "关闭并作废目标尝试，保留原始成绩证据。", refereeActionsUnlocked && Boolean(snapshot?.attempts.some((attempt) => !attempt.voided)),
+        !refereeActionsUnlocked ? "请先发布比赛配置" : "当前没有可作废的尝试"),
+      descriptor("restore-attempt", "恢复尝试", "恢复已作废尝试；同关已有有效尝试时会拒绝。", refereeActionsUnlocked && Boolean(snapshot?.attempts.some((attempt) => attempt.voided)),
+        !refereeActionsUnlocked ? "请先发布比赛配置" : "当前没有已作废尝试"),
+      descriptor("kick", "Kick 玩家", "从服务器移除目标玩家；结果不确定时不会自动重试。", refereeActionsUnlocked && competition.mode === "work" && hasRuntime,
+        !refereeActionsUnlocked ? "请先发布比赛配置" : competition.mode !== "work" ? "测试模式不发送真实 Kick" : "请先启动工作运行"),
+      descriptor("raw-command", "发送原始命令", "原样发送一条 MockClient 命令；结果不确定时不会自动重试。", refereeActionsUnlocked && competition.mode === "work" && hasRuntime,
+        !refereeActionsUnlocked ? "请先发布比赛配置" : competition.mode !== "work" ? "测试模式不发送真实命令" : "请先启动工作运行"),
+      descriptor("finish", "结束比赛", "停止运行并固定比赛为已结束状态，之后可归档。", refereeActionsUnlocked && !["finished", "archived"].includes(competition.status),
+        !refereeActionsUnlocked ? "请先发布比赛配置" : "比赛已经结束"),
       descriptor("archive", "生成归档", "基于明确榜单版本生成不可变归档。", ["finished", "archived"].includes(competition.status), "请先结束比赛"),
-      descriptor("delete", "删除比赛", "删除该比赛的配置、运行、审计与本地数据目录。", ["draft", "finished", "archived"].includes(competition.status), "进行中的比赛必须先结束")
+      descriptor("delete", "删除比赛", "删除该比赛的配置、运行、审计与本地数据目录。", true, "")
     ];
   }
 

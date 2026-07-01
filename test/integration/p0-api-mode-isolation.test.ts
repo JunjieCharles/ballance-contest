@@ -62,6 +62,12 @@ describe("P0 API mode isolation and test run regression", () => {
       payload: { name: "主场景集中回归", mode: "test", idempotencyKey: "main-scenario" }
     });
     const competitionId = created.json<{ data: { id: string } }>().data.id;
+    await app.inject({
+      method: "POST",
+      url: `/api/v1/competitions/${competitionId}/publish`,
+      headers: auth(token),
+      payload: { expectedStateVersion: 0, idempotencyKey: "publish-independent-player-lifecycle" }
+    });
     const run = await app.inject({
       method: "POST",
       url: `/api/v1/competitions/${competitionId}/test-runs`,
@@ -137,6 +143,12 @@ describe("P0 API mode isolation and test run regression", () => {
       payload: { name: "独立玩家闭环", mode: "test", idempotencyKey: "independent-player-lifecycle" }
     });
     const competitionId = created.json<{ data: { id: string } }>().data.id;
+    await app.inject({
+      method: "POST",
+      url: `/api/v1/competitions/${competitionId}/publish`,
+      headers: auth(token),
+      payload: { expectedStateVersion: 0, idempotencyKey: "publish-independent-player-lifecycle-case" }
+    });
     const scenarios = await app.inject({ method: "GET", url: "/api/v1/test-scenarios", headers: auth(token) });
     const scenarioData = scenarios.json<{ data: Array<{ id: string; players: number; randomSeed: number; playerProfiles: string[] }> }>().data;
     expect(scenarioData.every((scenario) => scenario.players >= 15)).toBe(true);
@@ -200,7 +212,7 @@ describe("P0 API mode isolation and test run regression", () => {
       method: "POST",
       url: `/api/v1/competitions/${competitionId}/actions`,
       headers: auth(token),
-      payload: { expectedStateVersion: 0, idempotencyKey: "manual-ready", action: { type: "ready" } }
+      payload: { expectedStateVersion: 1, idempotencyKey: "manual-ready", action: { type: "ready" } }
     });
     expect(ready.statusCode).toBe(200);
     await app.inject({
@@ -216,7 +228,7 @@ describe("P0 API mode isolation and test run regression", () => {
       url: `/api/v1/competitions/${competitionId}/actions`,
       headers: auth(token),
       payload: {
-        expectedStateVersion: 1,
+        expectedStateVersion: 2,
         idempotencyKey: "manual-go",
         action: { type: "manual-go", confirmationToken: goConfirmation.token, impactHash: goConfirmation.impactHash }
       }

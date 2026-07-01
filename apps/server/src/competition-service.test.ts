@@ -261,4 +261,47 @@ describe("CompetitionService dynamic participants", () => {
     expect(rawDnfLines).toHaveLength(explicitDnf.length);
     expect(service.snapshot(record.id).runtime.attentionItems).toContainEqual(expect.objectContaining({ title: "关卡时限已到" }));
   });
+
+  it("keeps accepting post-threshold finishes before the next Ready starts", () => {
+    const service = new CompetitionService();
+    const record = service.create({ name: "Tail intake accepts finishes", mode: "test", idempotencyKey: "tail-intake-finish" });
+    service.updateDraft(record.id, {
+      expectedStateVersion: 0,
+      idempotencyKey: "short-two-stages",
+      stages: [
+        { id: "sr-1", order: 1, label: "SR 1", level: 1, mode: "SR", timeLimitMs: 600_000, scoring: [20, 15, 12], minimumScoringPlace: 3 },
+        { id: "sr-2", order: 2, label: "SR 2", level: 2, mode: "SR", timeLimitMs: 600_000, scoring: [20, 15, 12], minimumScoringPlace: 3 }
+      ]
+    });
+    service.publish(record.id, 1, "publish-tail-intake-finish");
+    const runId = service.createTestRunFromScenario(record.id, "normal-player-roster").runId;
+    service.startTestAutomation(record.id, runId);
+    service.advanceTestAutomation(record.id, runId, 200_000);
+    const snapshot = service.snapshot(record.id);
+    const stage1Finished = snapshot.currentScoreboard
+      .map((entry) => entry.stages["sr-1"])
+      .filter((result): result is { status?: string } => Boolean(result))
+      .filter((result) => result.status === "finished");
+    expect(stage1Finished.length).toBeGreaterThan(3);
+  });
+
+  it("allows multiple work competitions but blocks starting two on the same server", () => {
+    dataRoot = mkdtempSync(join(tmpdir(), "ballance-work-server-guard-"));
+    database = openDatabase(join(dataRoot, "console.sqlite"));
+    const service = new CompetitionService(undefined, { database, dataRoot });
+    const first = service.create({ name: "Work A", mode: "work", idempotencyKey: "work-a" });
+    const second = service.create({ name: "Work B", mode: "work", idempotencyKey: "work-b" });
+    const third = service.create({ name: "Work C", mode: "work", idempotencyKey: "work-c" });
+    service.updateDraft(second.id, { expectedStateVersion: 0, idempotencyKey: "work-b-server", server: "same.server" });
+    service.updateDraft(third.id, { expectedStateVersion: 0, idempotencyKey: "work-c-server", server: "other.server" });
+    service.publish(first.id, 0, "publish-work-a");
+    service.publish(second.id, 1, "publish-work-b");
+    service.publish(third.id, 1, "publish-work-c");
+
+    const internals = service as unknown as { workRuntimes: Map<string, { server: string }> };
+    internals.workRuntimes.set(first.id, { server: "same.server" });
+
+    expect(() => service.startWorkMode(second.id)).toThrowError(/已有工作运行/);
+    expect(() => service.startWorkMode(third.id)).not.toThrow();
+  });
 });
