@@ -87,4 +87,19 @@ describe("ScoreboardRevisionLedger", () => {
     expect(revised.entries).toHaveLength(source.entries.length);
     expect(revised.entries.find((entry) => entry.playerId === "p5")?.stages.s3).toMatchObject({ status: "dnf", place: 0, points: 0 });
   });
+
+  it("can adjudicate an empty stage cell as a finished place", () => {
+    const source = baseVersion();
+    const entries = source.entries.map((entry) => entry.playerId === "p5"
+      ? { ...entry, stages: Object.fromEntries(Object.entries(entry.stages).filter(([stageId]) => stageId !== "s3")) }
+      : entry);
+    const ledger = new ScoreboardRevisionLedger({ ...source, entries }, { s3: [20, 15, 12] });
+    const revised = ledger.apply({
+      playerId: "p5", stageId: "s3", stage: { status: "finished", place: 13, reason: "referee-adjudicated-place" }, rankPolicy: "tie",
+      actor: "referee", reason: "set place"
+    });
+
+    expect(revised.entries).toHaveLength(source.entries.length);
+    expect(revised.entries.find((entry) => entry.playerId === "p5")?.stages.s3).toMatchObject({ status: "finished", place: 13, points: 0 });
+  });
 });

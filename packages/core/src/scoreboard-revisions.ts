@@ -23,6 +23,22 @@ export interface ScoreboardOverrideRequest {
   evidence?: string;
 }
 
+export interface ScoreboardOverrideAffectedPlayer {
+  playerId: string;
+  displayName: string;
+  beforePlace: number | null;
+  afterPlace: number | null;
+  beforePoints: number;
+  afterPoints: number;
+}
+
+export interface ScoreboardOverridePreview {
+  playerId: string;
+  stageId?: string;
+  rankPolicy?: "tie" | "shift";
+  affectedPlayers: readonly ScoreboardOverrideAffectedPlayer[];
+}
+
 export interface ScoreboardOverrideRecord {
   id: string;
   baseScoreboardVersion: number;
@@ -111,6 +127,45 @@ export class ScoreboardRevisionLedger {
     return this.appendVersion(record, ranked);
   }
 
+  public preview(request: ScoreboardOverrideRequest): ScoreboardOverridePreview {
+    const entries = this.currentEntries();
+    const entry = entries.find((candidate) => candidate.playerId === request.playerId);
+    if (!entry) throw new Error("OVERRIDE_TARGET_NOT_FOUND");
+    return this.previewRequest(entries, entry, request);
+  }
+
+  private previewRequest(entries: ScoreboardEntry[], entry: ScoreboardEntry, request: ScoreboardOverrideRequest): ScoreboardOverridePreview {
+    const before = new Map(entries.map((candidate) => [candidate.playerId, request.stageId && candidate.stages[request.stageId] ? copyResult(candidate.stages[request.stageId] as StageResult) : null]));
+    const previewEntries = entries.map(copyEntry);
+    const previewEntry = previewEntries.find((candidate) => candidate.playerId === entry.playerId) as ScoreboardEntry;
+    this.applyRequest(previewEntries, previewEntry, request);
+    const affectedPlayers = previewEntries
+      .map((candidate) => {
+        const beforeResult = before.get(candidate.playerId);
+        const afterResult = request.stageId === undefined ? null : candidate.stages[request.stageId];
+        const beforePlace = beforeResult ? beforeResult.place : null;
+        const afterPlace = afterResult ? afterResult.place : null;
+        const beforePoints = beforeResult ? beforeResult.points : 0;
+        const afterPoints = afterResult ? afterResult.points : 0;
+        if (beforePlace === afterPlace && beforePoints === afterPoints) return null;
+        return {
+          playerId: candidate.playerId,
+          displayName: candidate.displayName,
+          beforePlace,
+          afterPlace,
+          beforePoints,
+          afterPoints
+        };
+      })
+      .filter((candidate): candidate is ScoreboardOverrideAffectedPlayer => candidate !== null)
+      .sort((left, right) => {
+        if (left.playerId === request.playerId) return -1;
+        if (right.playerId === request.playerId) return 1;
+        return (left.afterPlace ?? left.beforePlace ?? Number.MAX_SAFE_INTEGER) - (right.afterPlace ?? right.beforePlace ?? Number.MAX_SAFE_INTEGER);
+      });
+    return { playerId: request.playerId, ...(request.stageId === undefined ? {} : { stageId: request.stageId }), ...(request.rankPolicy === undefined ? {} : { rankPolicy: request.rankPolicy }), affectedPlayers };
+  }
+
   public reverse(overrideId: string, input: { actor: string; reason: string }): RevisedScoreboardVersion {
     if (!input.actor.trim()) throw new Error("OVERRIDE_ACTOR_REQUIRED");
     if (!input.reason.trim()) throw new Error("OVERRIDE_REASON_REQUIRED");
@@ -148,27 +203,30 @@ export class ScoreboardRevisionLedger {
     if (request.stageId !== undefined && request.stage !== undefined) {
       const current = entry.stages[request.stageId];
       const patch = request.stage;
-      if (!current && patch.status !== "dnf") throw new Error("OVERRIDE_STAGE_RESULT_NOT_FOUND");
       if (patch.place !== undefined && (!Number.isInteger(patch.place) || patch.place < 1)) throw new Error("OVERRIDE_PLACE_INVALID");
+      const shouldFinish = patch.status === "finished" || (patch.status === undefined && patch.place !== undefined);
       const fallback: StageResult = {
         playerId: entry.playerId,
-        status: "dnf",
-        place: 0,
+        status: shouldFinish ? "finished" : "dnf",
+        place: shouldFinish ? patch.place ?? 0 : 0,
         points: 0,
-        reason: patch.reason ?? "referee-adjudicated-dnf",
+        reason: patch.reason ?? (shouldFinish ? "referee-adjudicated-place" : "referee-adjudicated-dnf"),
         sourceId: `adjudication:${entry.playerId}:${request.stageId}`
       };
       const merged = { ...(current ?? fallback), ...patch } as StageResult & { includeInTotal?: boolean };
-      if (merged.status === "finished" && patch.place !== undefined) {
-        merged.points = this.pointsFor(request.stageId, patch.place, merged.points);
-      } else if (merged.status !== "finished") {
+      if (merged.status === "finished") {
+        const place = patch.place ?? merged.place;
+        merged.place = place;
+        merged.points = this.pointsFor(request.stageId, place, merged.points);
+      } else {
         merged.place = 0;
         merged.points = 0;
       }
       delete merged.includeInTotal;
       if (patch.includeInTotal === false) merged.points = 0;
       (entry.stages as Record<string, StageResult>)[request.stageId] = merged;
-      this.normalizeStagePlaces(entries, request.stageId, entry.playerId, patch.place);
+      if (request.rankPolicy === "shift") this.normalizeStagePlaces(entries, request.stageId, entry.playerId, patch.place);
+      else for (const candidate of entries) this.recalculate(candidate);
     }
     if (request.totalPoints !== undefined) (entry as { points: number }).points = request.totalPoints;
   }

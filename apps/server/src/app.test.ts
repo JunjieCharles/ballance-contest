@@ -175,9 +175,11 @@ describe("local API", () => {
       method: "POST",
       url: `/api/v1/competitions/${competitionId}/confirmations`,
       headers: auth(token),
-      payload: { kind: "scoreboard-override", target: "p4:s3" }
+      payload: { kind: "scoreboard-override", target: "p4:s3", playerId: "p4", stageId: "s3", operation: "set-place", place: 1, rankPolicy: "shift" }
     });
-    const confirmation = confirmationResponse.json<{ data: { token: string; impactHash: string } }>().data;
+    const confirmation = confirmationResponse.json<{ data: { token: string; impactHash: string; effect: { consequences: string[]; affectedPlayers?: Array<{ playerId: string; displayName: string }> } } }>().data;
+    expect(confirmation.effect.consequences).toContain("生成新的榜单版本");
+    expect(confirmation.effect.affectedPlayers?.map((player) => player.playerId)).toContain("p4");
     const basePayload = {
       expectedStateVersion: 0,
       idempotencyKey: "override-p4",
@@ -211,7 +213,7 @@ describe("local API", () => {
       method: "POST",
       url: `/api/v1/competitions/${competitionId}/confirmations`,
       headers: auth(token),
-      payload: { kind: "scoreboard-override", target: "p4:s3" }
+      payload: { kind: "scoreboard-override", target: "p4:s3", playerId: "p4", stageId: "s3", operation: "set-place", place: 1, rankPolicy: "shift" }
     });
     const pointsConfirmation = pointsConfirmationResponse.json<{ data: { token: string; impactHash: string } }>().data;
     const directPointsEdit = await app.inject({

@@ -141,9 +141,11 @@ test("runs the 20-player sandbox from the console and edits a score without losi
   await editable.click();
   const editor = page.locator(".score-cell-editor").first();
   await editor.getByLabel(/新名次/).fill("2");
+  await expect(editor.getByLabel("其他玩家是否顺延")).toBeChecked();
   await editor.getByRole("button", { name: "保存名次" }).click();
   const inlineConfirmation = editor.getByRole("group", { name: "保存名次确认" });
   await expect(inlineConfirmation).toContainText("生成新的榜单版本");
+  await expect(inlineConfirmation).toContainText("受影响玩家");
   await inlineConfirmation.getByRole("button", { name: "确认" }).click();
   await expect(page.locator("header")).toContainText("成绩修订版本已生成");
   await expect(page.locator(".scoreboard tbody tr")).toHaveCount(rowsBefore);

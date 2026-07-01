@@ -161,7 +161,7 @@ export const buildApp = async (options: BuildAppOptions): Promise<FastifyInstanc
     requireSession(request, true);
     return { data: service.pauseAutomation(request.params.competitionId) };
   });
-  app.post<{ Params: { competitionId: string }; Body: { kind: "restart" | "manual-action" | "manual-go" | "scoreboard-override" | "high-risk"; target?: string } }>("/api/v1/competitions/:competitionId/confirmations", async (request) => {
+  app.post<{ Params: { competitionId: string }; Body: { kind: "restart" | "manual-action" | "manual-go" | "scoreboard-override" | "high-risk"; target?: string; playerId?: string; stageId?: string; operation?: "set-place" | "set-dnf"; place?: number; rankPolicy?: "tie" | "shift" } }>("/api/v1/competitions/:competitionId/confirmations", async (request) => {
     requireSession(request, true);
     return { data: service.createConfirmation(request.params.competitionId, request.body) };
   });

@@ -864,13 +864,16 @@ export class CompetitionService {
       this.availableActionsFor(competitionId, snapshot), this.attentionItemsFor(competitionId, snapshot), stageDeadlineAt(snapshot, origin));
   }
 
-  public createConfirmation(competitionId: string, input: { kind: ConfirmationSummary["kind"]; target?: string }): ConfirmationSummary {
+  public createConfirmation(
+    competitionId: string,
+    input: { kind: ConfirmationSummary["kind"]; target?: string; playerId?: string; stageId?: string; operation?: "set-place" | "set-dnf"; place?: number; rankPolicy?: "tie" | "shift" }
+  ): ConfirmationSummary {
     const competition = this.get(competitionId);
     const runtimeSnapshot = this.runtimeAutomationSnapshot(competitionId);
     const expiresAtMs = Date.now() + 60_000;
     const token = randomUUID();
-    const target = input.target ?? competition.id;
-    let impactHash = createHash("sha256").update(`${competitionId}:${target}:${competition.stateVersion}:${input.kind}`).digest("hex");
+    const target = input.target ?? (input.kind === "scoreboard-override" && input.playerId && input.stageId ? `${input.playerId}:${input.stageId}` : competition.id);
+    let impactHash = createHash("sha256").update(JSON.stringify({ competitionId, target, stateVersion: competition.stateVersion, kind: input.kind, playerId: input.playerId, stageId: input.stageId, operation: input.operation, place: input.place, rankPolicy: input.rankPolicy })).digest("hex");
     let runtimeToken: string | undefined;
     if (input.kind === "restart") {
       try {
@@ -881,6 +884,46 @@ export class CompetitionService {
         throw new ServiceError("CONFIRMATION_UNAVAILABLE", error instanceof Error ? error.message : "当前没有可确认的重赛事故", 409);
       }
     }
+    const scorePreview = input.kind === "scoreboard-override" && input.playerId && input.stageId && input.operation
+      ? (() => {
+          const config = this.getPublishedConfig(competitionId) ?? this.getDraftConfig(competitionId);
+          const activeTestRunId = competition.mode === "test" ? this.getPayload(competitionId).activeRunId : undefined;
+          const testStages = activeTestRunId ? this.getTestRuntime(competitionId, activeTestRunId).definition.stages : [];
+          const base = this.getLatestScoreboard(competitionId);
+          const ledger = new ScoreboardRevisionLedger(base, Object.fromEntries([...config.stages, ...testStages].map((stage) => [stage.id, stage.scoring])));
+          if (input.operation === "set-place" && !Number.isInteger(input.place)) throw new ServiceError("VALIDATION_FAILED", "成绩修订缺少名次", 400);
+          const revised = ledger.apply({
+            playerId: input.playerId,
+            stageId: input.stageId,
+            stage: input.operation === "set-place"
+              ? { status: "finished", place: input.place as number, reason: "referee-adjudicated-place" }
+              : { status: "dnf", reason: "referee-adjudicated-dnf" },
+            ...(input.operation === "set-place" ? { rankPolicy: input.rankPolicy ?? "shift" } : {}),
+            actor: "local-referee",
+            reason: input.operation === "set-place" ? `set-place:${input.place}` : "set-dnf"
+          });
+          const beforeByPlayer = new Map(base.entries.map((entry) => [entry.playerId, entry]));
+          const affectedPlayers = revised.entries
+            .map((entry) => {
+              const beforeEntry = beforeByPlayer.get(entry.playerId);
+              const beforeResult = beforeEntry && input.stageId ? beforeEntry.stages[input.stageId] ?? null : null;
+              const afterResult = input.stageId ? entry.stages[input.stageId] ?? null : null;
+              const beforePlace = beforeResult ? beforeResult.place : null;
+              const afterPlace = afterResult ? afterResult.place : null;
+              const beforePoints = beforeResult ? beforeResult.points : 0;
+              const afterPoints = afterResult ? afterResult.points : 0;
+              if (beforePlace === afterPlace && beforePoints === afterPoints) return null;
+              return { playerId: entry.playerId, displayName: entry.displayName, beforePlace, afterPlace, beforePoints, afterPoints };
+            })
+            .filter((entry): entry is { playerId: string; displayName: string; beforePlace: number | null; afterPlace: number | null; beforePoints: number; afterPoints: number; } => entry !== null)
+            .sort((left, right) => {
+              if (left.playerId === input.playerId) return -1;
+              if (right.playerId === input.playerId) return 1;
+              return (left.afterPlace ?? left.beforePlace ?? Number.MAX_SAFE_INTEGER) - (right.afterPlace ?? right.beforePlace ?? Number.MAX_SAFE_INTEGER);
+            });
+          return { affectedPlayers };
+        })()
+      : undefined;
     const record: ConfirmationRecord = {
       token,
       ...(runtimeToken === undefined ? {} : { runtimeToken }),
@@ -897,7 +940,21 @@ export class CompetitionService {
       : input.kind === "restart"
         ? { title: "确认重赛", consequences: ["当前尝试将作废但保留证据", "重新执行 Ready ×3、READY、关闭 cheat 和 3/2/1/Go"], irreversible: false }
         : input.kind === "scoreboard-override"
-          ? { title: "确认成绩修订", consequences: ["生成新的榜单版本", "相关名次与计分将按已发布规则重新计算，原始事件不覆盖"], irreversible: false }
+          ? {
+              title: "确认成绩修订",
+              consequences: [
+                "生成新的榜单版本",
+                ...(input.operation === "set-place"
+                  ? [
+                      input.rankPolicy === "shift"
+                        ? `其他玩家将顺延重算，受影响 ${scorePreview?.affectedPlayers.length ?? 0} 名玩家`
+                        : "不会顺延其他玩家，按当前规则直接计分"
+                    ]
+                  : ["该成绩将改为 DNF，原始事件不覆盖"])
+              ],
+              irreversible: false,
+              ...(scorePreview === undefined ? {} : { affectedPlayers: scorePreview.affectedPlayers })
+            }
           : input.kind === "high-risk" && target === competition.id
             ? { title: "确认比赛级操作", consequences: ["将结束或删除目标比赛，具体结果以按钮所示操作为准", "删除操作会移除本地比赛数据"], irreversible: true }
             : input.kind === "high-risk"
@@ -916,7 +973,8 @@ export class CompetitionService {
         target,
         currentPhase: runtimeSnapshot?.phase ?? competition.status,
         consequences: effect.consequences,
-        irreversible: effect.irreversible
+        irreversible: effect.irreversible,
+        ...(effect.affectedPlayers === undefined ? {} : { affectedPlayers: effect.affectedPlayers })
       }
     };
   }

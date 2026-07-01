@@ -105,6 +105,7 @@ function ConfirmButton({
   kind,
   target,
   versionKey,
+  requestPayload,
   disabled,
   disabledReason,
   className,
@@ -115,10 +116,11 @@ function ConfirmButton({
   kind: ConfirmationKind;
   target: string;
   versionKey: string;
+  requestPayload?: unknown;
   disabled?: boolean;
   disabledReason?: string | undefined;
   className?: string | undefined;
-  requestConfirmation(kind: ConfirmationKind, target: string): Promise<ConfirmationSummary>;
+  requestConfirmation(kind: ConfirmationKind, target: string, requestPayload?: unknown): Promise<ConfirmationSummary>;
   onConfirm(confirmation: ConfirmationSummary): Promise<void>;
 }) {
   const [confirmation, setConfirmation] = useState<ConfirmationSummary>();
@@ -126,7 +128,7 @@ function ConfirmButton({
   const [busy, setBusy] = useState(false);
   const prepare = async () => {
     setBusy(true); setError("");
-    try { setConfirmation(await requestConfirmation(kind, target)); }
+    try { setConfirmation(await requestConfirmation(kind, target, requestPayload)); }
     catch (caught) { setError(caught instanceof Error ? caught.message : "无法创建确认"); }
     finally { setBusy(false); }
   };
@@ -141,16 +143,22 @@ function ConfirmButton({
     <button className={className} disabled={disabled || busy} title={disabledReason} onClick={() => void prepare()}>{busy && !confirmation ? "准备中…" : label}</button>
     {disabled && disabledReason && <small className="disabled-reason">{disabledReason}</small>}
     {confirmation && <div className="inline-confirm" role="group" aria-label={`${label}确认`}>
+      {(() => {
+        const effect = confirmation.effect as ConfirmationSummary["effect"] & { affectedPlayers?: readonly { playerId: string; displayName: string; beforePlace: number | null; afterPlace: number | null; beforePoints: number; afterPoints: number; }[] };
+        return <>
       <strong>{confirmation.effect.title}</strong>
       <span>目标：{confirmation.effect.target}</span>
       <span>当前阶段：{phaseLabel[confirmation.effect.currentPhase] ?? confirmation.effect.currentPhase} · 状态版本 v{confirmation.stateVersion}</span>
-      <ul>{confirmation.effect.consequences.map((item) => <li key={item}>{item}</li>)}</ul>
+      <ul>{effect.consequences.map((item) => <li key={item}>{item}</li>)}</ul>
+      {effect.affectedPlayers?.length ? <div className="affected-players"><strong>受影响玩家</strong><ul>{effect.affectedPlayers.map((item) => <li key={item.playerId}><span>{item.displayName}</span><small>{item.beforePlace === null ? "空成绩" : `第 ${item.beforePlace} 名`} → {item.afterPlace === null ? "空成绩" : `第 ${item.afterPlace} 名`} · {item.beforePoints} 分 → {item.afterPoints} 分</small></li>)}</ul></div> : null}
       <small>令牌有效至 {formatUtc8DateTime(confirmation.expiresAt)}{confirmation.effect.irreversible ? " · 此操作不可撤销" : ""}</small>
       <div className="button-row compact">
         <button className={className} disabled={busy} onClick={() => void confirm()}>确认</button>
         <button className="ghost" disabled={busy} onClick={() => setConfirmation(undefined)}>取消</button>
       </div>
       {error && <span className="inline-error">{error}</span>}
+      </>;
+      })()}
     </div>}
     {!confirmation && error && <small className="inline-error">{error}</small>}
   </div>;
@@ -382,10 +390,10 @@ export function App() {
     });
   }, snapshot?.competition.mode === "test" ? "模拟裁判动作已应用" : "裁判动作已提交");
 
-  const requestConfirmation = async (kind: ConfirmationKind, target: string): Promise<ConfirmationSummary> => {
+  const requestConfirmation = async (kind: ConfirmationKind, target: string, requestPayload?: unknown): Promise<ConfirmationSummary> => {
     if (!session || !snapshot) throw new Error("请选择比赛");
     return request<ConfirmationSummary>(`/api/v1/competitions/${snapshot.competition.id}/confirmations`, session, {
-      method: "POST", body: JSON.stringify({ kind, target })
+      method: "POST", body: JSON.stringify({ kind, target, ...(typeof requestPayload === "object" && requestPayload !== null ? requestPayload : {}) })
     });
   };
 
@@ -714,20 +722,22 @@ const formatOverrideValue = (value: unknown): string => {
 function EditableScoreCell({ value, stage, playerId, playerName, canWrite, versionKey, requestConfirmation, save }: {
   value: { status?: string; place?: number; points?: number; reason?: string } | undefined;
   stage: StageConfig; playerId: string; playerName: string; canWrite: boolean; versionKey: string;
-  requestConfirmation(kind: ConfirmationKind, target: string): Promise<ConfirmationSummary>;
+  requestConfirmation(kind: ConfirmationKind, target: string, requestPayload?: unknown): Promise<ConfirmationSummary>;
   save(draft: ScoreDraft, confirmation: ConfirmationSummary): Promise<void>;
 }) {
   const [editing, setEditing] = useState(false);
   const [place, setPlace] = useState(String(value?.place || 1));
+  const [shiftOthers, setShiftOthers] = useState(true);
   const numericPlace = Number(place);
   const calculatedPoints = Number.isInteger(numericPlace) && numericPlace > 0 ? stage.scoring[numericPlace - 1] ?? 0 : 0;
   const className = value?.status === "dnf" ? "dnf" : value?.status === "excluded" ? "excluded" : value?.place === 1 ? "gold" : value?.place === 2 ? "silver" : value?.place === 3 ? "bronze" : "";
-  if (!editing) return <td className={`${className} editable-score-cell`}><button className="cell-button" disabled={!canWrite} title={`修改 ${playerName} 的 ${stage.label} 成绩`} onClick={() => { setPlace(String(value?.place || 1)); setEditing(true); }}>{!value ? "—" : value.status === "dnf" ? "DNF" : value.status === "excluded" ? `排除 · 0 分` : `#${value.place} / ${value.points} 分`}</button></td>;
+  if (!editing) return <td className={`${className} editable-score-cell`}><button className="cell-button" disabled={!canWrite} title={`修改 ${playerName} 的 ${stage.label} 成绩`} onClick={() => { setPlace(String(value?.place || 1)); setShiftOthers(true); setEditing(true); }}>{!value ? "—" : value.status === "dnf" ? "DNF" : value.status === "excluded" ? `排除 · 0 分` : `#${value.place} / ${value.points} 分`}</button></td>;
   const target = `${playerId}:${stage.id}`;
-  return <td className="score-cell-editor"><label>新名次<input aria-label={`${playerId} ${stage.label} 新名次`} type="number" min="1" value={place} onChange={(event) => setPlace(event.target.value)} /></label><small>按本关规则自动计 {calculatedPoints} 分</small>
+  const rankPolicy = shiftOthers ? "shift" : "tie";
+  return <td className="score-cell-editor"><label>新名次<input aria-label={`${playerId} ${stage.label} 新名次`} type="number" min="1" value={place} onChange={(event) => setPlace(event.target.value)} /></label><label className="inline-checkbox"><input aria-label="其他玩家是否顺延" type="checkbox" checked={shiftOthers} onChange={(event) => setShiftOthers(event.target.checked)} />其他玩家是否顺延</label><small>{shiftOthers ? `会顺延其他玩家并按本关规则自动计 ${calculatedPoints} 分` : `不会顺延其他玩家，按本关规则直接计 ${calculatedPoints} 分`}</small>
     <div className="score-editor-actions">
-      <ConfirmButton label="保存名次" kind="scoreboard-override" target={target} versionKey={versionKey} disabled={!Number.isInteger(numericPlace) || numericPlace < 1} requestConfirmation={requestConfirmation} onConfirm={async (confirmation) => { await save({ playerId, stageId: stage.id, operation: "set-place", place: numericPlace, rankPolicy: "shift" }, confirmation); setEditing(false); }} />
-      <ConfirmButton label="设为 DNF" kind="scoreboard-override" target={target} versionKey={versionKey} className="danger" requestConfirmation={requestConfirmation} onConfirm={async (confirmation) => { await save({ playerId, stageId: stage.id, operation: "set-dnf" }, confirmation); setEditing(false); }} />
+      <ConfirmButton key={`save:${target}:${versionKey}:${place}:${rankPolicy}`} label="保存名次" kind="scoreboard-override" target={target} versionKey={versionKey} requestPayload={{ playerId, stageId: stage.id, operation: "set-place", place: numericPlace, rankPolicy }} disabled={!Number.isInteger(numericPlace) || numericPlace < 1} requestConfirmation={requestConfirmation} onConfirm={async (confirmation) => { await save({ playerId, stageId: stage.id, operation: "set-place", place: numericPlace, rankPolicy }, confirmation); setEditing(false); }} />
+      <ConfirmButton key={`dnf:${target}:${versionKey}`} label="设为 DNF" kind="scoreboard-override" target={target} versionKey={versionKey} requestPayload={{ playerId, stageId: stage.id, operation: "set-dnf" }} className="danger" requestConfirmation={requestConfirmation} onConfirm={async (confirmation) => { await save({ playerId, stageId: stage.id, operation: "set-dnf" }, confirmation); setEditing(false); }} />
       <button className="ghost" onClick={() => setEditing(false)}>取消</button>
     </div>
   </td>;

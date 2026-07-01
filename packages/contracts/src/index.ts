@@ -326,6 +326,14 @@ export interface ConfirmationSummary {
     currentPhase: string;
     consequences: readonly string[];
     irreversible: boolean;
+    affectedPlayers?: readonly {
+      playerId: string;
+      displayName: string;
+      beforePlace: number | null;
+      afterPlace: number | null;
+      beforePoints: number;
+      afterPoints: number;
+    }[];
   };
 }
 
