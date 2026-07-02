@@ -1028,7 +1028,7 @@ export class CompetitionController {
 
   private queueBulletin(stage: AutomationStage, plannedReadyAtMs: number, protectionMessage?: string): void {
     const name = stage.displayName ?? `${stage.mode.toUpperCase()}${stage.map}`;
-    const protectionContext = protectionMessage ? `（${protectionMessage}）` : "";
+    const protectionContext = protectionMessage ? `\n${protectionMessage}` : "";
     const suffix = this.startProtectionUsedStageIds.has(stage.id) ? START_PROTECTION_USED_SUFFIX : "";
     this.queueActionForStage("bulletin", stage, `${name} 将在 ${formatUtc8Time(this.wallClockOriginMs + plannedReadyAtMs)} 发令${protectionContext}${suffix}`);
   }

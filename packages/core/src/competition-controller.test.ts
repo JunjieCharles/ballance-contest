@@ -347,7 +347,7 @@ describe("CompetitionController", () => {
     expect(correction.find((candidate) => candidate.kind === "notice")?.message)
       .toBe("第一关：玩家 p1 在起跑敏感期掉线，发令流程已中止，第一条 Ready 改至 08:02。");
     expect(correction.find((candidate) => candidate.kind === "bulletin")?.message)
-      .toBe("第一关 将在 08:02 发令（由于玩家 p1 起跑保护期掉线，发令时间延迟）\n本关起跑保护已被使用，后续不再延时。");
+      .toBe("第一关 将在 08:02 发令\n由于玩家 p1 起跑保护期掉线，发令时间延迟\n本关起跑保护已被使用，后续不再延时。");
     for (const item of correction) controller.acknowledgeAction(item.id, "acknowledged");
 
     clock.set(10_000);
@@ -399,7 +399,7 @@ describe("CompetitionController", () => {
       .toBe("第一关：玩家 p2 在起跑保护期掉线，当前尝试及成绩已作废，第一条 Ready 改至 08:02。");
     const correctionBulletins = correction.filter((candidate) => candidate.kind === "bulletin");
     expect(correctionBulletins.find((candidate) => candidate.message?.includes("起跑保护"))?.message)
-      .toBe("第一关 将在 08:02 发令（由于玩家 p2 起跑保护期掉线，本关重赛）\n本关起跑保护已被使用，后续不再延时。");
+      .toBe("第一关 将在 08:02 发令\n由于玩家 p2 起跑保护期掉线，本关重赛\n本关起跑保护已被使用，后续不再延时。");
     for (const item of correction) controller.acknowledgeAction(item.id, "acknowledged");
 
     controller.manualCheatOff();

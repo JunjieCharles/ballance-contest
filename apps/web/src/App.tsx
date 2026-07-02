@@ -990,7 +990,7 @@ function RawLogWindow({ logs, minimized, setMinimized, refresh, mode }: { logs: 
     const body = bodyRef.current;
     if (!minimized && body && stickToBottom.current) body.scrollTo({ top: body.scrollHeight });
   }, [logs, minimized]);
-  return <aside className={minimized ? "raw-log-window minimized" : "raw-log-window"} aria-label="原始客户端日志" style={box ? { left: box.x, top: box.y, width: box.width, height: box.height, right: "auto", bottom: "auto" } : undefined}>
+  return <aside className={minimized ? "raw-log-window minimized" : "raw-log-window"} aria-label="原始客户端日志" style={box ? { left: box.x, top: box.y, width: box.width, ...(minimized ? {} : { height: box.height }), right: "auto", bottom: "auto" } : undefined}>
     <button className="raw-log-resize-handle" aria-label="拖动左上角缩放原始客户端日志" onPointerDown={(event) => {
       const bounds = event.currentTarget.parentElement?.getBoundingClientRect();
       if (!bounds) return;
