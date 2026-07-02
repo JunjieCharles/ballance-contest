@@ -494,6 +494,33 @@ describe("CompetitionController", () => {
     expect(controller.snapshot().incidents.filter((item) => item.type === "cheat-violation")).toHaveLength(0);
   });
 
+  it("warns but does not exclude a player who turns cheat on during countdown before Go is acknowledged", () => {
+    const clock = new FakeClock();
+    const controller = new CompetitionController(configuration(), clock);
+    connectAll(controller);
+    controller.enable(0);
+    for (const item of controller.drainActions()) controller.acknowledgeAction(item.id, "acknowledged");
+    controller.tick();
+    for (const item of controller.drainActions()) controller.acknowledgeAction(item.id, "acknowledged");
+    for (let index = 0; index < 2; index += 1) {
+      clock.advance(5_000); controller.tick(); controller.acknowledgeAction(action(controller, "ready").id, "acknowledged");
+    }
+    clock.advance(5_000); controller.tick(); controller.acknowledgeAction(action(controller, "announce").id, "acknowledged");
+    clock.advance(5_000); controller.tick(); controller.acknowledgeAction(action(controller, "cheat-off").id, "acknowledged");
+    clock.advance(10_000); controller.tick();
+    // Go is queued, phase is countdown
+    expect(controller.snapshot().phase).toBe("countdown");
+    // cheat ON during countdown should warn but not exclude (no attempt yet)
+    controller.observeCheat("p1", true, "countdown-cheat");
+    expect(controller.snapshot().attempts).toHaveLength(0);
+    // Go acknowledged → running
+    controller.acknowledgeAction(action(controller, "go").id, "acknowledged");
+    expect(controller.snapshot().phase).toBe("running");
+    expect(controller.snapshot().attempts[0]?.results).toContainEqual(
+      expect.objectContaining({ playerId: "p1", status: "excluded", reason: "cheat-enabled" })
+    );
+  });
+
   it("suggests restart for a protected crash or configured group disconnect, not a lone normal disconnect", () => {
     const clock = new FakeClock();
     const controller = new CompetitionController(configuration({ policy: { announcementLeadMs: 0, readyBufferMs: 1_000, groupDisconnectThreshold: 2 } }), clock);

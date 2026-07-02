@@ -847,6 +847,11 @@ export class CompetitionController {
     this.restartPending = false;
     this.forceRestartActionId = undefined;
     this.disconnectedDuringAttempt.clear();
+    for (const participantId of this.participantIds) {
+      if (this.cheat.get(participantId)) {
+        this.acceptResult(this.attempts[this.attempts.length - 1]!, { playerId: participantId, status: "excluded", sourceId: randomUUID(), receivedAtMs: now, reason: "cheat-enabled" });
+      }
+    }
     const stageName = this.stage.displayName ?? `${this.stage.mode.toUpperCase()}${this.stage.map}`;
     this.queueActionForStage("bulletin", this.stage, `${stageName}已起跑`, false);
   }
