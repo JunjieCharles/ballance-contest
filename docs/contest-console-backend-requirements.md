@@ -75,6 +75,14 @@ BallanceMMOMockClient.exe ── BallanceMMO 服务器
 - 使用 Node 子进程管道管理 MockClient；若 Windows 控制台输入不兼容管道，替换为 ConPTY/node-pty 适配器。
 - MockClient 适配器、比赛领域、解析器和存储之间使用接口隔离，不能让原始控制台命令渗透为业务模型。
 
+当前服务端模块边界如下：
+
+- `CompetitionService` 是 HTTP/API 门面，组合比赛生命周期、确认令牌、动作矩阵和快照，不直接拥有工作或测试运行时 Map。
+- `WorkRuntimeManager` 独占真实 MockClient 生命周期、同服租约、命令队列、日志接收、名单对账和单调时钟驱动。
+- `TestRuntimeManager` 独占场景目录、虚拟时钟、行为玩家、故障计划、测试日志和运行恢复。
+- `ScoreboardService` 负责固定榜单版本、逐关修订权限、人工修订和覆盖审计；`RefereeActionService` 负责裁判动作执行与最末端命令编码。
+- `CompetitionAuditService` 统一持久化原始日志、命令审计和注意事项。模块只能通过显式端口访问配置、SQLite、日志和事件，不得互读其他模块的私有运行 Map。
+
 ### 2.3 服务启动
 
 - 固定绑定 `127.0.0.1:32113`，不得在端口占用时自动换用随机端口。

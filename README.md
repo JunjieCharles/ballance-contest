@@ -297,6 +297,8 @@ server-windows/  BallanceMMO Windows 运行文件
 test/            夹具、单元、集成、浏览器和非功能测试
 ```
 
+服务端以 `CompetitionService` 作为 API 门面；工作模式进程/命令/名单对账、测试模式场景/虚拟时钟、榜单修订、裁判动作和审计日志分别由独立服务负责。模块只通过窄接口交换配置、持久化、事件和快照，HTTP API 与 SQLite 格式不因这次拆分改变。
+
 ## 相关文档
 
 - [开发进展与发布前清单](docs/development-progress.md)

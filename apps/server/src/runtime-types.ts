@@ -1,0 +1,37 @@
+import type { ScoreboardVersionView, ScenarioDefinition } from "@ballance/contracts";
+import type { AutomationAction, AutomationSnapshot } from "@ballance/core";
+
+export interface PersistedTestOperation {
+  kind: "automation-start" | "advance-clock" | "fault";
+  readyInMs?: number;
+  milliseconds?: number;
+  fault?: string;
+  playerId?: string;
+}
+
+export interface PendingTestCountdown {
+  action: AutomationAction;
+  emitted: number;
+}
+
+export interface ScheduledTestRecovery {
+  playerId: string;
+  dueAtMs: number;
+}
+
+export interface PersistedTestRun {
+  id: string;
+  definition: ScenarioDefinition;
+  playedEvents: number;
+  operations: PersistedTestOperation[];
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ServiceSnapshotPayload {
+  activeRunId?: string;
+  testRuns?: PersistedTestRun[];
+  scoreboardRevisions?: ScoreboardVersionView[];
+  archives?: Array<{ version: number; directory: string; packagePath: string; manifestHash: string; createdAt: string }>;
+  work?: { started: boolean; mockClientVersion?: string; automation?: AutomationSnapshot; mapEchoPrefixes?: Record<string, string> };
+}
