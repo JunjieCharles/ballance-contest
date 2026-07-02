@@ -76,7 +76,7 @@ await writeFile(
     "powershell.exe -NoProfile -ExecutionPolicy Bypass -File \"%~dp0Prepare-ContestConsolePort.ps1\"\r\n" +
     "if errorlevel 1 (\r\n" +
     "  echo.\r\n" +
-    "  echo Contest Console could not prepare port 32113.\r\n" +
+    "  echo Contest Console could not prepare port 38623.\r\n" +
     "  pause\r\n" +
     "  exit /b 1\r\n" +
     ")\r\n" +

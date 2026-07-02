@@ -18,10 +18,10 @@ foreach ($file in $portableManifest.files) {
     if ($actualHash -ne $file.sha256) { throw "Portable manifest hash mismatch: $($file.relativePath)" }
 }
 
-$existingListener = Get-NetTCPConnection -LocalPort 32113 -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1
+$existingListener = Get-NetTCPConnection -LocalPort 38623 -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1
 if ($null -ne $existingListener) {
     $owner = Get-CimInstance Win32_Process -Filter "ProcessId=$($existingListener.OwningProcess)" -ErrorAction SilentlyContinue
-    throw "Portable smoke requires free port 32113; currently owned by PID $($existingListener.OwningProcess): $($owner.ExecutablePath) $($owner.CommandLine)"
+    throw "Portable smoke requires free port 38623; currently owned by PID $($existingListener.OwningProcess): $($owner.ExecutablePath) $($owner.CommandLine)"
 }
 
 $temporaryRoot = Join-Path ([IO.Path]::GetTempPath()) ("ballance-portable-smoke-" + [guid]::NewGuid().ToString("N"))
@@ -43,8 +43,8 @@ try {
     for ($attempt = 0; $attempt -lt 60; $attempt += 1) {
         if ($process.HasExited) { throw "Portable server exited with code $($process.ExitCode)" }
         try {
-            $health = Invoke-RestMethod -Uri "http://127.0.0.1:32113/api/v1/health" -TimeoutSec 1
-            $listener = Get-NetTCPConnection -LocalPort 32113 -State Listen -ErrorAction Stop | Select-Object -First 1
+            $health = Invoke-RestMethod -Uri "http://127.0.0.1:38623/api/v1/health" -TimeoutSec 1
+            $listener = Get-NetTCPConnection -LocalPort 38623 -State Listen -ErrorAction Stop | Select-Object -First 1
             $serverProcess = Get-CimInstance Win32_Process -Filter "ProcessId=$($listener.OwningProcess)" -ErrorAction Stop
             $expectedNode = [IO.Path]::GetFullPath($node)
             $actualNode = [IO.Path]::GetFullPath($serverProcess.ExecutablePath)
@@ -60,7 +60,7 @@ try {
     if ($null -eq $health -or $health.status -ne "ok" -or ($health.modes -join ",") -ne "work,test") {
         throw "Portable health check failed"
     }
-    $webResponse = Invoke-WebRequest -Uri "http://127.0.0.1:32113/" -TimeoutSec 2 -UseBasicParsing
+    $webResponse = Invoke-WebRequest -Uri "http://127.0.0.1:38623/" -TimeoutSec 2 -UseBasicParsing
     if ($webResponse.StatusCode -ne 200 -or $webResponse.Content -notmatch '<div id="root">') { throw "Portable web UI check failed" }
     Push-Location $package
     try {

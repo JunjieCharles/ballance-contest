@@ -39,14 +39,14 @@ describe("local security and process ownership", () => {
     const blocker = createServer();
     const ownsBlocker = await new Promise<boolean>((resolve, reject) => {
       blocker.once("error", reject);
-      blocker.listen(32113, "127.0.0.1", () => resolve(true));
+      blocker.listen(38623, "127.0.0.1", () => resolve(true));
     }).catch((error: unknown) => {
       if (error && typeof error === "object" && "code" in error && error.code === "EADDRINUSE") return false;
       throw error;
     });
     const app = await buildApp({ bootstrapToken: "bootstrap", serveStatic: false });
     try {
-      await expect(app.listen({ host: "127.0.0.1", port: 32113 })).rejects.toMatchObject({ code: "EADDRINUSE" });
+      await expect(app.listen({ host: "127.0.0.1", port: 38623 })).rejects.toMatchObject({ code: "EADDRINUSE" });
       expect(app.server.address()).toBeNull();
     } finally {
       await app.close();

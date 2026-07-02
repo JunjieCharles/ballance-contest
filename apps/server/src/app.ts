@@ -47,7 +47,7 @@ export const buildApp = async (options: BuildAppOptions): Promise<FastifyInstanc
 
   const requireSession = (request: FastifyRequest, control = false): LocalSession => {
     const origin = request.headers.origin;
-    const trustedOrigins = new Set(["http://127.0.0.1:32113", "http://localhost:32113", ...(options.trustedOrigins ?? [])]);
+    const trustedOrigins = new Set(["http://127.0.0.1:38623", "http://localhost:38623", ...(options.trustedOrigins ?? [])]);
     if (origin && !trustedOrigins.has(origin)) throw new ServiceError("ORIGIN_REJECTED", "请求来源不受信任", 403);
     const session = sessions.get(bearer(request));
     if (!session) throw new ServiceError("UNAUTHORIZED", "缺少有效本机会话", 401);
