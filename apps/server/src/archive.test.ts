@@ -12,7 +12,8 @@ const sha = (path: string): string => createHash("sha256").update(readFileSync(p
 
 const exportsForTest = () => createScoreboardExports({
   competitionName: "Archive Test", mode: "test", version: 1, generatedAt: "2026-06-29T12:00:00.000Z",
-  entries: [{ rank: 1, playerId: "p1", displayName: "测试选手", points: 20, placeCounts: [1], change: null, stages: { s1: { playerId: "p1", status: "finished", place: 1, points: 20, sourceId: "event-1" } } }]
+  entries: [{ rank: 1, playerId: "p1", displayName: "测试选手", points: 20, change: null, stages: { s1: { playerId: "p1", status: "finished", place: 1, points: 20, sourceId: "event-1" } } }],
+  stages: [{ id: "s1", label: "SR1" }]
 });
 
 describe("competition archive", () => {
@@ -39,8 +40,11 @@ describe("competition archive", () => {
     expect(created.manifest).toMatchObject({ mode: "test", testData: true, applicationVersion: "0.1.0-dev" });
     expect(created.manifest.files.map((file) => file.path)).toEqual(expect.arrayContaining([
       "logs/Mock Client.log", "config/config.json", "events/events.json",
+      expect.stringMatching(/^exports\/.+\.csv$/),
       expect.stringMatching(/^exports\/.+\.xlsx$/)
     ]));
+    expect(created.manifest.files.filter((file) => file.kind === "export")).toHaveLength(2);
+    expect(created.manifest.files.some((file) => /\.(html|tsv)$/.test(file.path))).toBe(false);
     expect(readFileSync(join(created.directory, "manifest.sha256"), "utf8")).toContain(created.manifestHash);
     expect(readFileSync(created.packagePath).readUInt32LE(0)).toBe(0x04034b50);
     expect({ hash: sha(log), mtime: statSync(log).mtimeMs }).toEqual(before);

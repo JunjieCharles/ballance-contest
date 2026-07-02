@@ -1,11 +1,14 @@
 import { describe, expect, it } from "vitest";
 import {
   capabilitiesFor,
+  createScoreboardTable,
   createDefaultCompetitionConfig,
   minimumScoringPlaceFor,
   spectatorLoginName,
   stageCommandTarget,
   stageDisplayName,
+  scoreboardTableToHtml,
+  scoreboardTableToTsv,
   validateCompetitionConfigForPublish
 } from "./index.js";
 
@@ -31,6 +34,38 @@ describe("capabilitiesFor", () => {
       playback: false,
       faultInjection: false
     });
+  });
+});
+
+describe("shared scoreboard table", () => {
+  it("uses the live table columns, cell text and semantic styles for copy and exports", () => {
+    const table = createScoreboardTable([{ id: "s1", label: "SR1" }, { id: "s2", label: "决赛图" }], [
+      {
+        rank: 1, playerId: "p1", displayName: "Alpha & Beta", points: 20, change: 2,
+        stages: {
+          s1: { status: "finished", place: 1, points: 20 },
+          s2: { status: "dnf", place: 0, points: 0 }
+        }
+      },
+      {
+        rank: 2, playerId: "p2", displayName: "Gamma", points: 0, change: -1,
+        stages: { s1: { status: "excluded", place: 0, points: 0 } }
+      }
+    ]);
+    expect(table.headers).toEqual(["变化", "名次", "总分", "选手", "SR1", "决赛图"]);
+    expect(table.rows[0]?.cells).toEqual([
+      { text: "▲2", style: "rank-up" },
+      { text: "1", style: "plain" },
+      { text: "20", style: "plain" },
+      { text: "Alpha & Beta", style: "plain" },
+      { text: "#1 / 20 分", style: "gold" },
+      { text: "DNF", style: "dnf" }
+    ]);
+    expect(scoreboardTableToTsv(table)).toContain("变化\t名次\t总分\t选手\tSR1\t决赛图\r\n▲2\t1\t20\tAlpha & Beta\t#1 / 20 分\tDNF");
+    expect(scoreboardTableToHtml(table)).toContain("Alpha &amp; Beta");
+    expect(scoreboardTableToHtml(table)).toContain('data-style="gold"');
+    expect(scoreboardTableToHtml(table)).toContain("text-decoration:line-through");
+    expect(scoreboardTableToHtml(table)).toContain('data-style="excluded"');
   });
 });
 

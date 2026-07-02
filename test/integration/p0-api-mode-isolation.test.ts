@@ -82,8 +82,9 @@ describe("P0 API mode isolation and test run regression", () => {
 
     const csv = await app.inject({ method: "GET", url: `/api/v1/competitions/${competitionId}/test-runs/${runId}/exports/csv?version=15`, headers: auth(token) });
     expect(csv.statusCode).toBe(200);
-    expect(csv.body).toContain("测试数据");
-    expect(csv.headers["content-disposition"]).toContain("scoreboard-v15.csv");
+    expect(csv.body).toContain('"变化","名次","总分","选手","SR1","HS2","SR13"');
+    expect(csv.body).not.toContain("数据标记");
+    expect(csv.headers["content-disposition"]).toContain("scoreboard-test-v15.csv");
 
     const reset = await app.inject({ method: "POST", url: `/api/v1/competitions/${competitionId}/test-runs/${runId}/reset`, headers: auth(token), payload: {} });
     expect(reset.json()).toMatchObject({ data: { attempts: [], scoreboardVersions: [], anomalies: [] } });

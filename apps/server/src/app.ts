@@ -73,6 +73,7 @@ export const buildApp = async (options: BuildAppOptions): Promise<FastifyInstanc
     requestedVersion: number | undefined,
     reply: FastifyReply
   ) => {
+    if (format !== "csv" && format !== "xlsx") throw new ServiceError("VALIDATION_FAILED", "不支持的导出格式", 400);
     const fixed = service.getLatestScoreboard(competitionId, requestedVersion);
     const competition = service.get(competitionId);
     const snapshot = service.snapshot(competitionId);
@@ -82,19 +83,16 @@ export const buildApp = async (options: BuildAppOptions): Promise<FastifyInstanc
       version: fixed.version,
       generatedAt: new Date().toISOString(),
       entries: fixed.entries,
-      scoringRules: snapshot.config.stages.map((stage) => ({ stage: stageDisplayName(stage), rule: stage.scoring.join("/") }))
+      stages: snapshot.config.stages.map((stage) => ({ id: stage.id, label: stageDisplayName(stage) }))
     });
     const formats = {
-      html: { contentType: "text/html; charset=utf-8", body: bundle.html },
-      tsv: { contentType: "text/tab-separated-values; charset=utf-8", body: bundle.tsv },
       csv: { contentType: "text/csv; charset=utf-8", body: bundle.csv },
       xlsx: { contentType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", body: bundle.xlsx }
     } as const;
-    const selected = formats[format as keyof typeof formats];
-    if (!selected) throw new ServiceError("VALIDATION_FAILED", "不支持的导出格式", 400);
+    const selected = formats[format];
     const encodedName = encodeURIComponent(`${bundle.basename}.${format}`);
     return reply.header("Content-Type", selected.contentType)
-      .header("Content-Disposition", `attachment; filename="scoreboard-v${fixed.version}.${format}"; filename*=UTF-8''${encodedName}`)
+      .header("Content-Disposition", `attachment; filename="scoreboard-${competition.mode}-v${fixed.version}.${format}"; filename*=UTF-8''${encodedName}`)
       .send(selected.body);
   };
 
@@ -238,25 +236,23 @@ export const buildApp = async (options: BuildAppOptions): Promise<FastifyInstanc
   });
   app.get<{ Params: { competitionId: string; runId: string; format: string }; Querystring: { version?: string } }>("/api/v1/competitions/:competitionId/test-runs/:runId/exports/:format", async (request, reply) => {
     requireSession(request, false);
+    if (request.params.format !== "csv" && request.params.format !== "xlsx") throw new ServiceError("VALIDATION_FAILED", "不支持的导出格式", 400);
     const requestedVersion = request.query.version === undefined ? undefined : Number(request.query.version);
     if (requestedVersion !== undefined && !Number.isInteger(requestedVersion)) throw new ServiceError("VALIDATION_FAILED", "榜单版本必须是整数", 400);
     const fixed = service.getTestScoreboardVersion(request.params.competitionId, request.params.runId, requestedVersion);
     const bundle = createScoreboardExports({
       competitionName: fixed.competition.name, mode: fixed.competition.mode, version: fixed.scoreboard.version,
       generatedAt: new Date().toISOString(), entries: fixed.scoreboard.entries,
-      scoringRules: fixed.definition.stages.map((stage) => ({ stage: stage.id, rule: stage.scoring.join("/") }))
+      stages: fixed.definition.stages.map((stage) => ({ id: stage.id, label: stage.displayName?.trim() || (stage.mapKind === "custom" ? stage.id : `${stage.mode}${stage.level}`) }))
     });
     const formats = {
-      html: { contentType: "text/html; charset=utf-8", body: bundle.html },
-      tsv: { contentType: "text/tab-separated-values; charset=utf-8", body: bundle.tsv },
       csv: { contentType: "text/csv; charset=utf-8", body: bundle.csv },
       xlsx: { contentType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", body: bundle.xlsx }
     } as const;
-    const selected = formats[request.params.format as keyof typeof formats];
-    if (!selected) throw new ServiceError("VALIDATION_FAILED", "不支持的导出格式", 400);
+    const selected = formats[request.params.format];
     const encodedName = encodeURIComponent(`${bundle.basename}.${request.params.format}`);
     return reply.header("Content-Type", selected.contentType)
-      .header("Content-Disposition", `attachment; filename="scoreboard-v${fixed.scoreboard.version}.${request.params.format}"; filename*=UTF-8''${encodedName}`)
+      .header("Content-Disposition", `attachment; filename="scoreboard-${fixed.competition.mode}-v${fixed.scoreboard.version}.${request.params.format}"; filename*=UTF-8''${encodedName}`)
       .send(selected.body);
   });
   app.post<{ Params: { competitionId: string; runId: string }; Body: { version: number } }>("/api/v1/competitions/:competitionId/test-runs/:runId/archive", async (request) => {
@@ -267,7 +263,7 @@ export const buildApp = async (options: BuildAppOptions): Promise<FastifyInstanc
     const exports = createScoreboardExports({
       competitionName: fixed.competition.name, mode: fixed.competition.mode, version: fixed.scoreboard.version,
       generatedAt, entries: fixed.scoreboard.entries,
-      scoringRules: fixed.definition.stages.map((stage) => ({ stage: stage.id, rule: stage.scoring.join("/") }))
+      stages: fixed.definition.stages.map((stage) => ({ id: stage.id, label: stage.displayName?.trim() || (stage.mapKind === "custom" ? stage.id : `${stage.mode}${stage.level}`) }))
     });
     mkdirSync(dataRoot, { recursive: true });
     const archive = createCompetitionArchive({
@@ -313,7 +309,7 @@ export const buildApp = async (options: BuildAppOptions): Promise<FastifyInstanc
     const generatedAt = new Date().toISOString();
     const exports = createScoreboardExports({
       competitionName: competition.name, mode: competition.mode, version: fixed.version, generatedAt, entries: fixed.entries,
-      scoringRules: snapshot.config.stages.map((stage) => ({ stage: stageDisplayName(stage), rule: stage.scoring.join("/") }))
+      stages: snapshot.config.stages.map((stage) => ({ id: stage.id, label: stageDisplayName(stage) }))
     });
     mkdirSync(dataRoot, { recursive: true });
     const archive = createCompetitionArchive({

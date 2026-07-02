@@ -277,7 +277,11 @@ describe("local API", () => {
     const csv = await app.inject({ method: "GET", url: `/api/v1/competitions/${competitionId}/test-runs/${runId}/exports/csv?version=1`, headers: auth(token) });
     expect(csv.statusCode).toBe(200);
     expect(csv.headers["content-type"]).toContain("text/csv");
-    expect(csv.body).toContain("测试数据");
+    expect(csv.body).toContain('"变化","名次","总分","选手","SR1","HS2","SR13"');
+    expect(csv.body).not.toContain("数据标记");
+    expect(csv.headers["content-disposition"]).toContain("scoreboard-test-v1.csv");
+    expect((await app.inject({ method: "GET", url: `/api/v1/competitions/${competitionId}/test-runs/${runId}/exports/html?version=1`, headers: auth(token) })).statusCode).toBe(400);
+    expect((await app.inject({ method: "GET", url: `/api/v1/competitions/${competitionId}/test-runs/${runId}/exports/tsv?version=1`, headers: auth(token) })).statusCode).toBe(400);
     const confirmationResponse = await app.inject({ method: "POST", url: `/api/v1/competitions/${competitionId}/confirmations`, headers: auth(token), payload: { kind: "high-risk", target: competitionId } });
     const confirmation = confirmationResponse.json<{ data: { token: string; impactHash: string } }>().data;
     await app.inject({

@@ -127,6 +127,86 @@ export const stageCommandTarget = (stage: Pick<StageConfig, "level"> & { mapKind
   return `${mapHash} 0`;
 };
 
+export type ScoreboardTableCellStyle = "plain" | "rank-up" | "rank-down" | "gold" | "silver" | "bronze" | "dnf" | "excluded";
+
+export interface ScoreboardTableCell {
+  text: string;
+  style: ScoreboardTableCellStyle;
+}
+
+export interface ScoreboardTableRow {
+  playerId: string;
+  cells: readonly ScoreboardTableCell[];
+}
+
+export interface ScoreboardTableModel {
+  headers: readonly string[];
+  rows: readonly ScoreboardTableRow[];
+}
+
+export interface ScoreboardTableEntry {
+  rank: number;
+  playerId: string;
+  displayName: string;
+  points: number;
+  change: number | null;
+  stages: Readonly<Record<string, unknown>>;
+}
+
+const tableTextCell = (value: string): string => value.replaceAll("\t", " ").replaceAll("\r", " ").replaceAll("\n", " ");
+const scoreboardCell = (text: string, style: ScoreboardTableCellStyle = "plain"): ScoreboardTableCell => ({ text: tableTextCell(text), style });
+
+const stageResultCell = (value: unknown): ScoreboardTableCell => {
+  if (!value || typeof value !== "object") return scoreboardCell("—");
+  const result = value as { status?: string; place?: number; points?: number };
+  if (result.status === "dnf") return scoreboardCell("DNF", "dnf");
+  if (result.status === "excluded") return scoreboardCell("排除 · 0 分", "excluded");
+  if (result.status !== "finished" || !Number.isInteger(result.place)) return scoreboardCell("—");
+  const style = result.place === 1 ? "gold" : result.place === 2 ? "silver" : result.place === 3 ? "bronze" : "plain";
+  return scoreboardCell(`#${result.place} / ${result.points ?? 0} 分`, style);
+};
+
+export const createScoreboardTable = (
+  stages: readonly { id: string; label: string }[],
+  entries: readonly ScoreboardTableEntry[]
+): ScoreboardTableModel => ({
+  headers: ["变化", "名次", "总分", "选手", ...stages.map((stage) => tableTextCell(stage.label))],
+  rows: entries.map((entry) => ({
+    playerId: entry.playerId,
+    cells: [
+      scoreboardCell(entry.change === null ? "—" : entry.change > 0 ? `▲${entry.change}` : entry.change < 0 ? `▼${Math.abs(entry.change)}` : "=", entry.change === null || entry.change === 0 ? "plain" : entry.change > 0 ? "rank-up" : "rank-down"),
+      scoreboardCell(String(entry.rank)),
+      scoreboardCell(String(entry.points)),
+      scoreboardCell(entry.displayName),
+      ...stages.map((stage) => stageResultCell(entry.stages[stage.id]))
+    ]
+  }))
+});
+
+const tableHtml = (value: string): string => value.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;").replaceAll("'", "&#39;");
+const clipboardCellStyle: Record<ScoreboardTableCellStyle, string> = {
+  plain: "",
+  "rank-up": "color:#b51f2c;font-weight:700",
+  "rank-down": "color:#1d7a43;font-weight:700",
+  gold: "background:#ffb700",
+  silver: "background:#ffe1b2",
+  bronze: "background:#fff2cc",
+  dnf: "color:#727a84;text-decoration:line-through",
+  excluded: "color:#8a2935;background:#fff0f1;text-decoration:line-through"
+};
+
+export const scoreboardTableToTsv = (table: ScoreboardTableModel): string =>
+  [table.headers, ...table.rows.map((row) => row.cells.map((cell) => cell.text))]
+    .map((row) => row.map(tableTextCell).join("\t"))
+    .join("\r\n");
+
+export const scoreboardTableToHtml = (table: ScoreboardTableModel): string => {
+  const base = "border:1px solid #b8c2cc;padding:6px 8px;text-align:left";
+  const headers = table.headers.map((header) => `<th style="${base};background:#eef1f4;font-weight:700">${tableHtml(header)}</th>`).join("");
+  const rows = table.rows.map((row) => `<tr>${row.cells.map((cell) => `<td data-style="${cell.style}" style="${base};${clipboardCellStyle[cell.style]}">${tableHtml(cell.text)}</td>`).join("")}</tr>`).join("");
+  return `<table style="border-collapse:collapse"><thead><tr>${headers}</tr></thead><tbody>${rows}</tbody></table>`;
+};
+
 export interface FlowPolicy {
   announcementLeadMs: number;
   delayLimitMs: number;

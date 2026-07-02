@@ -2,9 +2,12 @@ import { useEffect, useRef, useState, type ReactNode } from "react";
 import {
   LARGE_SCORING,
   SMALL_SCORING,
+  createScoreboardTable,
   defaultHsStages,
   defaultSrStages,
   minimumScoringPlaceFor,
+  scoreboardTableToHtml,
+  scoreboardTableToTsv,
   stageDisplayName,
   stageMapKind,
   validateCompetitionConfigForPublish
@@ -24,6 +27,7 @@ import type {
   RefereeActionId,
   RuntimeSnapshot,
   ScenarioDefinition,
+  ScoreboardTableCell,
   StageConfig,
   TestScenarioSummary
 } from "@ballance/contracts";
@@ -438,14 +442,16 @@ export function App() {
     });
   }, "虚拟时钟已快进");
 
-  const downloadExport = async (format: "html" | "tsv" | "csv" | "xlsx") => {
+  const downloadExport = async (format: "csv" | "xlsx") => {
     if (!session || !snapshot) return;
     try {
       const response = await fetch(`/api/v1/competitions/${snapshot.competition.id}/exports/${format}`, { headers: { authorization: `Bearer ${session.token}` } });
       if (!response.ok) throw new Error(`导出失败 ${response.status}`);
       const url = URL.createObjectURL(await response.blob());
       const link = document.createElement("a");
-      link.href = url; link.download = `${snapshot.competition.name}-scoreboard.${format}`; link.click(); URL.revokeObjectURL(url);
+      const version = snapshot.scoreboardVersions.at(-1)?.version ?? 0;
+      const encodedName = /filename\*=UTF-8''([^;]+)/i.exec(response.headers.get("content-disposition") ?? "")?.[1];
+      link.href = url; link.download = encodedName ? decodeURIComponent(encodedName) : `${snapshot.competition.name}-${snapshot.competition.mode}-scoreboard-v${version}.${format}`; link.click(); URL.revokeObjectURL(url);
       setMessage(`已导出 ${format.toUpperCase()}`);
     } catch (error) { setMessage(error instanceof Error ? error.message : "导出失败"); }
   };
@@ -604,8 +610,8 @@ function ConsolePanel({ snapshot, canWrite, versionKey, startWork, enableAutomat
         </div>)}</section>}
       {runtime.attentionItems.length === 0 && <p className="muted">暂无需要注意的流程动态。</p>}
       <div className="attention-list">{runtime.attentionItems.map((item) => <article className={`attention-card ${item.severity}`} key={item.id}>
-        <div><strong>{item.title}</strong><time>{formatUtc8DateTime(item.occurredAt)}</time></div><p>{item.message}</p>
-        {(item.stageId || item.participantIds?.length) && <small>{item.stageId ? `关卡 ${stageTitle(snapshot.config, item.stageId)}` : ""}{item.participantIds?.length ? ` · 玩家 ${item.participantIds.join("、")}` : ""}</small>}
+        <div><strong>{item.title}</strong><time>{formatUtc8DateTime(item.occurredAt)}</time></div>
+        <p>{[item.message, item.stageId ? `关卡 ${stageTitle(snapshot.config, item.stageId)}` : "", item.participantIds?.length ? `玩家 ${item.participantIds.join("、")}` : ""].filter(Boolean).join(" · ")}</p>
       </article>)}</div>
       <h3>事故与尝试</h3><p className="muted">事故证据和历史尝试永久保留；重赛入口位于左侧流程控制。</p>
     </div>
@@ -758,20 +764,46 @@ function ScoreboardPanel({ snapshot, canWrite, versionKey, requestConfirmation, 
   snapshot: CompetitionSnapshot; canWrite: boolean; versionKey: string;
   requestConfirmation(kind: ConfirmationKind, target: string): Promise<ConfirmationSummary>;
   overrideScoreboard(draft: ScoreDraft, confirmation: ConfirmationSummary): Promise<void>;
-  downloadExport(format: "html" | "tsv" | "csv" | "xlsx"): Promise<void>;
+  downloadExport(format: "csv" | "xlsx"): Promise<void>;
 }) {
   const editPermissions = new Map(snapshot.runtime.scoreEditPermissions.map((permission) => [permission.stageId, permission]));
-  return <section className="panel"><div className="panel-title-row"><h2>实时成绩</h2><div className="button-row compact"><button onClick={() => void downloadExport("xlsx")}>XLSX</button><button onClick={() => void downloadExport("csv")}>CSV</button><button onClick={() => void downloadExport("html")}>HTML</button><button onClick={() => void downloadExport("tsv")}>TSV</button></div></div>
+  const table = createScoreboardTable(snapshot.config.stages.map((stage) => ({ id: stage.id, label: stageDisplayName(stage) })), snapshot.currentScoreboard);
+  const entries = new Map(snapshot.currentScoreboard.map((entry) => [entry.playerId, entry]));
+  const [copyFallback, setCopyFallback] = useState("");
+  const [copyMessage, setCopyMessage] = useState("");
+  const copyScoreboard = async () => {
+    const plain = scoreboardTableToTsv(table);
+    const rich = scoreboardTableToHtml(table);
+    try {
+      if (!navigator.clipboard?.write || typeof ClipboardItem === "undefined") throw new Error("CLIPBOARD_WRITE_UNAVAILABLE");
+      await navigator.clipboard.write([new ClipboardItem({
+        "text/html": new Blob([rich], { type: "text/html" }),
+        "text/plain": new Blob([plain], { type: "text/plain" })
+      })]);
+      setCopyFallback("");
+      setCopyMessage("表格已复制，可直接粘贴到 Excel 或在线表格");
+    } catch {
+      setCopyFallback(plain);
+      setCopyMessage("浏览器未允许写入剪贴板，请从下方手工复制");
+    }
+  };
+  return <section className="panel"><div className="panel-title-row"><h2>实时成绩</h2><div className="button-row compact"><button onClick={() => void copyScoreboard()}>复制表格</button><button onClick={() => void downloadExport("xlsx")}>XLSX</button><button onClick={() => void downloadExport("csv")}>CSV</button></div></div>
     <p className="muted">当前关成绩由现场事件持续接收；进入下一关 Ready 后可修订此前关卡，比赛结束后可修订全部关卡。</p>
-    <table className="scoreboard"><thead><tr><th>变化</th><th>名次</th><th>总分</th><th>选手</th>{snapshot.config.stages.map((stage) => <th key={stage.id}>{stageDisplayName(stage)}</th>)}</tr></thead><tbody>{snapshot.currentScoreboard.map((entry) => <tr key={entry.playerId}>
-      <td className={entry.change === null ? "" : entry.change > 0 ? "rank-up" : entry.change < 0 ? "rank-down" : ""}>{entry.change === null ? "—" : entry.change > 0 ? `▲${entry.change}` : entry.change < 0 ? `▼${Math.abs(entry.change)}` : "="}</td><td>{entry.rank}</td><td>{entry.points}</td><td>{entry.displayName}</td>
-      {snapshot.config.stages.map((stage) => {
+    {copyMessage && <p className="copy-message" role="status">{copyMessage}</p>}
+    {copyFallback && <label className="copy-fallback">手工复制表格<textarea aria-label="手工复制表格" readOnly value={copyFallback} onFocus={(event) => event.currentTarget.select()} /></label>}
+    <table className="scoreboard"><thead><tr>{table.headers.map((header, index) => <th key={`${index}:${header}`}>{header}</th>)}</tr></thead><tbody>{table.rows.map((row) => {
+      const entry = entries.get(row.playerId);
+      if (!entry) return null;
+      return <tr key={entry.playerId}>
+      {row.cells.slice(0, 4).map((cell, index) => <td className={cell.style === "plain" ? "" : cell.style} key={`${entry.playerId}:fixed:${index}`}>{cell.text}</td>)}
+      {snapshot.config.stages.map((stage, index) => {
         const permission = editPermissions.get(stage.id);
         return <EditableScoreCell key={`${stage.id}:${versionKey}`} value={entry.stages[stage.id] as { status?: string; place?: number; points?: number; reason?: string } | undefined} stage={stage} playerId={entry.playerId} playerName={entry.displayName}
+          display={row.cells[index + 4] as ScoreboardTableCell}
           canWrite={canWrite && Boolean(permission?.editable)} {...(!canWrite ? { disabledReason: "实时连接或控制权不可用" } : permission?.reason ? { disabledReason: permission.reason } : {})}
           versionKey={versionKey} requestConfirmation={requestConfirmation} save={(draft, confirmation) => overrideScoreboard(draft, confirmation)} />;
       })}
-    </tr>)}</tbody></table>
+    </tr>; })}</tbody></table>
     {snapshot.currentScoreboard.length === 0 && <p className="muted">暂无榜单版本。选手有首条有效或排除结果后会出现在这里。</p>}
     <div className="score-override"><h3>修订记录</h3><p className="muted">成绩页只提交“设置名次”或“设置 DNF”。得分由已发布的单关计分规则重算，并生成新榜单版本。</p>
       <table><thead><tr><th>目标</th><th>修改前</th><th>修改后</th><th>审计原因</th><th>时间</th></tr></thead><tbody>{snapshot.scoreboardOverrides.map((record) => <tr key={record.id}><td>{record.targetId}</td><td>{formatOverrideValue(record.beforeValue)}</td><td>{formatOverrideValue(record.afterValue)}</td><td>{record.reason}</td><td>{formatUtc8DateTime(record.createdAt)}</td></tr>)}</tbody></table>
@@ -787,8 +819,9 @@ const formatOverrideValue = (value: unknown): string => {
   return result.place ? `第 ${result.place} 名 · ${result.points ?? 0} 分` : "已修改";
 };
 
-function EditableScoreCell({ value, stage, playerId, playerName, canWrite, disabledReason, versionKey, requestConfirmation, save }: {
+function EditableScoreCell({ value, display, stage, playerId, playerName, canWrite, disabledReason, versionKey, requestConfirmation, save }: {
   value: { status?: string; place?: number; points?: number; reason?: string } | undefined;
+  display: ScoreboardTableCell;
   stage: StageConfig; playerId: string; playerName: string; canWrite: boolean; disabledReason?: string; versionKey: string;
   requestConfirmation(kind: ConfirmationKind, target: string, requestPayload?: unknown): Promise<ConfirmationSummary>;
   save(draft: ScoreDraft, confirmation: ConfirmationSummary): Promise<void>;
@@ -798,8 +831,8 @@ function EditableScoreCell({ value, stage, playerId, playerName, canWrite, disab
   const [shiftOthers, setShiftOthers] = useState(true);
   const numericPlace = Number(place);
   const calculatedPoints = Number.isInteger(numericPlace) && numericPlace > 0 ? stage.scoring[numericPlace - 1] ?? 0 : 0;
-  const className = value?.status === "dnf" ? "dnf" : value?.status === "excluded" ? "excluded" : value?.place === 1 ? "gold" : value?.place === 2 ? "silver" : value?.place === 3 ? "bronze" : "";
-  if (!editing) return <td className={`${className} editable-score-cell`}><button className="cell-button" disabled={!canWrite} title={canWrite ? `修改 ${playerName} 的 ${stage.label} 成绩` : disabledReason} onClick={() => { setPlace(String(value?.place || 1)); setShiftOthers(true); setEditing(true); }}>{!value ? "—" : value.status === "dnf" ? "DNF" : value.status === "excluded" ? `排除 · 0 分` : `#${value.place} / ${value.points} 分`}</button></td>;
+  const className = display.style === "plain" ? "" : display.style;
+  if (!editing) return <td className={`${className} editable-score-cell`}><button className="cell-button" disabled={!canWrite} title={canWrite ? `修改 ${playerName} 的 ${stageDisplayName(stage)} 成绩` : disabledReason} onClick={() => { setPlace(String(value?.place || 1)); setShiftOthers(true); setEditing(true); }}>{display.text}</button></td>;
   const target = `${playerId}:${stage.id}`;
   const rankPolicy = shiftOthers ? "shift" : "tie";
   return <td className="score-cell-editor"><label>新名次<input aria-label={`${playerId} ${stage.label} 新名次`} type="number" min="1" value={place} onChange={(event) => setPlace(event.target.value)} /></label><label className="score-policy-row">其他玩家是否顺延<input aria-label="其他玩家是否顺延" type="checkbox" checked={shiftOthers} onChange={(event) => setShiftOthers(event.target.checked)} /><span>{shiftOthers ? "顺延" : "不顺延"}</span></label><small>{shiftOthers ? `会顺延其他玩家并按本关规则自动计 ${calculatedPoints} 分` : `不会顺延其他玩家，按本关规则直接计 ${calculatedPoints} 分`}</small>

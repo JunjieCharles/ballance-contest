@@ -1,6 +1,12 @@
 import type { Page } from "@playwright/test";
 import { expect, test } from "@playwright/test";
 
+const parseQuotedCsv = (csv: string): string[][] => csv.replace(/^\ufeff/, "").split("\r\n").map((line) =>
+  [...line.matchAll(/"((?:[^"]|"")*)"(?:,|$)/g)].map((match) => (match[1] ?? "").replaceAll('""', '"')));
+
+const decodeXml = (value: string): string => value
+  .replaceAll("&amp;", "&").replaceAll("&lt;", "<").replaceAll("&gt;", ">").replaceAll("&quot;", '"').replaceAll("&apos;", "'");
+
 const acquireControl = async (page: Page): Promise<void> => {
   await page.evaluate(async () => {
     const stored = sessionStorage.getItem("ballance-console-session");
@@ -114,6 +120,23 @@ test("edits per-stage scoring and replaces the stage draft through inline confir
 test("runs the 20-player sandbox from the console and edits a score without losing the player", async ({ page }, testInfo) => {
   const externalRequests: string[] = [];
   let dialogOpened = false;
+  await page.addInitScript(() => {
+    class CapturedClipboardItem {
+      public readonly types: string[];
+      public constructor(private readonly values: Record<string, Blob>) { this.types = Object.keys(values); }
+      public getType(type: string): Promise<Blob> { return Promise.resolve(this.values[type] as Blob); }
+    }
+    Object.defineProperty(window, "ClipboardItem", { configurable: true, value: CapturedClipboardItem });
+    Object.defineProperty(navigator, "clipboard", { configurable: true, value: {
+      write: async (items: CapturedClipboardItem[]) => {
+        const copied: Record<string, string> = {};
+        const item = items[0];
+        if (!item) return;
+        for (const type of item.types) copied[type] = await (await item.getType(type)).text();
+        (window as unknown as { __copiedScoreboard: Record<string, string> }).__copiedScoreboard = copied;
+      }
+    } });
+  });
   page.on("request", (request) => { if (new URL(request.url()).hostname !== "127.0.0.1") externalRequests.push(request.url()); });
   page.on("dialog", async (dialog) => { dialogOpened = true; await dialog.dismiss(); });
   await page.goto("/#token=e2e-bootstrap-token");
@@ -138,6 +161,9 @@ test("runs the 20-player sandbox from the console and edits a score without losi
   await accelerateActiveTestRun(page, name);
   await expect(page.getByText("阶段", { exact: true }).locator("..")).toContainText("比赛复核");
   await expect(page.locator(".attention-card").first()).toBeVisible();
+  await expect(page.locator(".attention-card small")).toHaveCount(0);
+  expect(await page.locator(".attention-card p").filter({ hasText: "玩家" }).count()).toBeGreaterThan(0);
+  expect(await page.locator(".attention-card p").first().evaluate((element) => getComputedStyle(element).fontSize)).toBe("13px");
   await expect(page.getByRole("heading", { name: "玩家处置" }).locator("..")).not.toContainText("Crash");
   await expect(page.getByRole("heading", { name: "玩家处置" }).locator("..")).not.toContainText("标记 DNF");
 
@@ -176,6 +202,44 @@ test("runs the 20-player sandbox from the console and edits a score without losi
   await expect(page.locator(".competition-list button.selected")).toContainText(name);
   await page.getByRole("button", { name: "成绩", exact: true }).click();
   await expect(page.locator(".scoreboard tbody tr")).toHaveCount(rowsBefore);
+  const tableMatrix = await page.locator("table.scoreboard tr").evaluateAll((rows) => rows.map((row) =>
+    [...row.querySelectorAll("th,td")].map((cell) => (cell.textContent ?? "").trim())));
+  await page.getByRole("button", { name: "复制表格" }).click();
+  await expect(page.getByRole("status")).toContainText("表格已复制");
+  const copied = await page.evaluate(() => (window as unknown as { __copiedScoreboard: Record<string, string> }).__copiedScoreboard);
+  expect(copied["text/plain"]?.split("\r\n").map((row) => row.split("\t"))).toEqual(tableMatrix);
+  const copiedHtmlMatrix = await page.evaluate((html) => {
+    const document = new DOMParser().parseFromString(html, "text/html");
+    return [...document.querySelectorAll("tr")].map((row) => [...row.querySelectorAll("th,td")].map((cell) => (cell.textContent ?? "").trim()));
+  }, copied["text/html"] ?? "");
+  expect(copiedHtmlMatrix).toEqual(tableMatrix);
+  expect(copied["text/html"]).toContain('data-style="gold"');
+  expect(copied["text/html"]).toContain('data-style="excluded"');
+  expect(copied["text/html"]).toContain("text-decoration:line-through");
+
+  const exported = await page.evaluate(async (competitionName) => {
+    const stored = sessionStorage.getItem("ballance-console-session");
+    if (!stored) throw new Error("missing local session");
+    const session = JSON.parse(stored) as { token: string };
+    const headers = { authorization: `Bearer ${session.token}` };
+    const competitions = await (await fetch("/api/v1/competitions", { headers })).json() as { data: Array<{ id: string; name: string }> };
+    const competitionId = competitions.data.find((competition) => competition.name === competitionName)?.id;
+    if (!competitionId) throw new Error("missing competition");
+    const csvResponse = await fetch(`/api/v1/competitions/${competitionId}/exports/csv`, { headers });
+    const xlsxResponse = await fetch(`/api/v1/competitions/${competitionId}/exports/xlsx`, { headers });
+    return { csv: await csvResponse.text(), xlsx: [...new Uint8Array(await xlsxResponse.arrayBuffer())] };
+  }, name);
+  expect(parseQuotedCsv(exported.csv)).toEqual(tableMatrix);
+  const xlsxText = Buffer.from(exported.xlsx).toString("utf8");
+  const xlsxCells = [...xlsxText.matchAll(/<t xml:space="preserve">(.*?)<\/t>/g)].map((match) => decodeXml(match[1] ?? ""));
+  const xlsxMatrix = Array.from({ length: tableMatrix.length }, (_value, index) =>
+    xlsxCells.slice(index * tableMatrix[0]!.length, (index + 1) * tableMatrix[0]!.length));
+  expect(xlsxMatrix).toEqual(tableMatrix);
+
+  await page.evaluate(() => { navigator.clipboard.write = async () => { throw new Error("permission denied"); }; });
+  await page.getByRole("button", { name: "复制表格" }).click();
+  await expect(page.getByLabel("手工复制表格")).toBeVisible();
+  await expect(page.getByLabel("手工复制表格")).toHaveValue((copied["text/plain"] ?? "").replaceAll("\r\n", "\n"));
   expect(dialogOpened).toBe(false);
   expect(externalRequests).toEqual([]);
 });

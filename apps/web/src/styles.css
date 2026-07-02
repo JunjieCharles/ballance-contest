@@ -269,7 +269,8 @@ header > span:last-of-type { margin-left: auto; font-size: 13px; }
 .attention-list { display: grid; gap: 8px; max-height: 560px; overflow: auto; }
 .attention-card {
   display: grid;
-  gap: 5px;
+  grid-template-rows: auto auto;
+  gap: 6px;
   padding: 10px 12px;
   border: 1px solid #c8d7e2;
   border-left: 4px solid #4b82aa;
@@ -279,9 +280,8 @@ header > span:last-of-type { margin-left: auto; font-size: 13px; }
 .attention-card.warning { border-left-color: #d09423; background: #fff9e9; }
 .attention-card.critical { border-left-color: #b02d3c; background: #fff1f2; }
 .attention-card > div { display: flex; justify-content: space-between; gap: 10px; }
-.attention-card time,
-.attention-card small { color: #657382; font-size: 11px; }
-.attention-card p { margin: 0; }
+.attention-card time { color: #657382; font-size: 12px; }
+.attention-card p { margin: 0; color: #3f4e5d; font-size: 13px; line-height: 1.45; }
 .unconfirmed-command-panel {
   margin-bottom: 12px;
   padding: 10px;
@@ -368,6 +368,9 @@ header > span:last-of-type { margin-left: auto; font-size: 13px; }
 .scoreboard {
   min-width: 860px;
 }
+.copy-message { margin: 0 0 10px; color: #315e47; font-size: 13px; }
+.copy-fallback { margin-bottom: 12px; }
+.copy-fallback textarea { min-height: 130px; font-family: Consolas, monospace; white-space: pre; }
 .rank-up { color: #b51f2c; font-weight: 700; }
 .rank-down { color: #1d7a43; font-weight: 700; }
 .dnf { color: #727a84; text-decoration: line-through; }

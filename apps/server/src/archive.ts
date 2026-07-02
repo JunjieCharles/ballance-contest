@@ -109,9 +109,7 @@ export const createCompetitionArchive = (request: ArchiveRequest): CreatedArchiv
       kinds.set(archivePath, "metadata");
     }
     const exportFiles: Array<[string, Buffer | string]> = [
-      [`exports/${request.exports.basename}.html`, request.exports.html],
       [`exports/${request.exports.basename}.csv`, request.exports.csv],
-      [`exports/${request.exports.basename}.tsv`, request.exports.tsv],
       [`exports/${request.exports.basename}.xlsx`, request.exports.xlsx]
     ];
     for (const [archivePath, data] of exportFiles) {
