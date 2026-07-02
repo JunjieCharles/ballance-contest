@@ -469,7 +469,10 @@ export class CompetitionController {
     const action = this.actions.find((candidate) => candidate.id === actionId);
     if (!action || (action.status !== "failed" && action.status !== "uncertain")) throw new Error("AUTOMATION_ACTION_NOT_UNCONFIRMED");
     action.status = status;
-    if (status === "acknowledged" || status === "referee-confirmed") action.acknowledgedAtMs = this.clock.now();
+    if (status === "acknowledged" || status === "referee-confirmed") {
+      action.acknowledgedAtMs = this.clock.now();
+      if (action.kind === "cheat-off") this.lastCheatOffAcknowledgedAtMs = this.clock.now();
+    }
     if ((status === "acknowledged" || status === "referee-confirmed") && action.kind === "go") this.startAttemptForStage(action.stageId);
     this.bump();
   }
