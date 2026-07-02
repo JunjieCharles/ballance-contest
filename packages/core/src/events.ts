@@ -13,6 +13,7 @@ export interface EventMapReference {
 
 export type DomainEvent =
   | (EventMetadata & { type: "connected" })
+  | (EventMetadata & { type: "server-disconnected" })
   | (EventMetadata & { type: "permission-denied"; message: string })
   | (EventMetadata & { type: "player-list-start"; count: number })
   | (EventMetadata & { type: "player-list-summary"; clients: number; players: number; spectators: number })

@@ -124,12 +124,15 @@ export class CommandQueue {
   private readonly records = new Map<string, CommandRecord>();
   private tail: Promise<void> = Promise.resolve();
   private pending: { encoded: ReturnType<typeof encode>; record: CommandRecord; resolve: (record: CommandRecord) => void } | undefined;
+  private transport: CommandTransport;
 
   public constructor(
-    private readonly transport: CommandTransport,
+    transport: CommandTransport,
     private readonly timeoutMs: number | ((action: CommandAction) => number) = 10_000,
     private readonly onChange?: (record: CommandRecord) => void
-  ) {}
+  ) { this.transport = transport; }
+
+  public replaceTransport(transport: CommandTransport): void { this.transport = transport; }
 
   public enqueue(action: CommandAction, idempotencyKey: string): Promise<CommandRecord> {
     const old = this.records.get(idempotencyKey);

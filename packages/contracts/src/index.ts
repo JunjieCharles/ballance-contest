@@ -340,7 +340,7 @@ export interface RuntimeSnapshot {
 }
 
 export type RefereeActionId =
-  | "start-work" | "enable-automation" | "pause-automation" | "start-ready-flow" | "ready" | "cheat-off" | "manual-go"
+  | "start-work" | "restart-work" | "enable-automation" | "pause-automation" | "start-ready-flow" | "ready" | "cheat-off" | "manual-go"
   | "delay-ready" | "extend-stage-deadline" | "reschedule" | "reschedule-stage-deadline" | "end-stage" | "restart-stage"
   | "kick" | "raw-command" | "finish" | "archive" | "delete";
 
@@ -481,6 +481,7 @@ export type NotificationChannel = "bulletin" | "notice" | "announce";
 
 export type CompetitionAction =
   | { type: "notification"; channel: NotificationChannel; text: string }
+  | { type: "restart-work" }
   | { type: "start-ready-flow"; confirmationToken: string; impactHash: string }
   | { type: "ready" }
   | { type: "cheat-off" }

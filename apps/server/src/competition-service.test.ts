@@ -409,6 +409,38 @@ describe("CompetitionService dynamic participants", () => {
     expect(restored.runtime.automationEnabled).toBe(false);
   });
 
+  it("offers an explicit connection recovery before automation can resume", async () => {
+    dataRoot = mkdtempSync(join(tmpdir(), "ballance-connection-recovery-"));
+    database = openDatabase(join(dataRoot, "console.sqlite"));
+    const service = new CompetitionService(undefined, { database, dataRoot });
+    const record = service.create({ name: "Connection recovery", mode: "test", idempotencyKey: "connection-recovery" });
+    service.publish(record.id, 0, "publish-connection-recovery");
+    const runId = service.createTestRunFromScenario(record.id, "server-disconnect-fault").runId;
+    const runtime = testRuntimeManager(service).getRuntime(record.id, runId);
+    runtime.automation.observeServerDisconnect("测试服务器断线");
+
+    let snapshot = service.snapshot(record.id);
+    expect(snapshot.runtime.availableActions).toContainEqual(expect.objectContaining({ action: "restart-work", enabled: true }));
+    expect(snapshot.runtime.availableActions).toContainEqual(expect.objectContaining({ action: "enable-automation", enabled: false }));
+    expect(snapshot.runtime.attentionItems).toContainEqual(expect.objectContaining({ category: "incident", severity: "critical", action: "restart-work" }));
+    await service.performAction(record.id, {
+      expectedStateVersion: snapshot.competition.stateVersion,
+      idempotencyKey: "recover-test-connection",
+      action: { type: "restart-work" }
+    });
+
+    snapshot = service.snapshot(record.id);
+    expect(snapshot.runtime).toMatchObject({ phase: "paused", automationEnabled: false, blockers: [] });
+    expect(snapshot.runtime.availableActions).toContainEqual(expect.objectContaining({ action: "enable-automation", enabled: true }));
+    await service.enableAutomation(record.id, {
+      runId,
+      readyInMs: 60_000,
+      expectedStateVersion: snapshot.competition.stateVersion,
+      idempotencyKey: "resume-after-connection"
+    });
+    expect(service.snapshot(record.id).runtime).toMatchObject({ phase: "preparing", automationEnabled: true });
+  });
+
   it("recovers a sent Go as acknowledged when the persisted authoritative attempt proves execution", () => {
     dataRoot = mkdtempSync(join(tmpdir(), "ballance-proven-command-recovery-"));
     database = openDatabase(join(dataRoot, "console.sqlite"));

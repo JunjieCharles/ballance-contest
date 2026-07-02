@@ -10,6 +10,13 @@ describe("parseLogLine", () => {
     expect(parsed.event).toMatchObject({ type: "go", connectionId: "2717249041", refereeName: "*Referee", level: 1, sourceId: "source-1" });
   });
 
+  it("parses the live starred Ready echo and server connection loss", () => {
+    expect(parseLogLine("[07-02 20:32:49] [2355344013, *ContestConsole]: Level 01* - Get ready", context).event)
+      .toMatchObject({ type: "ready", level: 1, refereeName: "*ContestConsole" });
+    expect(parseLogLine("[07-02 20:32:50] Disconnected from server.", context).event)
+      .toMatchObject({ type: "server-disconnected" });
+  });
+
   it("parses finishes, DNF, login, disconnect and cheat", () => {
     expect(parseLogLine("[06-29 11:21:00] 2 player(s) online:", context).event)
       .toMatchObject({ type: "player-list-start", count: 2 });

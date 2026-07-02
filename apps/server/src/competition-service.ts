@@ -1205,7 +1205,10 @@ export class CompetitionService {
     const blockers = snapshot?.blockers.filter((blocker) => blocker.code !== "AUTOMATION_PAUSED") ?? [];
     const hasBlockingIssue = blockers.some((blocker) => blocker.severity === "critical" || blocker.code === "PARTICIPANT_OFFLINE");
     const hasReadyFlowBlockingIssue = blockers.some((blocker) => blocker.code !== "PARTICIPANT_CHEAT" && (blocker.severity === "critical" || blocker.code === "PARTICIPANT_OFFLINE"));
+    const hasResumeBlockingIssue = blockers.some((blocker) => blocker.severity === "critical" && blocker.code !== "INCIDENT_OPEN");
     const hasUnconfirmedAutomationActions = snapshot?.actions.some(isUnresolvedAutomationAction) ?? false;
+    const hasOpenServerIncident = (snapshot?.incidents as readonly { type?: string; status?: string }[] | undefined)
+      ?.some((incident) => incident.type === "server-disconnect" && incident.status === "open") ?? false;
     const openAttempt = snapshot?.attempts.findLast((attempt) => attempt.intakeOpen && !attempt.voided);
     const currentAttempt = snapshot?.attempts.findLast((attempt) => attempt.stageId === snapshot.currentStageId && !attempt.voided);
     const restartPhase = phase === "running" || phase === "tail-intake" || phase === "incident"
@@ -1228,14 +1231,17 @@ export class CompetitionService {
     return [
       descriptor("start-work", "启动工作运行", "启动真实 MockClient，并立即开始在线名单对账。", competition.mode === "work" && competition.status === "published" && !hasRuntime,
         competition.mode !== "work" ? "测试比赛不启动真实 MockClient" : competition.status !== "published" ? "请先发布比赛配置" : "工作运行已经启动"),
+      descriptor("restart-work", competition.mode === "work" ? "重启 MockClient" : "模拟恢复连接", "恢复服务器事件源；连接成功后保持原阶段暂停，等待裁判恢复自动化。",
+        refereeActionsUnlocked && hasRuntime && hasOpenServerIncident,
+        !refereeActionsUnlocked ? "请先发布比赛配置" : !hasRuntime ? "请先启动运行" : "当前没有待恢复的服务器连接阻断"),
       descriptor(
         "enable-automation",
         phase === "paused" || snapshot?.pausedFromPhase ? "恢复自动化" : "启动自动化",
         phase === "paused" || snapshot?.pausedFromPhase
           ? "从暂停前阶段继续；未确认命令必须先由裁判核对，且不会自动重发。"
           : "按轮间准备时长规划首轮 Ready，并由状态机推进后续流程。",
-        refereeActionsUnlocked && hasRuntime && !snapshot?.automationEnabled && !["review", "incident"].includes(phase) && !hasUnconfirmedAutomationActions,
-        !refereeActionsUnlocked ? "请先发布比赛配置" : !hasRuntime ? "请先启动运行" : snapshot?.automationEnabled ? "自动化已经启用" : phase === "incident" ? "请先处理当前事故" : hasUnconfirmedAutomationActions ? "请先逐条确认已执行或执行重发" : "比赛已进入复核"
+        refereeActionsUnlocked && hasRuntime && !snapshot?.automationEnabled && !["review", "incident"].includes(phase) && !hasUnconfirmedAutomationActions && !hasResumeBlockingIssue,
+        !refereeActionsUnlocked ? "请先发布比赛配置" : !hasRuntime ? "请先启动运行" : snapshot?.automationEnabled ? "自动化已经启用" : phase === "incident" ? "请先恢复 MockClient/服务器连接" : hasUnconfirmedAutomationActions ? "请先逐条确认已执行或执行重发" : hasResumeBlockingIssue ? "请先按红色阻断项完成复检或处置" : "比赛已进入复核"
       ),
       descriptor("pause-automation", "暂停自动化", "停止自动推进；已经发出的真实命令不会自动撤回。", refereeActionsUnlocked && Boolean(snapshot?.automationEnabled),
         !refereeActionsUnlocked ? "请先发布比赛配置" : "自动化当前未启用"),
@@ -1291,7 +1297,7 @@ export class CompetitionService {
 
   private actionIdFor(action: CompetitionAction): RefereeActionId | undefined {
     switch (action.type) {
-      case "start-ready-flow": case "ready": case "cheat-off": case "manual-go": case "reschedule": case "reschedule-stage-deadline": case "delay-ready":
+      case "restart-work": case "start-ready-flow": case "ready": case "cheat-off": case "manual-go": case "reschedule": case "reschedule-stage-deadline": case "delay-ready":
       case "extend-stage-deadline": case "end-stage": case "restart-stage": case "kick": case "raw-command":
         return action.type;
       default: return undefined;

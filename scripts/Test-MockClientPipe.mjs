@@ -57,6 +57,7 @@ try {
     server: `127.0.0.1:${port}`, refereeName: "ContestConsole",
     uuid: "00010002-0003-0004-0005-000600070008", logPath: join(temporary, "mock-client.log")
   });
+  const firstExit = new Promise((resolveExit) => client.onExit(resolveExit));
   client.onLine((line) => lines.push(line));
   client.start();
   await waitForLine(lines, (line) => /Connected to server OK/i.test(line), 10_000);
@@ -66,11 +67,30 @@ try {
   const listLine = await waitForLine(lines, (line) => /1 client\(s\) online:/i.test(line), 5_000, commandBoundary);
   await client.write("setmap e90b2f535c8bf881e9cb83129fba241d 0 Contest Map With Spaces");
   await client.stop();
+  const firstExitInfo = await firstExit;
+  if (!firstExitInfo.expected) throw new Error("Graceful MockClient stop was reported as unexpected");
+
+  const restartLines = [];
+  client = new ManagedMockClient({
+    executable: join(serverDirectory, "BallanceMMOMockClient.exe"), workingDirectory: serverDirectory,
+    server: `127.0.0.1:${port}`, refereeName: "ContestConsole",
+    uuid: "00010002-0003-0004-0005-000600070008", logPath: join(temporary, "mock-client.log")
+  });
+  const secondExit = new Promise((resolveExit) => client.onExit(resolveExit));
+  client.onLine((line) => restartLines.push(line));
+  client.start();
+  await waitForLine(restartLines, (line) => /Connected to server OK/i.test(line), 10_000);
+  if (restartLines.some((line) => /client\(s\) online:/i.test(line))) throw new Error("Restart replayed old MockClient log lines");
+  await client.write("list");
+  const restartedListLine = await waitForLine(restartLines, (line) => /1 client\(s\) online:/i.test(line), 5_000);
+  await client.stop();
+  const secondExitInfo = await secondExit;
+  if (!secondExitInfo.expected) throw new Error("Restarted MockClient stop was reported as unexpected");
   client = undefined;
   const artifact = {
     checkedAt: new Date().toISOString(), server: `127.0.0.1:${port}`,
     mockClientVersion: readMockClientVersion(join(serverDirectory, "BallanceMMOMockClient.exe"), serverDirectory),
-    connected: true, stdinCommand: "list", acknowledgedBy: listLine,
+    connected: true, stdinCommand: "list", acknowledgedBy: listLine, restarted: true, restartAcknowledgedBy: restartedListLine,
     refereeName: "*ContestConsole", setMapCommand: "setmap e90b2f535c8bf881e9cb83129fba241d 0 Contest Map With Spaces"
   };
   await mkdir(join(root, "test", "artifacts"), { recursive: true });

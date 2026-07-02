@@ -35,6 +35,19 @@ describe("CommandQueue", () => {
     expect((await queue.enqueue({ type: "go", map: "level 1", mode: "sr" }, "sync-go")).status).toBe("acknowledged");
   });
 
+  it("routes later commands to a replacement MockClient transport", async () => {
+    const first = new FakeTransport();
+    const second = new FakeTransport();
+    const queue = new CommandQueue(first, 20);
+    first.onWrite = () => queue.observeLine("1 player(s) online:");
+    expect((await queue.enqueue({ type: "list" }, "before-restart")).status).toBe("acknowledged");
+    queue.replaceTransport(second);
+    second.onWrite = () => queue.observeLine("1 player(s) online:");
+    expect((await queue.enqueue({ type: "list" }, "after-restart")).status).toBe("acknowledged");
+    expect(first.writes).toEqual(["list"]);
+    expect(second.writes).toEqual(["list"]);
+  });
+
   it("fails the pending command immediately when the server reports missing permission", async () => {
     const transport = new FakeTransport();
     const queue = new CommandQueue(transport, 100);

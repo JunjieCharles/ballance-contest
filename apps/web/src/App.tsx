@@ -574,6 +574,7 @@ function ConsolePanel({ snapshot, canWrite, versionKey, startWork, enableAutomat
     <div className="panel"><h2>裁判操作</h2>
       <div className="button-row action-row">
         {snapshot.competition.mode === "work" && <ActionButton runtime={runtime} action="start-work" canWrite={canWrite} onClick={() => void startWork()}>启动 MockClient</ActionButton>}
+        <ActionButton runtime={runtime} action="restart-work" canWrite={canWrite} onClick={() => void performAction({ type: "restart-work" })}>{availabilityFor(runtime, "restart-work")?.label ?? "恢复连接"}</ActionButton>
         <ActionButton runtime={runtime} action="enable-automation" canWrite={canWrite} onClick={() => void enableAutomation()}>{availabilityFor(runtime, "enable-automation")?.label ?? "启动自动化"}</ActionButton>
         <ActionButton runtime={runtime} action="pause-automation" canWrite={canWrite} className="secondary" onClick={() => void pauseAutomation()}>暂停自动化</ActionButton>
       </div>
@@ -617,6 +618,8 @@ function ConsolePanel({ snapshot, canWrite, versionKey, startWork, enableAutomat
       <div className="attention-list">{runtime.attentionItems.map((item) => <article className={`attention-card ${item.severity}`} key={item.id}>
         <div><strong>{item.title}</strong><time>{formatUtc8DateTime(item.occurredAt)}</time></div>
         <p>{[item.message, item.stageId ? `关卡 ${stageTitle(snapshot.config, item.stageId)}` : "", item.participantIds?.length ? `玩家 ${item.participantIds.join("、")}` : ""].filter(Boolean).join(" · ")}</p>
+        {item.action === "restart-work" && <ActionButton runtime={runtime} action="restart-work" canWrite={canWrite} onClick={() => void performAction({ type: "restart-work" })}>{availabilityFor(runtime, "restart-work")?.label ?? "恢复连接"}</ActionButton>}
+        {item.action === "enable-automation" && <ActionButton runtime={runtime} action="enable-automation" canWrite={canWrite} onClick={() => void enableAutomation()}>核对后恢复自动化</ActionButton>}
       </article>)}</div>
       <h3>事故与尝试</h3><p className="muted">事故证据和历史尝试永久保留；重赛入口位于左侧流程控制。</p>
     </div>

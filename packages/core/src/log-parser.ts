@@ -41,6 +41,8 @@ export const parseLogLine = (input: string, context: ParseContext): ParsedLogLin
 
   if (body === "Connected to server OK") {
     event = { ...metadata, type: "connected" };
+  } else if (body === "Disconnected from server.") {
+    event = { ...metadata, type: "server-disconnected" };
   } else if (body === "Action failed: you don't have the permission to run this action.") {
     event = { ...metadata, type: "permission-denied", message: body };
   } else {
@@ -51,7 +53,7 @@ export const parseLogLine = (input: string, context: ParseContext): ParsedLogLin
     const disconnect = /^(.*?) \(#(\d+)\) disconnected\.$/.exec(body);
     const fatalError = /^(.*?) was kicked by the server \(fatal error\) and crashed subsequently\.$/.exec(body);
     const listed = /^(.*?) \(#(\d+)\)( \[CHEAT\])?$/.exec(body);
-    const readyOrGo = /^\[(\d+), (.*?)\]: Level (\d{2}) - (Get ready|3|2|1|Go!)$/.exec(body);
+    const readyOrGo = /^\[(\d+), (.*?)\]: Level (\d{2})\*? - (Get ready|3|2|1|Go!)$/.exec(body);
     const customReadyOrGo = /^\[(\d+), (.*?)\]: "([^"]+)" - (Get ready|3|2|1|Go!)$/.exec(body);
     const officialHashReadyOrGo = /^\[(\d+), (.*?)\]: ([0-9a-fA-F]+)\.\. - (Get ready|3|2|1|Go!)$/.exec(body);
     const noticeOrAnnouncement = /^\[(Notice|Announcement)\] \((\d+), (.*?)\): (.*)$/.exec(body);

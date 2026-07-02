@@ -40,6 +40,11 @@ export class RefereeActionService {
     const competition = this.host.getCompetition(competitionId);
     const controller = (): CompetitionController => this.host.controllerFor(competitionId);
     switch (action.type) {
+      case "restart-work": {
+        if (competition.mode === "work") await this.host.workRuntimeManager.restartClient(competitionId);
+        else controller().observeServerConnected();
+        break;
+      }
       case "start-ready-flow": {
         controller().startReadyFlow();
         if (competition.mode === "test") {
@@ -214,6 +219,7 @@ export class RefereeActionService {
   public describe(action: CompetitionAction): string {
     switch (action.type) {
       case "notification": return `${action.channel}: ${action.text}`;
+      case "restart-work": return "恢复 MockClient/服务器连接";
       case "kick": return `kick ${action.playerName}`;
       case "raw-command": return action.command;
       case "participant-associate": return `${action.participantId} <- ${action.connectionId}`;

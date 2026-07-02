@@ -378,13 +378,28 @@ export class CompetitionController {
   }
 
   public observeServerDisconnect(evidence: string): void {
+    if (this.incidents.some((incident) => incident.type === "server-disconnect" && incident.status === "open")) return;
     const attempt = this.currentAttempt;
     this.incidents.push({
       id: randomUUID(), type: "server-disconnect", severity: "critical", createdAtMs: this.clock.now(),
       ...(attempt ? { attemptId: attempt.id } : {}), participantIds: [], recommendedRestart: Boolean(attempt), status: "open", evidence
     });
     this.automationEnabled = false;
+    if (this.phase !== "incident" && this.phase !== "paused") this.pausedFromPhase = this.phase;
     this.phase = "incident";
+    this.bump();
+  }
+
+  public observeServerConnected(): void {
+    let resolved = false;
+    for (const incident of this.incidents) {
+      if (incident.type === "server-disconnect" && incident.status === "open") {
+        incident.status = "resolved";
+        resolved = true;
+      }
+    }
+    if (!resolved) return;
+    if (this.phase === "incident") this.phase = "paused";
     this.bump();
   }
 
@@ -410,9 +425,18 @@ export class CompetitionController {
 
   public enable(plannedReadyAtMs = this.clock.now() + this.policy.intermissionMs): void {
     if (this.automationEnabled) return;
+    const remainingBlockers = this.startBlockers().filter((blocker) => blocker.code !== "INCIDENT_OPEN");
+    if (remainingBlockers.length > 0) throw new Error("AUTOMATION_RESUME_BLOCKED");
+    for (const incident of this.incidents) if (incident.status === "open") incident.status = "resolved";
     this.automationEnabled = true;
     if (this.pausedFromPhase) {
-      if (this.phase === "paused") this.phase = this.pausedFromPhase;
+      const resumePhase = this.pausedFromPhase;
+      if (this.phase === "paused" || this.phase === "incident") {
+        if (resumePhase === "lobby") {
+          this.phase = "preparing";
+          this.planReady(this.stageIndex, plannedReadyAtMs);
+        } else this.phase = resumePhase;
+      }
       this.pausedFromPhase = undefined;
     } else {
       this.phase = "preparing";
@@ -1024,7 +1048,17 @@ export class CompetitionController {
       || action.status === "uncertain" && ["ready", "cheat-off", "go", "force-next-restart"].includes(action.kind))) {
       blockers.push({ code: "COMMAND_UNCONFIRMED", severity: "critical", autoRecoverable: false, suggestion: "核对服务器现场与命令审计，禁止自动补发" });
     }
-    if (this.incidents.some((incident) => incident.status === "open" && incident.recommendedRestart)) blockers.push({ code: "INCIDENT_OPEN", severity: "critical", autoRecoverable: false, suggestion: "裁判选择继续或使用短时确认令牌重赛" });
+    const openIncident = this.incidents.find((incident) => incident.status === "open");
+    if (openIncident) blockers.push({
+      code: "INCIDENT_OPEN",
+      severity: "critical",
+      autoRecoverable: false,
+      suggestion: openIncident.type === "server-disconnect"
+        ? "恢复 MockClient/服务器连接后继续当前阶段，或由裁判重赛本关"
+        : openIncident.type === "timing-discontinuity"
+          ? "核对现场与计划时间后恢复自动化；若 Go 结果不确定则先处置命令或重赛"
+          : "裁判核对证据后继续或重赛本关"
+    });
     return blockers;
   }
 

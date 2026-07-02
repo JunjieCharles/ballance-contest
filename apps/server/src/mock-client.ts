@@ -57,17 +57,28 @@ export interface CommandTransport {
   write(command: string): Promise<void>;
 }
 
+export interface MockClientExitInfo {
+  code: number | null;
+  signal: NodeJS.Signals | null;
+  expected: boolean;
+}
+
 export class ManagedMockClient implements CommandTransport {
   private process: ChildProcessWithoutNullStreams | undefined;
   private readonly listeners = new Set<(line: string) => void>();
+  private readonly exitListeners = new Set<(info: MockClientExitInfo) => void>();
   private logTailTimer: NodeJS.Timeout | undefined;
   private logOffset = 0;
   private logPending = "";
+  private stopping = false;
 
   public constructor(private readonly options: MockClientLaunchOptions) {}
 
   public start(): void {
     if (this.process) throw new Error("MockClient is already running");
+    this.logOffset = existsSync(this.options.logPath) ? readFileSync(this.options.logPath, "utf8").length : 0;
+    this.logPending = "";
+    this.stopping = false;
     const child = spawn(this.options.executable, buildMockClientArguments(this.options), {
       cwd: this.options.workingDirectory,
       shell: false,
@@ -76,15 +87,25 @@ export class ManagedMockClient implements CommandTransport {
     });
     this.process = child;
     this.startLogTail();
-    child.on("exit", () => {
+    child.on("exit", (code, signal) => {
+      const expected = this.stopping;
       this.stopLogTail();
       this.process = undefined;
+      this.stopping = false;
+      for (const listener of this.exitListeners) listener({ code, signal, expected });
     });
   }
+
+  public get isRunning(): boolean { return Boolean(this.process); }
 
   public onLine(listener: (line: string) => void): () => void {
     this.listeners.add(listener);
     return () => this.listeners.delete(listener);
+  }
+
+  public onExit(listener: (info: MockClientExitInfo) => void): () => void {
+    this.exitListeners.add(listener);
+    return () => this.exitListeners.delete(listener);
   }
 
   private startLogTail(): void {
@@ -121,7 +142,13 @@ export class ManagedMockClient implements CommandTransport {
   public async stop(timeoutMs = 5_000): Promise<void> {
     const child = this.process;
     if (!child) return;
-    await this.write("stop");
+    this.stopping = true;
+    try {
+      await this.write("stop");
+    } catch (error) {
+      this.stopping = false;
+      throw error;
+    }
     await new Promise<void>((resolve, reject) => {
       const timeout = setTimeout(() => reject(new Error("MockClient graceful stop timed out")), timeoutMs);
       child.once("exit", () => { clearTimeout(timeout); resolve(); });

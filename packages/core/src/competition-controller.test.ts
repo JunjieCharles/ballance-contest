@@ -613,7 +613,60 @@ describe("CompetitionController", () => {
     controller.tick();
     expect(controller.snapshot()).toMatchObject({ phase: "paused", automationEnabled: false, attempts: [] });
     expect(controller.snapshot().actions.filter((item) => item.kind === "go")).toHaveLength(0);
-    expect(controller.snapshot().incidents).toContainEqual(expect.objectContaining({ type: "timing-discontinuity" }));
+    expect(controller.snapshot().incidents).toContainEqual(expect.objectContaining({ type: "timing-discontinuity", status: "open" }));
+    controller.enable();
+    expect(controller.snapshot()).toMatchObject({ phase: "ready", automationEnabled: true });
+    expect(controller.snapshot().incidents).toContainEqual(expect.objectContaining({ type: "timing-discontinuity", status: "resolved" }));
+  });
+
+  it("recovers a server disconnect explicitly and keeps results and deadlines active while blocked", () => {
+    const clock = new FakeClock();
+    const controller = new CompetitionController(configuration(), clock);
+    connectAll(controller);
+    enterRunning(controller, clock);
+    const deadlineAtMs = controller.snapshot().attempts[0]?.deadlineAtMs as number;
+    controller.observeServerDisconnect("Disconnected from server.");
+    controller.observeServerDisconnect("duplicate disconnect evidence");
+    expect(controller.snapshot()).toMatchObject({ phase: "incident", pausedFromPhase: "running", automationEnabled: false });
+    expect(controller.snapshot().blockers).toContainEqual(expect.objectContaining({ code: "INCIDENT_OPEN", severity: "critical" }));
+    expect(controller.snapshot().incidents.filter((item) => item.type === "server-disconnect")).toHaveLength(1);
+    expect(controller.recordResult({ stageId: "s1", playerId: "p1", status: "finished", sourceId: "during-blocker" })).toBe("accepted");
+
+    controller.observeServerConnected();
+    expect(controller.snapshot()).toMatchObject({ phase: "paused", pausedFromPhase: "running", automationEnabled: false, blockers: [] });
+    controller.enable();
+    expect(controller.snapshot()).toMatchObject({ phase: "running", automationEnabled: true });
+
+    controller.observeServerDisconnect("second disconnect");
+    clock.set(deadlineAtMs);
+    controller.tick();
+    expect(controller.snapshot().attempts[0]).toMatchObject({ intakeOpen: false });
+  });
+
+  it("keeps the current phase before a missed Ready boundary and enters Ready after it", () => {
+    const beforeClock = new FakeClock();
+    const before = new CompetitionController(configuration(), beforeClock);
+    connectAll(before);
+    before.enable(10_000);
+    before.acknowledgeAction(action(before, "bulletin").id, "acknowledged");
+    beforeClock.set(5_000);
+    before.observeTimingDiscontinuity("pause before boundary");
+    beforeClock.set(9_000);
+    before.enable();
+    before.tick();
+    expect(before.snapshot().phase).toBe("preparing");
+
+    const afterClock = new FakeClock();
+    const after = new CompetitionController(configuration(), afterClock);
+    connectAll(after);
+    after.enable(10_000);
+    after.acknowledgeAction(action(after, "bulletin").id, "acknowledged");
+    afterClock.set(5_000);
+    after.observeTimingDiscontinuity("pause across boundary");
+    afterClock.set(11_000);
+    after.enable();
+    after.tick();
+    expect(after.snapshot().phase).toBe("ready");
   });
 
   it("pauses and exposes an explicit blocker after a permission failure", () => {

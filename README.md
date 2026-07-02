@@ -136,6 +136,8 @@ Ready、cheat off、Go 或 `forcenextrestart` 已发出但没有收到可识别�
 
 若服务器反馈 `Action failed: you don't have the permission to run this action.`，系统会把命令标为失败并阻断自动化，明确提示修复 `ContestConsole` 权限。服务重启时会先使用已持久化的权威 Go 和尝试证据核对 `sent` 命令，已经证明确实执行的命令不会误报为结果不确定。
 
+MockClient 进程意外退出或日志出现 `Disconnected from server.` 时会形成红色连接阻断，只暂停后续自动发令；已开放的成绩窗口和关卡时限仍继续。工作模式使用“重启 MockClient”，测试模式使用“模拟恢复连接”；重新看到 `Connected to server OK` 后仍保持暂停，由裁判点击“恢复自动化”继续，或对已有尝试选择“重赛本关”。恢复时尚未到下一计划边界就保持原阶段，已经越过边界则在下一次状态机驱动中直接进入下一阶段。
+
 ## 裁判控制台
 
 ### 流程操作

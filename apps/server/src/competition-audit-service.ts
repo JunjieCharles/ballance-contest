@@ -102,6 +102,9 @@ export class CompetitionAuditService {
           title: automaticProtection ? "起跑保护已自动执行" : "待处理事故",
           message: automaticProtection ? `尝试已按规则自动处理；证据：${value.evidence}` : `${value.type}：${value.evidence}`,
           occurredAt: new Date().toISOString(),
+          ...(value.type === "server-disconnect" ? { action: "restart-work" as const }
+            : value.type === "timing-discontinuity" ? { action: "enable-automation" as const }
+              : automaticProtection ? {} : { action: "restart-stage" as const }),
           ...(value.participantIds.length ? { participantIds: value.participantIds } : {})
         };
       })

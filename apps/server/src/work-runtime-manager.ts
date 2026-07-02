@@ -108,21 +108,16 @@ export class WorkRuntimeManager {
     const logPath = join(root, "logs", "mockclient.log");
     mkdirSync(join(root, "logs"), { recursive: true });
     const mockClientVersion = readMockClientVersion(executable, serverWindowsRoot());
-    const client = new ManagedMockClient({
-      executable,
-      workingDirectory: serverWindowsRoot(),
-      server: config.server,
-      refereeName: config.refereeName,
-      uuid: resolveMockClientUuid(serverWindowsRoot(), randomUUID()),
-      logPath
-    });
+    const client = this.createManagedClient(config, executable, logPath);
     const runtime = this.makeRuntime(competitionId, config, client, mockClientVersion);
-    client.onLine((line) => {
-      runtime.commands.observeLine(line);
-      this.ingestLine(runtime, line);
-    });
-    client.start();
     this.runtimes.set(competitionId, runtime);
+    this.bindManagedClient(runtime, client);
+    try {
+      client.start();
+    } catch (error) {
+      this.runtimes.delete(competitionId);
+      throw error;
+    }
     this.startParticipantReconciliation(runtime);
     this.startRealtime(runtime);
     this.saveSnapshot(runtime);
@@ -140,6 +135,33 @@ export class WorkRuntimeManager {
         });
       }
     }
+  }
+
+  public async restartClient(competitionId: string): Promise<RuntimeSnapshot> {
+    const runtime = this.runtimes.get(competitionId);
+    if (!runtime) throw new ServiceError("NOT_FOUND", "工作运行时尚未启动", 404);
+    if (runtime.client?.isRunning) {
+      await runtime.client.stop().catch(() => undefined);
+      if (runtime.client.isRunning) throw new ServiceError("STATE_CONFLICT", "旧 MockClient 尚未退出，不能启动第二个实例", 409);
+    }
+    const config = this.host.getOperationalConfig(competitionId);
+    const executable = resolve(serverWindowsRoot(), "BallanceMMOMockClient.exe");
+    if (!existsSync(executable)) throw new ServiceError("MOCK_CLIENT_MISSING", "未找到 BallanceMMOMockClient.exe", 500, { executable });
+    const logPath = join(resolve(this.host.dataRoot), "work", competitionId, "logs", "mockclient.log");
+    const client = this.createManagedClient(config, executable, logPath);
+    runtime.client = client;
+    runtime.commands.replaceTransport(client);
+    runtime.customMapsRegistered = false;
+    delete runtime.customMapRegistration;
+    this.bindManagedClient(runtime, client);
+    client.start();
+    if (runtime.initialListTimer) clearTimeout(runtime.initialListTimer);
+    if (runtime.listTimer) clearInterval(runtime.listTimer);
+    this.startParticipantReconciliation(runtime);
+    this.startRealtime(runtime);
+    this.saveSnapshot(runtime);
+    this.host.journal.append({ type: "work.mock-client-restarted", competitionId, data: { server: config.server } });
+    return this.view(runtime);
   }
 
   public view(runtime: WorkRuntime): RuntimeSnapshot {
@@ -196,6 +218,30 @@ export class WorkRuntimeManager {
   }
 
   public register(competitionId: string, runtime: WorkRuntime): void { this.runtimes.set(competitionId, runtime); }
+
+  private createManagedClient(config: CompetitionConfig, executable: string, logPath: string): ManagedMockClient {
+    return new ManagedMockClient({
+      executable,
+      workingDirectory: serverWindowsRoot(),
+      server: config.server,
+      refereeName: config.refereeName,
+      uuid: resolveMockClientUuid(serverWindowsRoot(), randomUUID()),
+      logPath
+    });
+  }
+
+  private bindManagedClient(runtime: WorkRuntime, client: ManagedMockClient): void {
+    client.onLine((line) => {
+      runtime.commands.observeLine(line);
+      this.ingestLine(runtime, line);
+    });
+    client.onExit((info) => {
+      if (info.expected || this.runtimes.get(runtime.competitionId) !== runtime || runtime.client !== client) return;
+      runtime.controller.observeServerDisconnect(`MockClient 进程意外退出（code=${info.code ?? "null"}, signal=${info.signal ?? "none"}）`);
+      this.saveSnapshot(runtime);
+      this.host.journal.append({ type: "work.mock-client-exited", competitionId: runtime.competitionId, data: info });
+    });
+  }
 
   public startRealtime(runtime: WorkRuntime): void {
     if (runtime.automationTimer) return;
@@ -340,7 +386,11 @@ export class WorkRuntimeManager {
     if (!config) return;
     this.host.appendRawLog(runtime.competitionId, "mock-client", line);
     const parsed = parseLogLine(line, { year: Number(config.date.slice(0, 4)), utcOffsetMinutes: utcOffsetMinutes(config.timezone) });
-    if (parsed.event.type === "connected") void this.registerPublishedCustomMaps(runtime, config).catch(() => undefined);
+    if (parsed.event.type === "connected") {
+      runtime.controller.observeServerConnected();
+      void this.registerPublishedCustomMaps(runtime, config).catch(() => undefined);
+    }
+    if (parsed.event.type === "server-disconnected") runtime.controller.observeServerDisconnect("MockClient 与比赛服务器断开连接");
     if (parsed.event.type === "permission-denied") runtime.controller.observePermissionDenied(parsed.event.message);
     if (parsed.event.type === "fatal-error") this.handleFatalError(runtime, parsed.event);
     const before = runtime.controller.snapshot();
