@@ -12,6 +12,7 @@ export type CommandAction =
   | { type: "cheat-off" }
   | { type: "go"; map: string; mapName?: string; mode: "sr" | "hs" }
   | { type: "force-next-restart" }
+  | { type: "listmap" }
   | { type: "scores"; map: string; mode: "sr" | "hs" }
   | { type: "kick"; playerName: string; reason: string }
   | { type: "raw"; command: string };
@@ -56,7 +57,7 @@ const PERMISSION_DENIED_TEXT = "Action failed: you don't have the permission to 
 
 export const isPermissionDeniedLine = (line: string): boolean => line.includes(PERMISSION_DENIED_TEXT);
 
-const encode = (action: CommandAction): { command: string; critical: boolean; acknowledgeAfterWriteMs?: number; acknowledge: (line: string) => boolean } => {
+const encode = (action: CommandAction): { command: string; critical: boolean; acknowledgeAfterWriteMs?: number; acknowledge: (line: string) => boolean; onSettle?: () => string } => {
   switch (action.type) {
     case "list": return {
       command: "list",
@@ -95,6 +96,20 @@ const encode = (action: CommandAction): { command: string; critical: boolean; ac
       acknowledgeAfterWriteMs: 250,
       acknowledge: () => false
     };
+    case "listmap": {
+      const seen = new Set<string>();
+      return {
+        command: "listmap",
+        critical: false,
+        acknowledgeAfterWriteMs: 500,
+        acknowledge: (line) => {
+          const match = /([0-9a-f]{32}):\s*(\S+)/i.exec(line);
+          if (match?.[2]) seen.add(match[2]);
+          return false;
+        },
+        onSettle: () => JSON.stringify([...seen])
+      };
+    }
     case "scores": return { command: `scores ${action.mode} ${cleanText(action.map)}`, critical: false, acknowledge: (line) => /place|score|ranking/i.test(line) };
     case "kick": return { command: `kick ${cleanText(action.playerName)} ${cleanText(action.reason)}`, critical: true, acknowledge: (line) => /kick|disconnect|success/i.test(line) };
     case "raw": return { command: cleanText(action.command), critical: true, acknowledge: (line) => /success|error|warning|ready|go|disconnect/i.test(line) };
@@ -141,7 +156,8 @@ export class CommandQueue {
               this.update(record, "sent");
               if (encoded.acknowledgeAfterWriteMs !== undefined) {
                 timeout = setTimeout(() => {
-                  settle(this.update(record, "acknowledged", "MockClient 已接受本地命令，权限观察窗口内未返回失败"));
+                  const responseLine = encoded.onSettle?.() ?? "MockClient 已接受本地命令，权限观察窗口内未返回失败";
+                  settle(this.update(record, "acknowledged", responseLine));
                 }, encoded.acknowledgeAfterWriteMs);
                 return;
               }

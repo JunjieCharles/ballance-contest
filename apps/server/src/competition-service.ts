@@ -1094,12 +1094,23 @@ export class CompetitionService {
         };
         continue;
       }
+      if (stored.action.type === "set-map" || stored.action.type === "set-official-map") {
+        const acknowledged: CommandRecord = {
+          ...stored,
+          status: "acknowledged",
+          responseLine: "setmap 无服务端回显；恢复时自动确认",
+          updatedAt: new Date().toISOString()
+        };
+        this.options.database.sqlite.prepare("UPDATE command_audits SET status='acknowledged',payload=?,updated_at=? WHERE id=?")
+          .run(JSON.stringify(acknowledged), acknowledged.updatedAt, item.id);
+        continue;
+      }
       const recovered: CommandRecord = { ...stored, status: "uncertain", updatedAt: new Date().toISOString() };
       this.options.database.sqlite.prepare("UPDATE command_audits SET status='uncertain',payload=?,updated_at=? WHERE id=?").run(JSON.stringify(recovered), recovered.updatedAt, item.id);
       this.appendAttention(competitionId, {
         id: `recovered-command:${item.id}`,
         category: "command",
-        severity: "critical",
+        severity: "warning",
         title: "命令结果待核实",
         message: `${recovered.command}；不会自动重试，请裁判核对现场。`,
         occurredAt: recovered.updatedAt

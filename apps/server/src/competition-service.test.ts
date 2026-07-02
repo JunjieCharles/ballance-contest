@@ -209,7 +209,7 @@ describe("CompetitionService dynamic participants", () => {
     await runtime.customMapRegistration;
     manager.ingestLine(runtime, "[07-01 19:25:39] Connected to server OK");
     await runtime.customMapRegistration;
-    expect(writes).toEqual([`setmap ${hash} 0 云端决赛图`]);
+    expect(writes).toEqual([`setmap ${hash} 0 云端决赛图`, "listmap"]);
     const prefix = hash.slice(0, 20);
     manager.ingestLine(runtime, "[07-01 19:25:40] Alpha (#11) logged in with cheat mode off.");
     manager.ingestLine(runtime, "[07-01 19:25:40] Beta (#12) logged in with cheat mode off.");
@@ -372,7 +372,7 @@ describe("CompetitionService dynamic participants", () => {
 
     const restored = new CompetitionService(undefined, { database, dataRoot }).snapshot(record.id);
     expect(restored.runtime.commands).toContainEqual(expect.objectContaining({ id: "sent-command", status: "uncertain" }));
-    expect(restored.runtime.attentionItems).toContainEqual(expect.objectContaining({ title: "命令结果待核实", severity: "critical" }));
+    expect(restored.runtime.attentionItems).toContainEqual(expect.objectContaining({ title: "命令结果待核实", severity: "warning" }));
     expect(restored.runtime.automationEnabled).toBe(false);
   });
 

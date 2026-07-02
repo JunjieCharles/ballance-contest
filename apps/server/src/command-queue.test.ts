@@ -119,6 +119,20 @@ describe("CommandQueue", () => {
     expect((await queue.enqueue({ type: "go", map: "level 1", mode: "sr" }, "official-hash-go")).status).toBe("acknowledged");
   });
 
+  it("collects listmap entries and returns them as JSON in responseLine", async () => {
+    const transport = new FakeTransport();
+    const queue = new CommandQueue(transport, 100);
+    transport.onWrite = () => {
+      setTimeout(() => queue.observeLine("[07-02 17:40:48] a364b408fffaab4344806b427e37f1a7: Level_01"), 0);
+      setTimeout(() => queue.observeLine("[07-02 17:40:48] ed2b0da16a05ed2ef3befa5ca5000a64: Level_01/45°"), 0);
+    };
+    const result = await queue.enqueue({ type: "listmap" }, "verify-maps");
+    expect(result.status).toBe("acknowledged");
+    const names = JSON.parse(result.responseLine ?? "[]") as string[];
+    expect(names).toContain("Level_01");
+    expect(names).toContain("Level_01/45°");
+  });
+
   it("encodes bulletin, notice and announce as distinct MockClient commands", async () => {
     const transport = new FakeTransport();
     const queue = new CommandQueue(transport, 100);

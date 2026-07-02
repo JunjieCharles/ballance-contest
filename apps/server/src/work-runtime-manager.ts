@@ -415,6 +415,43 @@ export class WorkRuntimeManager {
           if (record.status !== "acknowledged") throw new Error(`Custom map registration failed for ${stageDisplayName(stage)}`);
         }
       }
+      // Verify all registrations via listmap
+      const expectedNames = [...config.stages]
+        .sort((left, right) => left.order - right.order)
+        .map((stage) => {
+          if (stageMapKind(stage) === "official") return `Level_${String(stage.level).padStart(2, "0")}`;
+          return stageDisplayName(stage);
+        });
+      const listmapRecord = await runtime.commands.enqueue(
+        { type: "listmap" },
+        `listmap:${runtime.competitionId}:${Date.now()}`
+      );
+      if (listmapRecord.status !== "acknowledged") {
+        this.host.appendAttention(runtime.competitionId, {
+          id: `map-verification:${Date.now()}`,
+          category: "command",
+          severity: "warning",
+          title: "无法验证 setmap 结果",
+          message: "listmap 命令未成功；请手动核对地图注册状态。",
+          occurredAt: new Date().toISOString()
+        });
+      } else {
+        let seenNames: string[] = [];
+        try { seenNames = JSON.parse(listmapRecord.responseLine ?? "[]") as string[]; } catch { /* ignore */ }
+        const missing = expectedNames.filter(
+          (name) => !seenNames.some((seen) => seen === name || seen.startsWith(`${name}/`))
+        );
+        if (missing.length > 0) {
+          this.host.appendAttention(runtime.competitionId, {
+            id: `map-verification:${Date.now()}`,
+            category: "command",
+            severity: "warning",
+            title: "地图注册验证未通过",
+            message: `listmap 未找到: ${missing.join(", ")}。请手动核对。`,
+            occurredAt: new Date().toISOString()
+          });
+        }
+      }
       runtime.customMapsRegistered = true;
     })().catch((error) => {
       delete runtime.customMapRegistration;

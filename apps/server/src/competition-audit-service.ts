@@ -150,8 +150,8 @@ export class CompetitionAuditService {
       this.appendAttention(competitionId, {
         id: `command:${record.id}:${record.status}`,
         category: "command",
-        severity: record.status === "timed_out" ? "warning" : "critical",
-        title: permissionDenied ? "ContestConsole 权限不足" : record.status === "uncertain" ? "命令结果不确定" : record.status === "timed_out" ? "命令等待回显超时" : "命令发送失败",
+        severity: record.status === "failed" ? "critical" : "warning",
+        title: permissionDenied ? "ContestConsole 权限不足" : record.status === "uncertain" ? "命令结果待核实" : record.status === "timed_out" ? "命令等待回显超时" : "命令发送失败",
         message: permissionDenied
           ? `${record.command} 被服务器拒绝；自动化已阻断，请修复 ContestConsole 权限后重新核对。`
           : `${record.command}；不会自动重试，请结合服务器现场和原始日志核对。`,
