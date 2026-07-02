@@ -938,8 +938,11 @@ export class CompetitionController {
     const message = postGo
       ? `${name}：玩家 ${participantId} 在起跑保护期${eventText}，当前尝试及成绩已作废，第一条 Ready 改至 ${readyTime}。`
       : `${name}：玩家 ${participantId} 在起跑敏感期${eventText}，发令流程已中止，第一条 Ready 改至 ${readyTime}。`;
+    const protectionMessage = postGo
+      ? `由于玩家 ${participantId} 起跑保护期${eventText}，本关重赛`
+      : `由于玩家 ${participantId} 起跑保护期${eventText}，发令时间延迟`;
     this.queueActionForStage(postGo ? "announce" : "notice", stage, message);
-    this.planReady(this.stageIndex, plannedReadyAtMs, participantId);
+    this.planReady(this.stageIndex, plannedReadyAtMs, protectionMessage);
   }
 
   private cancelPendingLaunchActions(stageId: string): void {
@@ -980,18 +983,18 @@ export class CompetitionController {
     return action;
   }
 
-  private planReady(stageIndex: number, plannedReadyAtMs: number, protectionPlayerId?: string): void {
+  private planReady(stageIndex: number, plannedReadyAtMs: number, protectionMessage?: string): void {
     const target = this.stages[stageIndex];
     if (!target || !Number.isFinite(plannedReadyAtMs)) throw new Error("INVALID_READY_PLAN");
     this.plannedReadyAtMs = plannedReadyAtMs;
     this.plannedReadyStageIndex = stageIndex;
     this.noticeActionId = undefined;
-    this.queueBulletin(target, plannedReadyAtMs, protectionPlayerId);
+    this.queueBulletin(target, plannedReadyAtMs, protectionMessage);
   }
 
-  private queueBulletin(stage: AutomationStage, plannedReadyAtMs: number, protectionPlayerId?: string): void {
+  private queueBulletin(stage: AutomationStage, plannedReadyAtMs: number, protectionMessage?: string): void {
     const name = stage.displayName ?? `${stage.mode.toUpperCase()}${stage.map}`;
-    const protectionContext = protectionPlayerId ? `（玩家：${protectionPlayerId}，起跑保护改期）` : "";
+    const protectionContext = protectionMessage ? `（${protectionMessage}）` : "";
     const suffix = this.startProtectionUsedStageIds.has(stage.id) ? START_PROTECTION_USED_SUFFIX : "";
     this.queueActionForStage("bulletin", stage, `${name} 将在 ${formatUtc8Time(this.wallClockOriginMs + plannedReadyAtMs)} 发令${protectionContext}${suffix}`);
   }
