@@ -442,14 +442,32 @@ Go 前的同关完赛、DNF 和 Warning 属于练习/无关事件，不计入正
 - 模糊 Warning、申诉和录像证据进入待复核，不自动扩展处罚。
 - 裁判可在成绩页将结果设置为有效名次或 DNF；覆盖生成新版本并保留原事件。
 
-### 8.5 比赛中开启 cheat
+### 8.5 cheat 处理规则
 
-- 正式 Go 后，尚未有效完赛或 DNF 的参赛者个人 cheat 状态从关闭变为开启时，立即将该玩家本轮标为 `excluded`，创建高优先级注意事项并推送前端。
-- 判定窗口从权威 Go 开始，到该玩家有效完赛/DNF或本轮成绩接收窗口关闭为止。
-- Go 前的练习阶段允许玩家开启 cheat，不创建排除或处罚事件。
-- 玩家已经有效完赛/DNF 后、下一轮 Ready 前再开启 cheat，视为下一关练习日志：不追溯改变该轮成绩，也不把该行形成下一 Ready 阻断；下一轮 Ready 流程仍会统一关闭 cheat。
+cheat 合法性由两条时间线决定：**当前是否为比赛关卡**，以及 **全局 `cheat off` 是否已确认**。
+
+#### 8.5.1 四条规则
+
+| # | 场景 | 判定 | 行为 |
+|---|------|------|------|
+| 1 | 非比赛中关卡开启 cheat | 合法 | 视作练习其他关卡，不提醒、不排除 |
+| 2 | 全局 `cheat off` 前开启 cheat | 合法 | 视作练习，不提醒；Go 时不排除（即便 cheat 持续未关） |
+| 3 | 全局 `cheat off` 后开启 cheat | 违规 | 立即 notice 提醒；若 Go 时仍未关闭，排除该关成绩 |
+| 4 | 比赛中（running / tail-intake）开启 cheat | 违规 | 立即排除该关成绩，reason=`cheat-enabled` |
+
+#### 8.5.2 实现要点
+
+- **cheat 状态变更**：仅当 `observeCheat` 检测到 `false→true` 变化时触发通知路径；一直开启从未变化视为练习，不通知。
+- **cheat-off 时间分界线**：`acknowledgeAction`（含 `resolveUnconfirmedAction` 的 referee-confirmed 路径）记录 `lastCheatOffAcknowledgedAtMs`；`observeCheat` 记录每个参与者的 `cheatEnabledAtMs`。Go 时仅排除 `cheatEnabledAtMs > lastCheatOffAcknowledgedAtMs` 的参与者。
+- **分界线生命周期**：`enterReady` 重置 `lastCheatOffAcknowledgedAtMs = undefined`，确保新 Ready 流程不受上一关残留影响；`cheatWarningSent` 在 Go 时重置。
+- **规则 1 / 规则 2 不通知**：`hasCurrentCheatOffConfirmation` 门禁确保仅在全局 cheat-off 已被确认后，才会在 cheat 开启时发送 notice。
+- **规则 4 即时排除**：`observeCheat` 中若 `phase === running || phase === tail-intake` 且 attempt intake 仍开放且玩家未完成，立即 `acceptResult(excluded)`。
+- **已完赛玩家不追溯**：玩家有效完赛/DNF 后开启 cheat 不改变该轮成绩；下一轮 Ready 流程会统一重新关闭 cheat。
+- **裁判全局 cheat 事件**：裁判发出的全局 cheat 开启视为比赛事故，不批量排除，等待裁判处理。
+
+#### 8.5.3 原有说明
+
 - Ready 阶段发现玩家 cheat 开启时阻断 Go 并要求关闭；若权威 Go 到达时仍为开启状态，按本轮排除报告。
-- 裁判发出的全局 cheat 开启事件视为比赛事故，不批量排除所有选手，等待裁判处理。
 - 自动排除报告保存触发事件、玩家、尝试、cheat 前后状态和时间；后续真实完赛保留作证据，但不得伪造 DNF 日志。
 
 ## 9. 命令队列与审计

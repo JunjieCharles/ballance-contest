@@ -113,6 +113,7 @@
 | 2026-07-02 | `npm run test:e2e` | Edge 与 Chrome 共 14 项测试通过；除完整流程、重赛与四种成绩呈现外，逐项验证拖拽浮层/等高占位/持久顺序、官图计分与操作区不相交、工作模式隐藏测试入口、日志历史位置保持与底部自动跟随，以及榜单重排后的稳定玩家行编辑 |
 | 2026-07-02 | `npm run test:mock-client` | 真实 MockClient 版本、stdin、回显与正常退出通过 |
 | 2026-07-02 | `npm run test:live-work`（`2.bmmo.win`） | 以固定 `*ContestConsole` 完成 `list`、三类通知、三次官图 Ready、cheat off、倒数/Go、`setmap <MD5> 0 <地图名>`、自制图地图名回显 Ready/Go 与 Kick；13 条命令全部 `acknowledged`，无 `timed_out`/`uncertain` |
+| 2026-07-02 | cheat 四条规则回归 | 1. 非比赛关卡开 cheat→合法（练习）；2. 全局 cheat-off 前开 cheat→合法（练习）；3. 全局 cheat-off 后开 cheat→notice 提醒 + Go 后排除；4. 比赛中开 cheat→立即排除。实现通过 `cheatEnabledAtMs`/`lastCheatOffAcknowledgedAtMs` 时间分界线 + `hasCurrentCheatOffConfirmation` 门禁，162 项测试全部通过。 |
 | 2026-07-02 | `npm run package:portable` | 从当前服务与前端构建产物重新生成便携包 |
 | 2026-07-02 | `npm run test:portable` | 端口预检后通过实际 `Start-ContestConsole.cmd` 启动包内 Node v24.18.0，核对监听 PID/可执行路径、生产依赖和 Web UI；通过后等待退出窗口并复查 `32113` 空闲、无包内进程 |
 | 2026-06-30 | 启动器接管测试 | 旧控制台进程被新实例替换，健康接口恢复；未知进程不会被结束 |
