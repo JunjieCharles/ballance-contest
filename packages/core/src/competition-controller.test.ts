@@ -185,17 +185,24 @@ describe("CompetitionController", () => {
     expect(controller.snapshot()).toMatchObject({ phase: "running", attempts: [{ goAtMs: 3_000, deadlineAtMs: 23_000 }] });
   });
 
-  it("sends a cheat warning notice but does not block manual Go while a player still shows cheat", () => {
+  it("sends a cheat warning notice after cheat-off and does not block manual Go", () => {
     const clock = new FakeClock();
     const controller = new CompetitionController(configuration(), clock);
     connectAll(controller);
+    // Cheat-on before any cheat-off: no notice
     controller.observeCheat("p1", true, "practice-cheat");
-    expect(controller.snapshot().actions.some((action) => action.kind === "notice")).toBe(true);
-    expect(() => controller.startReadyFlow()).not.toThrow();
-    for (const item of controller.drainActions()) controller.acknowledgeAction(item.id, "acknowledged");
+    expect(controller.snapshot().actions.some((action) => action.kind === "notice")).toBe(false);
+    // Acknowledge a cheat-off to establish baseline
     controller.manualCheatOff();
     const cheatOff = action(controller, "cheat-off");
     controller.acknowledgeAction(cheatOff.id, "acknowledged");
+    // Re-enable cheat after cheat-off: notice fires
+    controller.observeCheat("p1", false);
+    controller.observeCheat("p1", true, "practice-cheat-again");
+    const notice = controller.snapshot().actions.find((a) => a.kind === "notice" && a.status === "pending");
+    expect(notice).toBeTruthy();
+    // Acknowledge the notice so it does not block manual Go
+    if (notice) controller.acknowledgeAction(notice.id, "acknowledged");
     expect(() => controller.requestManualGo()).not.toThrow();
   });
 

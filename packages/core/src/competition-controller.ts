@@ -365,7 +365,7 @@ export class CompetitionController {
     if (enabled && attempt?.intakeOpen && (this.phase === "running" || this.phase === "tail-intake") && !attempt.results.some((result) => result.playerId === participantId)) {
       this.acceptResult(attempt, { playerId: participantId, status: "excluded", sourceId, receivedAtMs: this.clock.now(), reason: "cheat-enabled" });
     }
-    if (enabled && this.phase !== "running" && this.phase !== "tail-intake" && !this.cheatWarningSent) {
+    if (enabled && this.phase !== "running" && this.phase !== "tail-intake" && !this.cheatWarningSent && this.hasCurrentCheatOffConfirmation(this.stage.id)) {
       this.cheatWarningSent = true;
       this.queueAction("notice", "检测到有玩家开启了cheat，请在发令前及时关闭，发令后仍开启视作违规。");
     }
