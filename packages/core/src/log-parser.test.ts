@@ -35,6 +35,13 @@ describe("parseLogLine", () => {
       .toMatchObject({ type: "player-list-summary", clients: 2, players: 1, spectators: 1 });
   });
 
+  it("parses MockClient list rows with [CHEAT] before latency", () => {
+    expect(parseLogLine("[07-02 18:51:17] 4106970147: JunjieCharles [CHEAT]    34ms", context).event)
+      .toMatchObject({ type: "player-listed", connectionId: "4106970147", playerName: "JunjieCharles", cheat: true });
+    expect(parseLogLine("[07-02 18:51:17] 4277312596: *ContestConsole    31ms", context).event)
+      .toMatchObject({ type: "player-listed", connectionId: "4277312596", playerName: "*ContestConsole", cheat: false });
+  });
+
   it("recognizes the exact server permission failure", () => {
     expect(parseLogLine("[07-02 10:00:00] Action failed: you don't have the permission to run this action.", context).event)
       .toMatchObject({ type: "permission-denied", message: "Action failed: you don't have the permission to run this action." });
