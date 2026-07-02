@@ -527,7 +527,7 @@ export const defaultFlowPolicy = (): FlowPolicy => ({
 export const defaultNotifications = (): NotificationTemplates => ({
   bulletin: "{stage} 将在 {time} 发令",
   ready: "READY!",
-  delay: "等待 {player} 重连，剩余 {remaining}。",
+  delay: "{player} 触发起跑保护，新的 Ready 时间为 {time}。",
   restart: "本轮因 {reason} 重赛，请等待裁判重新发令。",
   stageComplete: "{stage} 已进入成绩接收/结算。",
   nextStage: "{stage} 将在 {time} 发令",

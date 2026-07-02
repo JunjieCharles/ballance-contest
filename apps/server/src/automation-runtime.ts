@@ -25,8 +25,15 @@ export class WorkAutomationRuntime {
     for (const action of this.controller.drainActions()) {
       const record = await this.commands.enqueue(toCommand(action), action.idempotencyKey);
       records.push(record);
-      this.controller.acknowledgeAction(action.id,
-        record.status === "acknowledged" ? "acknowledged" : record.status === "uncertain" ? "uncertain" : "failed");
+      const notification = action.kind === "bulletin" || action.kind === "notice" || action.kind === "announce";
+      this.controller.acknowledgeAction(
+        action.id,
+        record.status === "acknowledged" || notification && record.status === "timed_out"
+          ? "acknowledged"
+          : record.status === "uncertain" || record.status === "timed_out"
+            ? "uncertain"
+            : "failed"
+      );
     }
     return records;
   }

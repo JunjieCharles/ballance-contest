@@ -201,9 +201,27 @@ describe("CompetitionController", () => {
     controller.observeCheat("p1", true, "practice-cheat-again");
     const notice = controller.snapshot().actions.find((a) => a.kind === "notice" && a.status === "pending");
     expect(notice).toBeTruthy();
+    controller.observeCheat("p1", false);
+    controller.observeCheat("p1", true, "practice-cheat-third-time");
+    expect(controller.snapshot().actions.filter((item) => item.kind === "notice")).toHaveLength(1);
     // Acknowledge the notice so it does not block manual Go
     if (notice) controller.acknowledgeAction(notice.id, "acknowledged");
     expect(() => controller.requestManualGo()).not.toThrow();
+  });
+
+  it("excludes cheat enabled in the same clock tick after cheat-off", () => {
+    const clock = new FakeClock();
+    const controller = new CompetitionController(configuration(), clock);
+    connectAll(controller);
+    controller.manualCheatOff();
+    controller.acknowledgeAction(action(controller, "cheat-off").id, "acknowledged");
+    controller.observeCheat("p1", true, "same-tick-cheat");
+    controller.acknowledgeAction(action(controller, "notice").id, "acknowledged");
+    controller.requestManualGo();
+    controller.acknowledgeAction(action(controller, "go").id, "acknowledged");
+    expect(controller.snapshot().attempts[0]?.results).toContainEqual(
+      expect.objectContaining({ playerId: "p1", status: "excluded", reason: "cheat-enabled" })
+    );
   });
 
   it("formats Bulletin as UTC+8 HH:mm across midnight and republishes it after every schedule change", () => {
@@ -216,6 +234,17 @@ describe("CompetitionController", () => {
     expect(action(controller, "bulletin").message).toBe("第一关 将在 00:01 发令");
     controller.delayReady(60_000);
     expect(action(controller, "bulletin").message).toBe("第一关 将在 00:02 发令");
+  });
+
+  it("does not repeat the planned Bulletin when Ready starts after its timer boundary", () => {
+    const clock = new FakeClock();
+    const controller = new CompetitionController(configuration(), clock);
+    connectAll(controller);
+    controller.enable(1_000);
+    controller.acknowledgeAction(action(controller, "bulletin").id, "acknowledged");
+    clock.set(1_001);
+    controller.tick();
+    expect(controller.snapshot().actions.filter((item) => item.kind === "bulletin")).toHaveLength(1);
   });
 
   it("runs the normal flow and closes tail intake atomically at the next actual Ready", () => {
@@ -301,7 +330,7 @@ describe("CompetitionController", () => {
     expect(controller.snapshot().actions.find((candidate) => candidate.id === ready.id)?.status).toBe("referee-confirmed");
   });
 
-  it("keeps the old intake open while the next Ready is blocked, but never beyond its deadline", () => {
+  it("keeps the old intake open while a critical command blocks the next Ready, but never beyond its deadline", () => {
     const clock = new FakeClock();
     const controller = new CompetitionController(configuration({
       stages: [
@@ -312,10 +341,11 @@ describe("CompetitionController", () => {
     connectAll(controller);
     enterRunning(controller, clock);
     for (const playerId of ["p1", "p2", "p3"]) controller.recordResult({ stageId: "s1", playerId, status: "finished", sourceId: playerId });
+    controller.manualReady();
+    controller.acknowledgeAction(action(controller, "ready").id, "uncertain");
     clock.set(46_000);
-    controller.observeConnection("p5", false);
     controller.tick();
-    expect(controller.snapshot()).toMatchObject({ phase: "tail-intake", attempts: [{ intakeOpen: true }] });
+    expect(controller.snapshot()).toMatchObject({ phase: "paused", pausedFromPhase: "tail-intake", attempts: [{ intakeOpen: true }] });
     expect(controller.recordResult({ stageId: "s1", playerId: "p4", status: "finished", sourceId: "p4" })).toBe("accepted");
 
     clock.set(80_000);
@@ -531,7 +561,7 @@ describe("CompetitionController", () => {
     );
   });
 
-  it("suggests restart for a protected crash or configured group disconnect, not a lone normal disconnect", () => {
+  it("does not block or suggest restart for disconnects outside the start-protection window", () => {
     const clock = new FakeClock();
     const controller = new CompetitionController(configuration({ policy: { announcementLeadMs: 0, readyBufferMs: 1_000, groupDisconnectThreshold: 2 } }), clock);
     connectAll(controller);
@@ -540,7 +570,34 @@ describe("CompetitionController", () => {
     controller.observeConnection("p1", false);
     expect(controller.snapshot().incidents).toHaveLength(0);
     controller.observeConnection("p2", false);
-    expect(controller.snapshot().incidents).toContainEqual(expect.objectContaining({ type: "group-disconnect", recommendedRestart: true }));
+    expect(controller.snapshot()).toMatchObject({ phase: "running", automationEnabled: true, blockers: [] });
+  });
+
+  it("excludes a player who reconnects with cheat during the race", () => {
+    const clock = new FakeClock();
+    const controller = new CompetitionController(configuration(), clock);
+    connectAll(controller);
+    enterRunning(controller, clock);
+    clock.advance(16_000);
+    controller.observeConnection("p1", false);
+    controller.observeConnection("p1", true);
+    controller.observeCheat("p1", true, "reconnected-with-cheat");
+    expect(controller.snapshot().attempts[0]?.results).toContainEqual(
+      expect.objectContaining({ playerId: "p1", status: "excluded", sourceId: "reconnected-with-cheat", reason: "cheat-enabled" })
+    );
+  });
+
+  it("keeps one attempt and one launch Bulletin when countdown lines arrive around duplicate Go evidence", () => {
+    const clock = new FakeClock();
+    const controller = new CompetitionController(configuration(), clock);
+    connectAll(controller);
+    controller.observeAuthoritativeGo("s1");
+    controller.observeCountdown(2);
+    controller.observeCountdown(1);
+    controller.observeAuthoritativeGo("s1");
+    expect(controller.snapshot().attempts).toHaveLength(1);
+    expect(controller.snapshot().phase).toBe("running");
+    expect(controller.snapshot().actions.filter((item) => item.kind === "bulletin" && item.message === "第一关已起跑")).toHaveLength(1);
   });
 
   it("blocks overdue actions after a detected sleep or clock discontinuity", () => {

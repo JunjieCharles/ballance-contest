@@ -300,6 +300,39 @@ describe("CompetitionService dynamic participants", () => {
     expect(snapshot.currentScoreboard.find((entry) => entry.playerId === "Valid")?.stages["sr-1"]).toMatchObject({ status: "finished", place: 1, points: 20 });
     expect(service.getRawClientLogs(record.id).some((line) => line.rawLine.includes("did not finish"))).toBe(false);
     expect(snapshot.runtime.attentionItems.filter((item) => item.title === "违规成绩已排除")).toHaveLength(2);
+    expect(runtime.engine.snapshot().anomalies.filter((item) => item.code === "duplicate-event" || item.code === "post-completion-result")).toHaveLength(0);
+  });
+
+  it("warns once after cheat-off and mirrors a cheat-on reconnect into the live scoreboard at Go", () => {
+    dataRoot = mkdtempSync(join(tmpdir(), "ballance-cheat-reconnect-"));
+    database = openDatabase(join(dataRoot, "console.sqlite"));
+    const service = new CompetitionService(undefined, { database, dataRoot });
+    const record = service.create({ name: "Cheat reconnect", mode: "work", idempotencyKey: "create-cheat-reconnect" });
+    service.publish(record.id, 0, "publish-cheat-reconnect");
+    const manager = workRuntimeManager(service);
+    const runtime = manager.makeRuntime(record.id, service.snapshot(record.id).publishedConfig as CompetitionConfig, { write: async () => undefined });
+    manager.register(record.id, runtime);
+
+    manager.ingestLine(runtime, "[07-02 20:00:00] OfflineCheater (#41) logged in with cheat mode off.");
+    runtime.controller.manualCheatOff();
+    const cheatOff = runtime.controller.drainActions().find((item) => item.kind === "cheat-off");
+    if (!cheatOff) throw new Error("missing cheat-off action");
+    runtime.controller.acknowledgeAction(cheatOff.id, "acknowledged");
+    manager.ingestLine(runtime, "[07-02 20:00:01] OfflineCheater (#41) disconnected.");
+    manager.ingestLine(runtime, "[07-02 20:00:02] 42: OfflineCheater [CHEAT]    34ms");
+    manager.ingestLine(runtime, "[07-02 20:00:03] 42: OfflineCheater [CHEAT]    34ms");
+
+    expect(runtime.controller.snapshot().actions.filter((item) => item.kind === "notice")).toHaveLength(1);
+    expect(runtime.controller.snapshot().blockers.some((blocker) => blocker.code === "PARTICIPANT_OFFLINE" || blocker.code === "PARTICIPANT_CHEAT")).toBe(false);
+    manager.ingestLine(runtime, "[07-02 20:00:04] [7, *ContestConsole]: Level 01 - Go!");
+
+    const snapshot = service.snapshot(record.id);
+    expect(snapshot.currentScoreboard.find((entry) => entry.playerId === "OfflineCheater")?.stages["sr-1"]).toMatchObject({
+      status: "excluded",
+      points: 0,
+      reason: "cheat-enabled"
+    });
+    expect(snapshot.runtime.attentionItems.filter((item) => item.title === "违规成绩已排除")).toHaveLength(1);
   });
 
   it("keeps raw test finish logs sequential when earlier finisher is excluded", () => {
@@ -485,19 +518,23 @@ describe("CompetitionService dynamic participants", () => {
     const controller = testRuntimeManager(service).getRuntime(record.id, runId).automation;
 
     controller.enable(0);
-    const bulletin = controller.drainActions().find((action) => action.kind === "bulletin");
-    expect(bulletin).toBeDefined();
-    controller.acknowledgeAction(bulletin!.id, "uncertain");
+    for (const initial of controller.drainActions()) controller.acknowledgeAction(initial.id, "acknowledged");
+    controller.tick();
+    const due = controller.drainActions();
+    const ready = due.find((action) => action.kind === "ready");
+    for (const action of due.filter((candidate) => candidate.id !== ready?.id)) controller.acknowledgeAction(action.id, "acknowledged");
+    expect(ready).toBeDefined();
+    controller.acknowledgeAction(ready!.id, "uncertain");
     expect(service.snapshot(record.id).runtime.unconfirmedAutomationActions).toEqual([
-      expect.objectContaining({ id: bulletin!.id, status: "uncertain" })
+      expect.objectContaining({ id: ready!.id, status: "uncertain" })
     ]);
     expect(internals.runtimeAutomationSnapshot(record.id).actions).toEqual(expect.arrayContaining([
-      expect.objectContaining({ id: bulletin!.id, status: "uncertain" })
+      expect.objectContaining({ id: ready!.id, status: "uncertain" })
     ]));
     const confirmExecuted = service.createConfirmation(record.id, {
       kind: "automation-command-resolution",
-      target: bulletin!.id,
-      actionId: bulletin!.id,
+      target: ready!.id,
+      actionId: ready!.id,
       resolution: "confirm-executed"
     });
     await service.performAction(record.id, {
@@ -505,23 +542,23 @@ describe("CompetitionService dynamic participants", () => {
       idempotencyKey: "confirm-bulletin",
       action: {
         type: "resolve-automation-command",
-        actionId: bulletin!.id,
+        actionId: ready!.id,
         resolution: "confirm-executed",
         confirmationToken: confirmExecuted.token,
         impactHash: confirmExecuted.impactHash
       }
     });
-    expect(controller.snapshot().actions.find((action) => action.id === bulletin!.id)?.status).toBe("referee-confirmed");
+    expect(controller.snapshot().actions.find((action) => action.id === ready!.id)?.status).toBe("referee-confirmed");
 
     controller.enable();
-    controller.tick();
-    const ready = controller.drainActions().find((action) => action.kind === "ready");
-    expect(ready).toBeDefined();
-    controller.acknowledgeAction(ready!.id, "failed");
+    controller.manualReady();
+    const retryReady = controller.drainActions().find((action) => action.kind === "ready");
+    expect(retryReady).toBeDefined();
+    controller.acknowledgeAction(retryReady!.id, "failed");
     const resend = service.createConfirmation(record.id, {
       kind: "automation-command-resolution",
-      target: ready!.id,
-      actionId: ready!.id,
+      target: retryReady!.id,
+      actionId: retryReady!.id,
       resolution: "resend"
     });
     await service.performAction(record.id, {
@@ -529,13 +566,13 @@ describe("CompetitionService dynamic participants", () => {
       idempotencyKey: "resend-ready",
       action: {
         type: "resolve-automation-command",
-        actionId: ready!.id,
+        actionId: retryReady!.id,
         resolution: "resend",
         confirmationToken: resend.token,
         impactHash: resend.impactHash
       }
     });
-    expect(controller.snapshot().actions.find((action) => action.id === ready!.id)?.status).toBe("acknowledged");
+    expect(controller.snapshot().actions.find((action) => action.id === retryReady!.id)?.status).toBe("acknowledged");
     expect(service.snapshot(record.id).runtime.attentionItems).toEqual(expect.arrayContaining([
       expect.objectContaining({ title: "流程命令已确认执行" }),
       expect.objectContaining({ title: "流程命令已由裁判执行重发" })
@@ -551,7 +588,7 @@ describe("CompetitionService dynamic participants", () => {
     const transport: CommandTransport = {
       write: async (command) => {
         writes.push(command);
-        setTimeout(() => runtimeHolder.current!.commands.observeLine("success"), 0);
+        setTimeout(() => runtimeHolder.current!.commands.observeLine("[7, *ContestConsole]: Level 01 - Get ready"), 0);
       }
     };
     const manager = workRuntimeManager(service);
@@ -559,28 +596,32 @@ describe("CompetitionService dynamic participants", () => {
     runtimeHolder.current = runtime;
     manager.register(record.id, runtime);
     runtime.controller.enable(0);
-    const bulletin = runtime.controller.drainActions().find((action) => action.kind === "bulletin");
-    runtime.controller.acknowledgeAction(bulletin!.id, "uncertain");
+    for (const initial of runtime.controller.drainActions()) runtime.controller.acknowledgeAction(initial.id, "acknowledged");
+    runtime.controller.tick();
+    const due = runtime.controller.drainActions();
+    const ready = due.find((action) => action.kind === "ready");
+    for (const action of due.filter((candidate) => candidate.id !== ready?.id)) runtime.controller.acknowledgeAction(action.id, "acknowledged");
+    runtime.controller.acknowledgeAction(ready!.id, "uncertain");
     const confirmation = service.createConfirmation(record.id, {
       kind: "automation-command-resolution",
-      target: bulletin!.id,
-      actionId: bulletin!.id,
+      target: ready!.id,
+      actionId: ready!.id,
       resolution: "resend"
     });
     const result = await service.performAction(record.id, {
       expectedStateVersion: 1,
-      idempotencyKey: "work-bulletin-resend",
+      idempotencyKey: "work-ready-resend",
       action: {
         type: "resolve-automation-command",
-        actionId: bulletin!.id,
+        actionId: ready!.id,
         resolution: "resend",
         confirmationToken: confirmation.token,
         impactHash: confirmation.impactHash
       }
     });
-    expect(result).toMatchObject({ status: "acknowledged", command: expect.stringContaining("bulletin") });
+    expect(result).toMatchObject({ status: "acknowledged", command: "countdown level 1 sr 4" });
     expect(writes).toHaveLength(1);
-    expect(runtime.controller.snapshot().actions.find((action) => action.id === bulletin!.id)?.status).toBe("acknowledged");
+    expect(runtime.controller.snapshot().actions.find((action) => action.id === ready!.id)?.status).toBe("acknowledged");
   });
 
   it("allows multiple work competitions but blocks starting two on the same server", () => {
@@ -596,9 +637,10 @@ describe("CompetitionService dynamic participants", () => {
     service.publish(second.id, 1, "publish-work-b");
     service.publish(third.id, 1, "publish-work-c");
 
-    workRuntimeManager(service).register(first.id, { server: "same.server" } as WorkRuntime);
+    const manager = workRuntimeManager(service);
+    manager.register(first.id, { server: "same.server" } as WorkRuntime);
 
     expect(() => service.startWorkMode(second.id)).toThrowError(/已有工作运行/);
-    expect(() => service.startWorkMode(third.id)).not.toThrow();
+    expect(() => manager.assertServerLeaseAvailable(third.id, "other.server")).not.toThrow();
   });
 });

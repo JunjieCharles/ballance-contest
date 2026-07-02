@@ -101,15 +101,7 @@ export class WorkRuntimeManager {
     const existing = this.runtimes.get(competitionId);
     if (existing) return this.view(existing);
     this.host.assertActionAvailable(competitionId, "start-work");
-    for (const [otherCompetitionId, running] of this.runtimes) {
-      if (otherCompetitionId === competitionId) continue;
-      if (serverLeaseKey(running.server) === serverLeaseKey(config.server)) {
-        throw new ServiceError("STATE_CONFLICT", `服务器 ${config.server} 已有工作运行`, 409, {
-          server: config.server,
-          blockingCompetitionId: otherCompetitionId
-        });
-      }
-    }
+    this.assertServerLeaseAvailable(competitionId, config.server);
     const executable = resolve(serverWindowsRoot(), "BallanceMMOMockClient.exe");
     if (!existsSync(executable)) throw new ServiceError("MOCK_CLIENT_MISSING", "未找到 BallanceMMOMockClient.exe", 500, { executable });
     const root = join(resolve(this.host.dataRoot), "work", competitionId);
@@ -136,6 +128,18 @@ export class WorkRuntimeManager {
     this.saveSnapshot(runtime);
     this.host.journal.append({ type: "work.started", competitionId, data: { mockClientVersion } });
     return this.view(runtime);
+  }
+
+  public assertServerLeaseAvailable(competitionId: string, server: string): void {
+    for (const [otherCompetitionId, running] of this.runtimes) {
+      if (otherCompetitionId === competitionId) continue;
+      if (serverLeaseKey(running.server) === serverLeaseKey(server)) {
+        throw new ServiceError("STATE_CONFLICT", `服务器 ${server} 已有工作运行`, 409, {
+          server,
+          blockingCompetitionId: otherCompetitionId
+        });
+      }
+    }
   }
 
   public view(runtime: WorkRuntime): RuntimeSnapshot {
@@ -260,23 +264,37 @@ export class WorkRuntimeManager {
   }
 
   public mirrorSystemResults(runtime: WorkRuntime): void {
-    const engineSources = new Set(runtime.engine.snapshot().currentScoreboard.flatMap((entry) => Object.values(entry.stages).map((result) => result.sourceId)));
+    const engineSnapshot = runtime.engine.snapshot();
+    const engineSources = new Set(engineSnapshot.currentScoreboard.flatMap((entry) =>
+      Object.values(entry.stages).flatMap((result) => result.finishSourceId ? [result.sourceId, result.finishSourceId] : [result.sourceId])));
     let changed = false;
     for (const attempt of runtime.controller.snapshot().attempts) {
+      const engineAttempt = engineSnapshot.attempts.find((candidate) => candidate.stageId === attempt.stageId
+        && candidate.attemptNumber === attempt.attemptNumber && candidate.open && !candidate.voided);
+      if (!engineAttempt) continue;
       for (const result of attempt.results) {
-        if (result.status !== "dnf" || engineSources.has(result.sourceId) || !result.sourceId.match(/^(deadline|manual-end):/)) continue;
-        runtime.engine.apply({ atMs: Date.now(), sourceId: result.sourceId, type: "dnf", stageId: attempt.stageId, playerId: result.playerId, reason: result.reason ?? "time-limit" });
+        if (engineSources.has(result.sourceId)
+          || result.status === "excluded" && engineSources.has(`${result.sourceId}:excluded`)) continue;
+        if (result.status === "dnf" && result.sourceId.match(/^(deadline|manual-end):/)) {
+          runtime.engine.apply({ atMs: engineAttempt.deadlineAtMs, sourceId: result.sourceId, type: "dnf", stageId: attempt.stageId, playerId: result.playerId, reason: result.reason ?? "time-limit" });
+        } else if (result.status === "excluded") {
+          runtime.engine.apply({ atMs: engineAttempt.goAtMs, sourceId: result.sourceId, type: "exclude", stageId: attempt.stageId, playerId: result.playerId, reason: result.reason ?? "excluded" });
+          this.host.recordExclusionAttention(runtime.competitionId, attempt.stageId, result.playerId, result.sourceId, result.reason ?? "违规");
+        } else continue;
+        engineSources.add(result.sourceId);
         changed = true;
-        this.host.appendAttention(runtime.competitionId, {
-          id: `system-dnf:${result.sourceId}`,
-          category: "result",
-          severity: "warning",
-          title: result.sourceId.startsWith("deadline:") ? "关卡时限已到" : "本关已提前结束",
-          message: `${result.playerId} 未完成，成绩记为 DNF。`,
-          occurredAt: new Date().toISOString(),
-          stageId: attempt.stageId,
-          participantIds: [result.playerId]
-        });
+        if (result.status === "dnf") {
+          this.host.appendAttention(runtime.competitionId, {
+            id: `system-dnf:${result.sourceId}`,
+            category: "result",
+            severity: "warning",
+            title: result.sourceId.startsWith("deadline:") ? "关卡时限已到" : "本关已提前结束",
+            message: `${result.playerId} 未完成，成绩记为 DNF。`,
+            occurredAt: new Date().toISOString(),
+            stageId: attempt.stageId,
+            participantIds: [result.playerId]
+          });
+        }
       }
     }
     if (changed) this.host.saveScoreboards(runtime.competitionId, runtime.engine.snapshot().scoreboardVersions);
@@ -386,6 +404,7 @@ export class WorkRuntimeManager {
       }
       this.host.saveScoreboards(runtime.competitionId, runtime.engine.snapshot().scoreboardVersions);
     }
+    this.mirrorSystemResults(runtime);
     this.mirrorVoidedAttempts(runtime);
     if (parsed.event.type === "player-listed") this.recordListParticipant(runtime, parsed.event.playerName);
     this.host.completeCompetitionOnReview(runtime.competitionId, runtime.controller.snapshot());

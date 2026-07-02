@@ -55,30 +55,18 @@ const putEveryoneOnline = (controller: CompetitionController, participants = ["p
 afterEach(() => vi.useRealTimers());
 
 describe("P0 centralized automation and command regression", () => {
-  it("BE-DISC-001/002: waits for reconnect stability and resets the timer when the player drops again", () => {
+  it("BE-DISC-001/002: ignores player disconnects outside the start-protection window", () => {
     const clock = new ManualClock();
     const controller = makeController(clock);
     putEveryoneOnline(controller);
     controller.enable(60_000);
-    settle(controller);
-    expect(controller.snapshot()).toMatchObject({ phase: "preparing", attempts: [] });
-
     controller.observeConnection("p2", false);
-    expect(controller.snapshot()).toMatchObject({ phase: "pre-start-wait", waitingParticipants: ["p2"] });
-    clock.advanceBy(1_000);
+    expect(controller.snapshot()).toMatchObject({ phase: "preparing", plannedReadyAtMs: 60_000, waitingParticipants: [], blockers: [] });
     controller.observeConnection("p2", true);
-    clock.advanceBy(14_000);
-    settle(controller);
-    expect(controller.snapshot().phase).toBe("pre-start-wait");
-
-    controller.observeConnection("p2", false);
-    controller.observeConnection("p2", true);
-    clock.advanceBy(15_000);
-    settle(controller);
-    expect(controller.snapshot()).toMatchObject({ phase: "preparing", waitingParticipants: [], attempts: [] });
     clock.advanceBy(60_000);
     settle(controller);
     expect(controller.snapshot()).toMatchObject({ phase: "ready", waitingParticipants: [], attempts: [] });
+    expect(controller.snapshot().actions.some((item) => item.kind === "notice" && item.message?.includes("等待"))).toBe(false);
   });
 
   it("BE-WINDOW-001/002: keeps tail intake open until the next actual Ready boundary", () => {

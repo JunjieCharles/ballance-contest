@@ -65,4 +65,42 @@ describe("automation runtimes", () => {
     clock.value = 30_000; controller.tick(); expect(runtime.dispatch().map((item) => item.kind)).toEqual(["go"]);
     expect(controller.snapshot().attempts).toHaveLength(1);
   });
+
+  it("keeps ordinary notification timeouts non-blocking", async () => {
+    const { controller } = makeController();
+    const port: CommandQueuePort = {
+      enqueue: async (command, idempotencyKey) => ({
+        id: idempotencyKey, idempotencyKey, action: command, command: command.type,
+        status: command.type === "notification" ? "timed_out" : "acknowledged",
+        createdAt: "2026-07-02T00:00:00Z", updatedAt: "2026-07-02T00:00:00Z"
+      })
+    };
+    const runtime = new WorkAutomationRuntime(controller, port);
+    controller.enable(0);
+    await runtime.dispatch();
+    controller.tick();
+    await runtime.dispatch();
+    expect(controller.snapshot()).toMatchObject({ phase: "ready", automationEnabled: true, blockers: [] });
+  });
+
+  it("turns a Ready timeout into a recoverable uncertain blocker", async () => {
+    const { controller } = makeController();
+    const port: CommandQueuePort = {
+      enqueue: async (command, idempotencyKey) => ({
+        id: idempotencyKey, idempotencyKey, action: command, command: command.type,
+        status: command.type === "ready" ? "timed_out" : "acknowledged",
+        createdAt: "2026-07-02T00:00:00Z", updatedAt: "2026-07-02T00:00:00Z"
+      })
+    };
+    const runtime = new WorkAutomationRuntime(controller, port);
+    controller.enable(0);
+    await runtime.dispatch();
+    controller.tick();
+    await runtime.dispatch();
+    expect(controller.snapshot()).toMatchObject({
+      phase: "paused",
+      automationEnabled: false,
+      blockers: [expect.objectContaining({ code: "COMMAND_UNCONFIRMED", severity: "critical" })]
+    });
+  });
 });

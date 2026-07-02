@@ -492,6 +492,7 @@ export function App() {
 
   const runtime = snapshot?.runtime;
   const versionKey = snapshot ? `${snapshot.competition.stateVersion}:${snapshot.runtime.stateVersion}` : "none";
+  const scoreboardVersionKey = snapshot ? `${snapshot.competition.id}:${snapshot.competition.stateVersion}` : "none";
   const visibleTabs = (["config", "console", "players", "scoreboard", "test", "archive"] as const)
     .filter((item) => snapshot?.competition.mode === "test" || item !== "test");
   const activeTab = snapshot?.competition.mode === "work" && tab === "test" ? "console" : tab;
@@ -535,7 +536,7 @@ export function App() {
           {activeTab === "config" && <ConfigPanel key={`${snapshot.competition.id}:${snapshot.competition.stateVersion}`} snapshot={snapshot} canWrite={canWrite}
             saveDraft={(patch) => saveDraft(patch)} publish={() => publish()} />}
           {activeTab === "players" && <PlayersPanel snapshot={snapshot} canWrite={canWrite} performAction={(action) => performAction(action)} />}
-          {activeTab === "scoreboard" && <ScoreboardPanel snapshot={snapshot} canWrite={canWrite} versionKey={versionKey}
+          {activeTab === "scoreboard" && <ScoreboardPanel snapshot={snapshot} canWrite={canWrite} versionKey={scoreboardVersionKey}
             requestConfirmation={requestConfirmation} overrideScoreboard={overrideScoreboard} downloadExport={downloadExport} />}
           {activeTab === "test" && <TestPanel snapshot={snapshot} scenarios={scenarios} scenarioDetail={scenarioDetail} canWrite={canWrite}
             loadScenario={loadScenario} createRun={createRun} advanceClock={(ms) => advanceClock(ms)} />}

@@ -7,7 +7,8 @@ $ErrorActionPreference = "Stop"
 $package = [IO.Path]::GetFullPath((Join-Path (Get-Location) $PackagePath))
 $node = Join-Path $package "runtime\node.exe"
 $entry = Join-Path $package "app\server\main.js"
-    if (-not (Test-Path -LiteralPath $node -PathType Leaf) -or -not (Test-Path -LiteralPath $entry -PathType Leaf)) {
+$launcher = Join-Path $package "Start-ContestConsole.cmd"
+if (-not (Test-Path -LiteralPath $node -PathType Leaf) -or -not (Test-Path -LiteralPath $entry -PathType Leaf) -or -not (Test-Path -LiteralPath $launcher -PathType Leaf)) {
     throw "Portable package is incomplete: $package"
 }
 $portableManifest = Get-Content -LiteralPath (Join-Path $package "PORTABLE_MANIFEST.json") -Raw | ConvertFrom-Json
@@ -38,10 +39,16 @@ try {
     $env:BALLANCE_BOOTSTRAP_TOKEN = "portable-smoke-token"
     $env:BALLANCE_OPEN_BROWSER = "0"
     if (Get-Command node -ErrorAction SilentlyContinue) { throw "Smoke environment unexpectedly found a system Node.js" }
-    $process = Start-Process -FilePath "$env:SystemRoot\System32\cmd.exe" -ArgumentList @("/d", "/c", "Start-ContestConsole.cmd") -WorkingDirectory $package -WindowStyle Hidden -PassThru
+    $launcherOut = Join-Path $temporaryRoot "launcher.stdout.log"
+    $launcherErr = Join-Path $temporaryRoot "launcher.stderr.log"
+    $process = Start-Process -FilePath $launcher -WorkingDirectory $package -WindowStyle Hidden -RedirectStandardOutput $launcherOut -RedirectStandardError $launcherErr -PassThru
     $health = $null
     for ($attempt = 0; $attempt -lt 60; $attempt += 1) {
-        if ($process.HasExited) { throw "Portable server exited with code $($process.ExitCode)" }
+        if ($process.HasExited) {
+            $capturedOut = Get-Content -LiteralPath $launcherOut -Raw -ErrorAction SilentlyContinue
+            $capturedErr = Get-Content -LiteralPath $launcherErr -Raw -ErrorAction SilentlyContinue
+            throw "Portable server exited with code $($process.ExitCode). stdout: $capturedOut stderr: $capturedErr"
+        }
         try {
             $health = Invoke-RestMethod -Uri "http://127.0.0.1:38623/api/v1/health" -TimeoutSec 1
             $listener = Get-NetTCPConnection -LocalPort 38623 -State Listen -ErrorAction Stop | Select-Object -First 1
@@ -91,8 +98,19 @@ try {
         }
     }
     if ($null -ne $process -and -not $process.HasExited) {
-        Stop-Process -Id $process.Id -Force
+        Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
         Wait-Process -Id $process.Id -Timeout 10 -ErrorAction SilentlyContinue
+    }
+    for ($attempt = 0; $attempt -lt 30; $attempt += 1) {
+        $remainingListener = Get-NetTCPConnection -LocalPort 38623 -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1
+        $remainingBundledNode = Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object {
+            $_.ExecutablePath -and [IO.Path]::GetFullPath($_.ExecutablePath).Equals([IO.Path]::GetFullPath($node), [StringComparison]::OrdinalIgnoreCase)
+        } | Select-Object -First 1
+        if ($null -eq $remainingListener -and $null -eq $remainingBundledNode) { break }
+        if ($attempt -eq 29) {
+            throw "Portable smoke cleanup incomplete: listener PID $($remainingListener.OwningProcess), bundled Node PID $($remainingBundledNode.ProcessId)"
+        }
+        Start-Sleep -Milliseconds 100
     }
     $env:Path = $oldPath
     $env:LOCALAPPDATA = $oldLocalAppData

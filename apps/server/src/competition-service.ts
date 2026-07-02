@@ -44,6 +44,7 @@ import { EventJournal } from "./event-journal.js";
 import {
   automationView,
   commandView,
+  isUnresolvedAutomationAction,
   plannedReadyAt,
   plannedStageStartAt,
   scoreboardView,
@@ -424,7 +425,7 @@ export class CompetitionService {
           return runId ? this.testRuntimeManager.getRuntime(competitionId, runId).automation : undefined;
         })()
       : this.workRuntimeManager.get(competitionId)?.controller;
-    const unresolved = controller?.snapshot().actions.filter((action) => action.status === "failed" || action.status === "uncertain") ?? [];
+    const unresolved = controller?.snapshot().actions.filter(isUnresolvedAutomationAction) ?? [];
     if (unresolved.length > 0) {
       throw new ServiceError("ACTION_UNAVAILABLE", "请先逐条确认已执行或执行重发，再恢复自动化", 409, { actionIds: unresolved.map((action) => action.id) });
     }
@@ -506,7 +507,7 @@ export class CompetitionService {
     let impactHash = createHash("sha256").update(JSON.stringify({ competitionId, target, stateVersion: competition.stateVersion, kind: input.kind, playerId: input.playerId, stageId: input.stageId, operation: input.operation, place: input.place, rankPolicy: input.rankPolicy })).digest("hex");
     let runtimeToken: string | undefined;
     const unresolvedAutomationAction = input.kind === "automation-command-resolution"
-      ? runtimeSnapshot?.actions.find((action) => action.id === input.actionId && (action.status === "failed" || action.status === "uncertain"))
+      ? runtimeSnapshot?.actions.find((action) => action.id === input.actionId && isUnresolvedAutomationAction(action))
       : undefined;
     if (input.kind === "automation-command-resolution") {
       if (!unresolvedAutomationAction || !input.resolution || target !== unresolvedAutomationAction.id) {
@@ -655,7 +656,7 @@ export class CompetitionService {
       const resolutionAction = input.action;
       const controller = this.controllerFor(competitionId);
       const unresolved = controller.snapshot().actions.find((action) =>
-        action.id === resolutionAction.actionId && (action.status === "failed" || action.status === "uncertain"));
+        action.id === resolutionAction.actionId && isUnresolvedAutomationAction(action));
       if (!unresolved) throw new ServiceError("ACTION_UNAVAILABLE", "目标流程命令已变化或已完成处置", 409);
       const currentImpactHash = createHash("sha256").update(JSON.stringify({
         competitionId,
@@ -692,7 +693,8 @@ export class CompetitionService {
         const runtime = this.workRuntimeManager.get(competitionId);
         if (!runtime) throw new ServiceError("NOT_FOUND", "工作运行时尚未启动", 404);
         const record = await runtime.commands.enqueue(this.refereeActionService.toAutomationCommand(unresolved), `${input.idempotencyKey}:resend`);
-        const resolvedStatus = record.status === "acknowledged" ? "acknowledged" : record.status === "uncertain" ? "uncertain" : "failed";
+        const resolvedStatus = record.status === "acknowledged" ? "acknowledged"
+          : record.status === "uncertain" || record.status === "timed_out" ? "uncertain" : "failed";
         controller.resolveUnconfirmedAction(unresolved.id, resolvedStatus);
         view = commandView(record);
       }
@@ -1203,7 +1205,7 @@ export class CompetitionService {
     const blockers = snapshot?.blockers.filter((blocker) => blocker.code !== "AUTOMATION_PAUSED") ?? [];
     const hasBlockingIssue = blockers.some((blocker) => blocker.severity === "critical" || blocker.code === "PARTICIPANT_OFFLINE");
     const hasReadyFlowBlockingIssue = blockers.some((blocker) => blocker.code !== "PARTICIPANT_CHEAT" && (blocker.severity === "critical" || blocker.code === "PARTICIPANT_OFFLINE"));
-    const hasUnconfirmedAutomationActions = snapshot?.actions.some((action) => action.status === "failed" || action.status === "uncertain") ?? false;
+    const hasUnconfirmedAutomationActions = snapshot?.actions.some(isUnresolvedAutomationAction) ?? false;
     const openAttempt = snapshot?.attempts.findLast((attempt) => attempt.intakeOpen && !attempt.voided);
     const currentAttempt = snapshot?.attempts.findLast((attempt) => attempt.stageId === snapshot.currentStageId && !attempt.voided);
     const restartPhase = phase === "running" || phase === "tail-intake" || phase === "incident"
@@ -1239,7 +1241,7 @@ export class CompetitionService {
         !refereeActionsUnlocked ? "请先发布比赛配置" : "自动化当前未启用"),
       descriptor("start-ready-flow", "进入 Ready+发令流程", "立即发布本关预告，把目标关第一条 Ready 设为 1 分钟后，并自动完成 Ready、READY!、关闭 cheat 和发令。",
         refereeActionsUnlocked && hasRuntime && ["lobby", "preparing", "paused", "restart-preparing", "tail-intake"].includes(phase) && !hasReadyFlowBlockingIssue,
-        !refereeActionsUnlocked ? "请先发布比赛配置" : !hasRuntime ? "请先启动运行" : !["lobby", "preparing", "paused", "restart-preparing", "tail-intake"].includes(phase) ? `当前阶段 ${phase} 不能进入发令流程` : "存在离线、权限、事故或不确定命令"),
+        !refereeActionsUnlocked ? "请先发布比赛配置" : !hasRuntime ? "请先启动运行" : !["lobby", "preparing", "paused", "restart-preparing", "tail-intake"].includes(phase) ? `当前阶段 ${phase} 不能进入发令流程` : "存在权限、事故或不确定命令"),
       descriptor("ready", "手动 Ready", "只向计划目标关发送一次 Ready；不改变阶段、计划时间、Bulletin 或自动流程进度。",
         refereeActionsUnlocked && hasRuntime && !["countdown", "running", "review", "incident"].includes(phase) && !hasReadyFlowBlockingIssue,
         !refereeActionsUnlocked ? "请先发布比赛配置" : !hasRuntime ? "请先启动运行" : "当前阶段或流程阻断不允许发送手动 Ready"),
@@ -1249,7 +1251,7 @@ export class CompetitionService {
         ? "先执行本次重发令所需的一次 forcenextrestart，确认后立即触发真实 3/2/1；只有权威 Go 后才创建尝试和设置本关时间。"
         : "不等待计划时间并立即触发真实 3/2/1；只有权威 Go 回显后才创建尝试和设置本关时间。",
         refereeActionsUnlocked && hasRuntime && !["countdown", "running", "review", "incident"].includes(phase) && cheatOffConfirmed && !hasPendingCommands && !hasBlockingIssue,
-        !refereeActionsUnlocked ? "请先发布比赛配置" : !hasRuntime ? "请先启动运行" : !cheatOffConfirmed ? "目标关尚无关闭 cheat 成功回显" : hasPendingCommands ? "仍有命令等待回显" : "存在离线、cheat、权限或未决命令阻断"),
+        !refereeActionsUnlocked ? "请先发布比赛配置" : !hasRuntime ? "请先启动运行" : !cheatOffConfirmed ? "目标关尚无关闭 cheat 成功回显" : hasPendingCommands ? "仍有命令等待回显" : "存在权限、连接或未决命令阻断"),
       descriptor("delay-ready", "Ready 延后 1 分钟", "将下一次已安排的 Ready 时间顺延 1 分钟。", refereeActionsUnlocked && snapshot?.plannedReadyAtMs !== undefined && ["preparing", "pre-start-wait", "tail-intake", "restart-preparing"].includes(phase),
         !refereeActionsUnlocked ? "请先发布比赛配置" : "当前没有可延后的 Ready 计划"),
       descriptor("reschedule", "Ready 改期", "把下一次 Ready 改到指定时间，不改变本关时限。", refereeActionsUnlocked && snapshot?.plannedReadyAtMs !== undefined && ["preparing", "pre-start-wait", "tail-intake", "restart-preparing"].includes(phase),

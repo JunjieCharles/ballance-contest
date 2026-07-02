@@ -228,9 +228,7 @@ export class CompetitionController {
   private readonly stableSince = new Map<string, number>();
   private readonly waiting = new Set<string>();
   private readonly absent = new Set<string>();
-  private readonly disconnectedDuringAttempt = new Set<string>();
   private readonly startProtectionUsedStageIds = new Set<string>();
-  private readonly ignoredProtectionOfflineParticipants = new Set<string>();
   private readonly actions: AutomationAction[] = [];
   private readonly undeliveredActionIds = new Set<string>();
   private readonly attempts: MutableAttempt[] = [];
@@ -255,11 +253,10 @@ export class CompetitionController {
   private readyAnnouncementActionId: string | undefined;
   private cheatOffActionId: string | undefined;
   private cheatWarningSent = false;
-  private readonly cheatEnabledAtMs = new Map<string, number>();
+  private readonly cheatEnabledAfterCurrentOff = new Set<string>();
   private lastCheatOffAcknowledgedAtMs: number | undefined;
   private forceRestartActionId: string | undefined;
   private goActionId: string | undefined;
-  private manualFlow = false;
   private pendingManualGoStageId: string | undefined;
   private countdownValue: 3 | 2 | 1 | undefined;
   private permissionDeniedEvidence: string | undefined;
@@ -323,37 +320,12 @@ export class CompetitionController {
     if (online) this.stableSince.set(participantId, this.clock.now());
     else this.stableSince.delete(participantId);
 
-    if (online) this.ignoredProtectionOfflineParticipants.delete(participantId);
     if (!online && this.isStartProtectionSensitive()) {
-      this.ignoredProtectionOfflineParticipants.add(participantId);
       if (!this.startProtectionUsedStageIds.has(this.stage.id)) {
         this.triggerStartProtection(participantId, `起跑敏感期掉线：${participantId}`);
       }
       this.bump();
       return;
-    }
-
-    if (this.phase === "ready" || this.phase === "countdown" || this.phase === "preparing" || this.phase === "restart-preparing" || this.phase === "pre-start-wait") {
-      if (!online) {
-        this.waiting.add(participantId);
-        this.waitDeadlineAtMs ??= this.clock.now() + this.policy.preStartWaitLimitMs;
-        this.phase = "pre-start-wait";
-        this.readyAtMs = undefined;
-        this.plannedReadyAtMs = undefined;
-        this.plannedReadyStageIndex = undefined;
-        this.noticeActionId = undefined;
-        this.readyActionId = undefined;
-        this.readyActionIds.length = 0;
-        this.readyAnnouncementActionId = undefined;
-        this.cheatOffActionId = undefined;
-        this.goActionId = undefined;
-        this.queueAction("notice", `等待 ${participantId} 重连`);
-      }
-    } else if ((this.phase === "running" || this.phase === "tail-intake") && !online) {
-      this.disconnectedDuringAttempt.add(participantId);
-      if (this.disconnectedDuringAttempt.size >= this.policy.groupDisconnectThreshold) {
-        this.openRestartIncident("group-disconnect", [...this.disconnectedDuringAttempt], "参赛者掉线数量达到群体异常阈值");
-      }
     }
     this.bump();
   }
@@ -363,7 +335,8 @@ export class CompetitionController {
     const previous = this.cheat.get(participantId) ?? false;
     if (previous === enabled) return;
     this.cheat.set(participantId, enabled);
-    if (enabled) this.cheatEnabledAtMs.set(participantId, this.clock.now());
+    if (enabled && this.hasCurrentCheatOffConfirmation(this.stage.id)) this.cheatEnabledAfterCurrentOff.add(participantId);
+    if (!enabled) this.cheatEnabledAfterCurrentOff.delete(participantId);
     const attempt = this.currentAttempt;
     if (enabled && attempt?.intakeOpen && (this.phase === "running" || this.phase === "tail-intake") && !attempt.results.some((result) => result.playerId === participantId)) {
       this.acceptResult(attempt, { playerId: participantId, status: "excluded", sourceId, receivedAtMs: this.clock.now(), reason: "cheat-enabled" });
@@ -377,7 +350,7 @@ export class CompetitionController {
 
   public resetAllCheat(): void {
     for (const participantId of this.participantIds) this.cheat.set(participantId, false);
-    this.cheatEnabledAtMs.clear();
+    this.cheatEnabledAfterCurrentOff.clear();
   }
 
   public observeViolation(participantId: string, sourceId: string, reason: string): void {
@@ -443,7 +416,6 @@ export class CompetitionController {
       this.pausedFromPhase = undefined;
     } else {
       this.phase = "preparing";
-      this.manualFlow = false;
       this.planReady(this.stageIndex, plannedReadyAtMs);
     }
     this.bump();
@@ -452,11 +424,10 @@ export class CompetitionController {
   public startReadyFlow(): void {
     const targetStageIndex = this.nextStagePending ? this.stageIndex + 1 : this.stageIndex;
     if (!this.stages[targetStageIndex] || ["countdown", "review", "incident"].includes(this.phase)) throw new Error("READY_FLOW_NOT_AVAILABLE");
-    if (this.readyFlowBlockers(false).length > 0) throw new Error("READY_FLOW_BLOCKED");
+    if (this.readyFlowBlockers().length > 0) throw new Error("READY_FLOW_BLOCKED");
     this.automationEnabled = true;
     this.pausedFromPhase = undefined;
     if (this.phase !== "tail-intake") this.phase = this.restartPending ? "restart-preparing" : "preparing";
-    this.manualFlow = false;
     this.planReady(targetStageIndex, this.clock.now() + READY_NOTICE_LEAD_MS);
     this.queueDueReadyNotice();
     this.bump();
@@ -477,6 +448,7 @@ export class CompetitionController {
     if (status === "acknowledged" || status === "referee-confirmed") {
       action.acknowledgedAtMs = this.clock.now();
       if (action.kind === "cheat-off") { this.lastCheatOffAcknowledgedAtMs = this.clock.now(); this.resetAllCheat(); }
+      if (status === "acknowledged") this.permissionDeniedEvidence = undefined;
     }
     if ((status === "acknowledged" || status === "referee-confirmed") && action.kind === "go") this.startAttemptForStage(action.stageId);
     this.bump();
@@ -491,7 +463,7 @@ export class CompetitionController {
 
     if (this.pendingManualGoStageId && this.isAcknowledged(this.forceRestartActionId)) {
       const target = this.stages.find((stage) => stage.id === this.pendingManualGoStageId);
-      if (!target || this.startBlockers(false).length > 0) return;
+      if (!target || this.startBlockers().length > 0) return;
       this.goActionId = this.queueActionForStage("go", target, undefined, true).id;
       this.pendingManualGoStageId = undefined;
       this.phase = "countdown";
@@ -588,6 +560,7 @@ export class CompetitionController {
       return;
     }
     action.acknowledgedAtMs = this.clock.now();
+    this.permissionDeniedEvidence = undefined;
     if (action.kind === "cheat-off") { this.lastCheatOffAcknowledgedAtMs = this.clock.now(); this.resetAllCheat(); }
     if (action.kind === "go") this.startAttemptForStage(action.stageId);
     this.bump();
@@ -603,6 +576,7 @@ export class CompetitionController {
   }
 
   public observeCountdown(value: 3 | 2 | 1): void {
+    if (this.currentAttempt?.intakeOpen && (this.phase === "running" || this.phase === "tail-intake")) return;
     this.countdownValue = value;
     if (this.phase !== "countdown") this.phase = "countdown";
     this.bump();
@@ -679,7 +653,7 @@ export class CompetitionController {
 
   public manualReady(): void {
     if (["countdown", "running", "review", "incident"].includes(this.phase)) throw new Error("READY_NOT_AVAILABLE");
-    if (this.readyFlowBlockers(false).some((blocker) => blocker.severity === "critical")) throw new Error("READY_BLOCKED");
+    if (this.readyFlowBlockers().some((blocker) => blocker.severity === "critical")) throw new Error("READY_BLOCKED");
     this.queueActionForStage("ready", this.commandTargetStage, undefined, true);
     this.bump();
   }
@@ -695,8 +669,7 @@ export class CompetitionController {
     const target = this.commandTargetStage;
     if (!this.hasCurrentCheatOffConfirmation(target.id)) throw new Error("MANUAL_GO_CHEAT_OFF_REQUIRED");
     if (this.actions.some((action) => action.status === "pending")) throw new Error("MANUAL_GO_COMMAND_PENDING");
-    if (this.readyFlowBlockers(false).length > 0) throw new Error("MANUAL_GO_BLOCKED");
-    this.manualFlow = true;
+    if (this.readyFlowBlockers().length > 0) throw new Error("MANUAL_GO_BLOCKED");
     if (this.restartPending && !this.isAcknowledged(this.forceRestartActionId)) {
       this.pendingManualGoStageId = target.id;
       this.forceRestartActionId ??= this.queueActionForStage("force-next-restart", target, undefined, true).id;
@@ -793,7 +766,7 @@ export class CompetitionController {
       ...(this.plannedReadyAtMs === undefined ? {} : { plannedReadyAtMs: this.plannedReadyAtMs }),
       ...(this.plannedReadyStage === undefined ? {} : { plannedReadyStageId: this.plannedReadyStage.id }),
       ...(this.countdownValue === undefined ? {} : { countdownValue: this.countdownValue }),
-      blockers: this.startBlockers(!this.manualFlow),
+      blockers: this.startBlockers(),
       waitingParticipants: [...this.waiting],
       startProtectionUsedStageIds: [...this.startProtectionUsedStageIds],
       ...(this.startProtectionSensitiveStageId === undefined ? {} : { startProtectionSensitiveStageId: this.startProtectionSensitiveStageId }),
@@ -809,14 +782,11 @@ export class CompetitionController {
     const targetStageIndex = this.plannedReadyStageIndex ?? this.stageIndex;
     const targetStage = this.stages[targetStageIndex];
     if (!targetStage) throw new Error("UNKNOWN_READY_STAGE");
-    const scheduledReadyAtMs = this.plannedReadyAtMs;
-    if (scheduledReadyAtMs !== undefined && this.clock.now() > scheduledReadyAtMs) this.queueBulletin(targetStage, this.clock.now());
     if (targetStageIndex !== this.stageIndex) {
       const previous = this.currentAttempt;
       if (previous) this.closeIntake(previous);
       this.stageIndex = targetStageIndex;
       this.nextStagePending = false;
-      this.ignoredProtectionOfflineParticipants.clear();
     }
     this.phase = "ready";
     this.readyAtMs = this.clock.now();
@@ -840,7 +810,7 @@ export class CompetitionController {
     const targetStageIndex = this.stages.findIndex((stage) => stage.id === stageId);
     if (targetStageIndex < 0) throw new Error("UNKNOWN_STAGE");
     const existing = [...this.attempts].reverse().find((attempt) => attempt.stageId === stageId && !attempt.voided);
-    if (existing?.intakeOpen && this.stageIndex === targetStageIndex && this.phase === "running") return;
+    if (existing?.intakeOpen && this.stageIndex === targetStageIndex) return;
     const openAttempt = [...this.attempts].reverse().find((attempt) => attempt.intakeOpen && !attempt.voided);
     if (openAttempt) this.closeIntake(openAttempt);
     this.stageIndex = targetStageIndex;
@@ -858,14 +828,12 @@ export class CompetitionController {
     this.startProtectionSensitiveStageId = this.stage.id;
     this.startProtectionUntilMs = now + this.policy.protectionWindowMs;
     this.countdownValue = undefined;
-    this.manualFlow = false;
     this.cheatWarningSent = false;
     this.pendingManualGoStageId = undefined;
     this.restartPending = false;
     this.forceRestartActionId = undefined;
-    this.disconnectedDuringAttempt.clear();
     for (const participantId of this.participantIds) {
-      if (this.cheat.get(participantId) && this.lastCheatOffAcknowledgedAtMs !== undefined && (this.cheatEnabledAtMs.get(participantId) ?? 0) > this.lastCheatOffAcknowledgedAtMs) {
+      if (this.cheat.get(participantId) && this.lastCheatOffAcknowledgedAtMs !== undefined && this.cheatEnabledAfterCurrentOff.has(participantId)) {
         this.acceptResult(this.attempts[this.attempts.length - 1]!, { playerId: participantId, status: "excluded", sourceId: randomUUID(), receivedAtMs: now, reason: "cheat-enabled" });
       }
     }
@@ -951,7 +919,6 @@ export class CompetitionController {
     this.phase = "restart-preparing";
     this.restartPending = true;
     this.nextStagePending = false;
-    this.manualFlow = false;
     this.pendingManualGoStageId = undefined;
     this.countdownValue = undefined;
     this.readyAtMs = undefined;
@@ -980,17 +947,6 @@ export class CompetitionController {
       action.status = "cancelled";
       this.undeliveredActionIds.delete(action.id);
     }
-  }
-
-  private openRestartIncident(type: "protected-crash" | "group-disconnect", participantIds: string[], evidence: string): void {
-    const attempt = this.currentAttempt;
-    if (!attempt || this.incidents.some((incident) => incident.status === "open" && incident.type === type && incident.attemptId === attempt.id)) return;
-    this.incidents.push({
-      id: randomUUID(), type, severity: "critical", createdAtMs: this.clock.now(), attemptId: attempt.id,
-      participantIds, recommendedRestart: true, status: "open", evidence
-    });
-    this.automationEnabled = false;
-    this.phase = "incident";
   }
 
   private queueAction(kind: AutomationActionKind, message?: string): AutomationAction {
@@ -1057,19 +1013,17 @@ export class CompetitionController {
     return stageActions.slice(previousGoIndex + 1).some((action) => action.kind === "cheat-off" && this.isAcknowledged(action.id));
   }
 
-  private readyFlowBlockers(includeAutomation = true): AutomationBlocker[] {
-    return this.startBlockers(includeAutomation).filter((blocker) => blocker.code !== "PARTICIPANT_CHEAT");
+  private readyFlowBlockers(): AutomationBlocker[] {
+    return this.startBlockers().filter((blocker) => blocker.code !== "PARTICIPANT_CHEAT");
   }
 
-  private startBlockers(includeAutomation = true): AutomationBlocker[] {
+  private startBlockers(): AutomationBlocker[] {
     const blockers: AutomationBlocker[] = [];
     if (this.permissionDeniedEvidence) blockers.push({ code: "PERMISSION_DENIED", severity: "critical", autoRecoverable: false, suggestion: "ContestConsole 权限不足；请在服务器修复权限后重新启动工作运行" });
-    if (includeAutomation && !this.automationEnabled) blockers.push({ code: "AUTOMATION_PAUSED", severity: "critical", autoRecoverable: false, suggestion: "由裁判核对现场后恢复自动化" });
-    for (const participantId of this.participantIds) {
-      if (this.absent.has(participantId)) continue;
-      if (!this.online.get(participantId) && !this.ignoredProtectionOfflineParticipants.has(participantId)) blockers.push({ code: "PARTICIPANT_OFFLINE", severity: "warning", autoRecoverable: true, participantId, suggestion: "等待选手重连并保持稳定在线" });
+    if (this.actions.some((action) => action.status === "failed"
+      || action.status === "uncertain" && ["ready", "cheat-off", "go", "force-next-restart"].includes(action.kind))) {
+      blockers.push({ code: "COMMAND_UNCONFIRMED", severity: "critical", autoRecoverable: false, suggestion: "核对服务器现场与命令审计，禁止自动补发" });
     }
-    if (this.actions.some((action) => action.status === "failed" || action.status === "uncertain")) blockers.push({ code: "COMMAND_UNCONFIRMED", severity: "critical", autoRecoverable: false, suggestion: "核对服务器现场与命令审计，禁止自动补发" });
     if (this.incidents.some((incident) => incident.status === "open" && incident.recommendedRestart)) blockers.push({ code: "INCIDENT_OPEN", severity: "critical", autoRecoverable: false, suggestion: "裁判选择继续或使用短时确认令牌重赛" });
     return blockers;
   }

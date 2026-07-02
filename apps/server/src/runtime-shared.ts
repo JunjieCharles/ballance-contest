@@ -11,7 +11,7 @@ import type {
   ScenarioDefinition,
   TestScenarioSummary
 } from "@ballance/contracts";
-import type { AutomationSnapshot, ScoreboardEntry, ScoreboardVersion } from "@ballance/core";
+import type { AutomationAction, AutomationSnapshot, ScoreboardEntry, ScoreboardVersion } from "@ballance/core";
 import type { CommandRecord } from "./command-queue.js";
 
 export const seededBehaviorRandom = (seed: number, stageId: string, attemptNumber: number, playerId: string, channel: string): number => {
@@ -33,6 +33,12 @@ export const simulatedCommand = (type: string, text = "测试模式模拟命令"
   const now = new Date().toISOString();
   return { id: randomUUID(), actionType: type, status: "simulated", createdAt: now, updatedAt: now, command: text, responseLine: "模拟成功", simulated: true };
 };
+
+export const isFlowCriticalAutomationAction = (action: AutomationAction): boolean =>
+  action.kind === "ready" || action.kind === "cheat-off" || action.kind === "go" || action.kind === "force-next-restart";
+
+export const isUnresolvedAutomationAction = (action: AutomationAction): action is AutomationAction & { status: "failed" | "uncertain" } =>
+  action.status === "failed" || action.status === "uncertain" && isFlowCriticalAutomationAction(action);
 
 export const scoreEntries = (entries: readonly ScoreboardEntry[]): CompetitionSnapshot["currentScoreboard"] =>
   entries.map((entry) => ({
@@ -87,7 +93,7 @@ export const automationView = (
   attentionItems,
   scoreEditPermissions: [],
   unconfirmedAutomationActions: snapshot?.actions
-    .filter((action): action is typeof action & { status: "failed" | "uncertain" } => action.status === "failed" || action.status === "uncertain")
+    .filter(isUnresolvedAutomationAction)
     .map((action) => ({ id: action.id, kind: action.kind, stageId: action.stageId, status: action.status })) ?? []
 });
 

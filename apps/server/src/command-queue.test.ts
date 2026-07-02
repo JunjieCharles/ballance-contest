@@ -77,6 +77,25 @@ describe("CommandQueue", () => {
     expect((await queue.enqueue({ type: "go", map: "level 3", mode: "sr" }, "level3-with-underscore-go")).status).toBe("acknowledged");
   });
 
+  it("accepts the live server's starred official Ready echo", async () => {
+    const transport = new FakeTransport();
+    const queue = new CommandQueue(transport, 100);
+    transport.onWrite = () => setTimeout(() => queue.observeLine("[07-02 20:32:49] [2355344013, *ContestConsole]: Level 01* - Get ready"), 0);
+    expect((await queue.enqueue({ type: "ready", map: "level 1", mode: "sr" }, "starred-ready")).status).toBe("acknowledged");
+  });
+
+  it("waits for authoritative Go instead of acknowledging at 3/2/1", async () => {
+    const transport = new FakeTransport();
+    const queue = new CommandQueue(transport, 100);
+    transport.onWrite = () => {
+      for (const [delay, value] of [[0, "3"], [1, "2"], [2, "1"], [3, "Go!"]] as const) {
+        setTimeout(() => queue.observeLine(`[7, *ContestConsole]: Level 01 - ${value}`), delay);
+      }
+    };
+    const result = await queue.enqueue({ type: "go", map: "level 1", mode: "sr" }, "authoritative-go-only");
+    expect(result).toMatchObject({ status: "acknowledged", responseLine: expect.stringMatching(/Go!$/) });
+  });
+
   it("acknowledges list from the current trailing summary format", async () => {
     const transport = new FakeTransport();
     const queue = new CommandQueue(transport, 100);
@@ -136,7 +155,7 @@ describe("CommandQueue", () => {
   it("encodes bulletin, notice and announce as distinct MockClient commands", async () => {
     const transport = new FakeTransport();
     const queue = new CommandQueue(transport, 100);
-    transport.onWrite = () => setTimeout(() => queue.observeLine("success"), 0);
+    transport.onWrite = (command) => setTimeout(() => queue.observeLine(`[07-02 20:00:00] > ${command}`), 0);
     await queue.enqueue({ type: "notification", channel: "bulletin", text: "SR1 20:10" }, "bulletin");
     await queue.enqueue({ type: "notification", channel: "notice", text: "wait Player" }, "notice");
     await queue.enqueue({ type: "notification", channel: "announce", text: "READY!" }, "announce");
@@ -146,7 +165,7 @@ describe("CommandQueue", () => {
   it("keeps a business newline but protocol-escapes it into one MockClient command", async () => {
     const transport = new FakeTransport();
     const queue = new CommandQueue(transport, 100);
-    transport.onWrite = () => setTimeout(() => queue.observeLine("[Notice] accepted"), 0);
+    transport.onWrite = () => setTimeout(() => queue.observeLine("[Notice] *ContestConsole: SR1 即将发令。\\n本关起跑保护已被使用，后续不再延时。"), 0);
     await queue.enqueue({
       type: "notification",
       channel: "notice",

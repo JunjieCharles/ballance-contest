@@ -42,7 +42,7 @@ const mapEchoMatches = (line: string, map: string, mapName?: string): boolean =>
   const target = map.trim().toLowerCase();
   const official = /^level\s+(\d+)$/.exec(target);
   if (official) {
-    const levelEcho = /Level[\s_]+(\d+)\s+-/i.exec(line);
+    const levelEcho = /Level[\s_]+(\d+)\*?\s+-/i.exec(line);
     if (levelEcho) return Number(levelEcho[1]) === Number(official[1]);
     return /:\s*[0-9a-f]+\.\.\s+-/i.test(line);
   }
@@ -82,14 +82,18 @@ const encode = (action: CommandAction): { command: string; critical: boolean; ac
       acknowledgeAfterWriteMs: 500,
       acknowledge: () => false
     };
-    case "notification": return {
-      command: `${action.channel} ${cleanNotificationText(action.text)}`,
-      critical: false,
-      acknowledge: (line) => line.includes(action.text) || line.includes(`[${action.channel === "announce" ? "Announcement" : action.channel === "notice" ? "Notice" : "Bulletin"}]`) || /success/i.test(line)
-    };
+    case "notification": {
+      const text = cleanNotificationText(action.text);
+      const label = action.channel === "announce" ? "Announcement" : action.channel === "notice" ? "Notice" : "Bulletin";
+      return {
+        command: `${action.channel} ${text}`,
+        critical: false,
+        acknowledge: (line) => line.includes(`> ${action.channel} ${text}`) || line.includes(`[${label}] *ContestConsole: ${text}`)
+      };
+    }
     case "ready": return { command: `countdown ${cleanText(action.map)} ${action.mode} 4`, critical: false, acknowledge: (line) => /Get ready$/.test(line) && mapEchoMatches(line, action.map, action.mapName) };
     case "cheat-off": return { command: "cheat off", critical: false, acknowledge: (line) => /cheat.*off/i.test(line) };
-    case "go": return { command: `countdown ${cleanText(action.map)} ${action.mode}`, critical: true, acknowledge: (line) => / - (?:Go!|[321])$/.test(line) && mapEchoMatches(line, action.map, action.mapName) };
+    case "go": return { command: `countdown ${cleanText(action.map)} ${action.mode}`, critical: true, acknowledge: (line) => / - Go!$/.test(line) && mapEchoMatches(line, action.map, action.mapName) };
     case "force-next-restart": return {
       command: "forcenextrestart",
       critical: true,
