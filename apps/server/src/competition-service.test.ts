@@ -1,13 +1,13 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { CompetitionConfig, ScenarioDefinition } from "@ballance/contracts";
+import type { CompetitionConfig, ScenarioDefinition, ScenarioEvent } from "@ballance/contracts";
 import { CompetitionController } from "@ballance/core";
 import { afterEach, describe, expect, it } from "vitest";
 import type { CommandTransport } from "./mock-client.js";
 import { CompetitionService, seededBehaviorRandom } from "./competition-service.js";
 import { openDatabase, type OpenedDatabase } from "./storage/database.js";
-import type { TestRuntimeManager } from "./test-runtime-manager.js";
+import type { TestRuntime, TestRuntimeManager } from "./test-runtime-manager.js";
 import type { WorkRuntimeManager, WorkRuntime } from "./work-runtime-manager.js";
 
 const workRuntimeManager = (service: CompetitionService): WorkRuntimeManager =>
@@ -22,6 +22,27 @@ describe("CompetitionService dynamic participants", () => {
     expect(seededBehaviorRandom(20_260_631, "sr-1", 1, "expert", "finish-time")).toBe(first);
     expect(seededBehaviorRandom(20_260_632, "sr-1", 1, "expert", "finish-time")).not.toBe(first);
     expect(seededBehaviorRandom(20_260_631, "sr-1", 1, "normal", "finish-time")).not.toBe(first);
+  });
+
+  it("resets simulated server finish ordinals on every authoritative Go", () => {
+    const service = new CompetitionService();
+    const record = service.create({ name: "Ordinal reset", mode: "test", idempotencyKey: "ordinal-reset" });
+    service.publish(record.id, 0, "publish-ordinal-reset");
+    const manager = testRuntimeManager(service);
+    const scenario = manager.listScenarios()[0];
+    if (!scenario) throw new Error("missing test scenario");
+    const created = manager.createFromScenario(record.id, scenario.id);
+    const runtime = manager.getRuntime(record.id, created.runId);
+    const stage = runtime.definition.stages[0];
+    const player = runtime.definition.players[0];
+    if (!stage || !player) throw new Error("invalid test scenario");
+    const render = (manager as unknown as { testEventLogLine(runtime: TestRuntime, event: ScenarioEvent): string }).testEventLogLine.bind(manager);
+    const finish = (sourceId: string) => ({ atMs: 1_000, sourceId, type: "finish" as const, stageId: stage.id, playerId: player.id, score: 1, elapsedMs: 1_000 });
+    expect(render(runtime, finish("first"))).toContain("1st place");
+    expect(render(runtime, finish("second"))).toContain("2nd place");
+    render(runtime, { atMs: 2_000, sourceId: "go-again", type: "go", stageId: stage.id, refereeConnectionId: runtime.definition.refereeConnectionId });
+    expect(render(runtime, finish("after-go"))).toContain("1st place");
+    service.close();
   });
 
   it("keeps work automation on the fixed Ready cadence", async () => {
@@ -124,7 +145,7 @@ describe("CompetitionService dynamic participants", () => {
     ]));
   });
 
-  it("attributes quoted custom-map Ready, Go, finish and DNF echoes to the configured full hash", () => {
+  it("registers every published custom map once after connection and attributes its quoted echoes", async () => {
     dataRoot = mkdtempSync(join(tmpdir(), "ballance-custom-map-"));
     database = openDatabase(join(dataRoot, "console.sqlite"));
     const service = new CompetitionService(undefined, { database, dataRoot });
@@ -144,17 +165,23 @@ describe("CompetitionService dynamic participants", () => {
     };
     const manager = workRuntimeManager(service);
     const published = service.snapshot(record.id).publishedConfig as CompetitionConfig;
-    const runtime = manager.makeRuntime(record.id, published, { write: async () => undefined });
+    const writes: string[] = [];
+    const runtime = manager.makeRuntime(record.id, published, { write: async (command) => { writes.push(command); } });
     manager.register(record.id, runtime);
     expect(internals.toCommandAction(record.id, { type: "ready" })).toMatchObject({ map: `${hash} 0`, mode: "hs" });
     expect(internals.toCommandAction(record.id, { type: "manual-go" })).toMatchObject({ map: `${hash} 0`, mode: "hs" });
+    manager.ingestLine(runtime, "[07-01 19:25:39] Connected to server OK");
+    await runtime.customMapRegistration;
+    manager.ingestLine(runtime, "[07-01 19:25:39] Connected to server OK");
+    await runtime.customMapRegistration;
+    expect(writes).toEqual([`setmap ${hash} 0 云端决赛图`]);
     const prefix = hash.slice(0, 20);
     manager.ingestLine(runtime, "[07-01 19:25:40] Alpha (#11) logged in with cheat mode off.");
     manager.ingestLine(runtime, "[07-01 19:25:40] Beta (#12) logged in with cheat mode off.");
     manager.ingestLine(runtime, `[07-01 19:25:43] [7, *ContestConsole]: "${prefix}.." - Get ready`);
-    manager.ingestLine(runtime, `[07-01 19:25:46] [7, *ContestConsole]: "${prefix}.." - Go!`);
-    manager.ingestLine(runtime, `[07-01 19:26:19] (#11, Alpha) finished "${prefix}.." in 1st place (score: 120 [20]; real time: 00:00:02.045).`);
-    manager.ingestLine(runtime, `[07-01 19:26:46] (#12, Beta) did not finish "${prefix}.." (furthest reach: sector 1).`);
+    manager.ingestLine(runtime, "[07-01 19:25:46] [7, *ContestConsole]: \"云端决赛图\" - Go!");
+    manager.ingestLine(runtime, "[07-01 19:26:19] (#11, Alpha) finished \"云端决赛图\" in 1st place (score: 120 [20]; real time: 00:00:02.045).");
+    manager.ingestLine(runtime, "[07-01 19:26:46] (#12, Beta) did not finish \"云端决赛图\" (furthest reach: sector 1).");
 
     const snapshot = service.snapshot(record.id);
     expect(snapshot.config.stages[0]).toMatchObject({ mapKind: "custom", mapHash: hash, level: 0, label: "云端决赛图" });
@@ -163,7 +190,7 @@ describe("CompetitionService dynamic participants", () => {
       .toMatchObject({ status: "finished", score: 120, points: 20 });
     expect(snapshot.currentScoreboard.find((entry) => entry.playerId === "Beta")?.stages["custom-hs-final"])
       .toMatchObject({ status: "dnf", points: 0 });
-    expect(service.getRawClientLogs(record.id).filter((line) => line.rawLine.includes(`"${prefix}.."`))).toHaveLength(4);
+    expect(service.getRawClientLogs(record.id).filter((line) => line.rawLine.includes("云端决赛图") || line.rawLine.includes(`"${prefix}.."`))).toHaveLength(4);
   });
 
   it("binds an official server hash echo only after the current referee Ready", () => {
@@ -187,7 +214,7 @@ describe("CompetitionService dynamic participants", () => {
       .toMatchObject({ status: "finished", score: 100, points: 20 });
   });
 
-  it("renders custom-map test logs with the same quoted hash sentences as the live server", () => {
+  it("renders custom-map test logs with the same quoted registered-name sentences as the live server", () => {
     dataRoot = mkdtempSync(join(tmpdir(), "ballance-custom-test-logs-"));
     database = openDatabase(join(dataRoot, "console.sqlite"));
     const service = new CompetitionService(undefined, { database, dataRoot });
@@ -205,11 +232,11 @@ describe("CompetitionService dynamic participants", () => {
     const runId = service.createTestRunFromScenario(record.id, "normal-player-roster").runId;
     service.startTestAutomation(record.id, runId, 0);
     service.advanceTestAutomation(record.id, runId, 240_000);
-    const prefix = `"${hash.slice(0, 20)}.."`;
+    const mapEcho = `"云端竞速图"`;
     const lines = service.getRawClientLogs(record.id, 1_000).map((line) => line.rawLine);
-    expect(lines.filter((line) => line.includes(`${prefix} - Get ready`)), lines.join("\n")).toHaveLength(3);
-    expect(lines).toContainEqual(expect.stringContaining(`${prefix} - Go!`));
-    expect(lines).toContainEqual(expect.stringContaining(`finished ${prefix}`));
+    expect(lines.filter((line) => line.includes(`${mapEcho} - Get ready`)), lines.join("\n")).toHaveLength(3);
+    expect(lines).toContainEqual(expect.stringContaining(`${mapEcho} - Go!`));
+    expect(lines).toContainEqual(expect.stringContaining(`finished ${mapEcho}`));
   });
 
   it("excludes cheat and known Warning results without fabricating DNF logs", () => {
@@ -312,6 +339,32 @@ describe("CompetitionService dynamic participants", () => {
     expect(restored.runtime.commands).toContainEqual(expect.objectContaining({ id: "sent-command", status: "uncertain" }));
     expect(restored.runtime.attentionItems).toContainEqual(expect.objectContaining({ title: "重启前命令结果不确定", severity: "critical" }));
     expect(restored.runtime.automationEnabled).toBe(false);
+  });
+
+  it("recovers a sent Go as acknowledged when the persisted authoritative attempt proves execution", () => {
+    dataRoot = mkdtempSync(join(tmpdir(), "ballance-proven-command-recovery-"));
+    database = openDatabase(join(dataRoot, "console.sqlite"));
+    const first = new CompetitionService(undefined, { database, dataRoot });
+    const record = first.create({ name: "Proven recovery", mode: "work", idempotencyKey: "create-proven-recovery" });
+    const now = new Date().toISOString();
+    const command = {
+      id: "sent-go", idempotencyKey: "automation-go", action: { type: "go", map: "level 1", mode: "sr" }, command: "countdown level 1 sr",
+      status: "sent", createdAt: now, updatedAt: now
+    };
+    database.sqlite.prepare("INSERT INTO command_audits(id,competition_id,idempotency_key,action_type,status,payload,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?)")
+      .run(command.id, record.id, command.idempotencyKey, "go", "sent", JSON.stringify(command), now, now);
+    const automation = {
+      phase: "running", stateVersion: 5, automationEnabled: true, currentStageId: "sr-1", blockers: [], waitingParticipants: [], incidents: [], rejectedResults: [],
+      attempts: [{ id: "attempt-1", stageId: "sr-1", attemptNumber: 1, goAtMs: 20, deadlineAtMs: 60_020, intakeOpen: true, voided: false, results: [] }],
+      actions: [{ id: "go-action", kind: "go", idempotencyKey: "automation-go", createdAtMs: 10, stageId: "sr-1", map: "level 1", mode: "sr", status: "pending" }]
+    };
+    database.sqlite.prepare("UPDATE runtime_snapshots SET payload=? WHERE competition_id=?")
+      .run(JSON.stringify({ work: { started: true, automation, mapEchoPrefixes: {} } }), record.id);
+    first.close();
+
+    const restored = new CompetitionService(undefined, { database, dataRoot }).snapshot(record.id);
+    expect(restored.runtime.commands).toContainEqual(expect.objectContaining({ id: "sent-go", status: "acknowledged" }));
+    expect(restored.runtime.attentionItems).not.toContainEqual(expect.objectContaining({ title: "重启前命令结果不确定" }));
   });
 
   it("reads legacy stages as official maps without rewriting immutable published snapshots", () => {

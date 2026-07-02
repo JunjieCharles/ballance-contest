@@ -14,7 +14,7 @@ const server = process.env.BALLANCE_LIVE_SERVER ?? "2.bmmo.win";
 const customMapHash = process.env.BALLANCE_LIVE_CUSTOM_MAP_HASH ?? "e90b2f535c8bf881e9cb83129fba241d";
 const temporary = await mkdtemp(join(tmpdir(), "ballance-live-work-"));
 const artifactPath = join(root, "test", "artifacts", "live-work-mode.json");
-const probeName = `Stage1Probe${Date.now().toString().slice(-6)}`;
+const probeName = "ContestConsole";
 const lines = [];
 const records = [];
 let client;
@@ -52,7 +52,7 @@ try {
 
   const run = async (action, key) => {
     const record = await queue.enqueue(action, key);
-    if (record.status !== "acknowledged") throw new Error(`${action.type} ended as ${record.status}: ${record.command}`);
+    if (record.status !== "acknowledged") throw new Error(`${action.type} ended as ${record.status}: ${record.command}\nRecent live lines:\n${lines.slice(-30).join("\n")}`);
     return record;
   };
 
@@ -65,8 +65,9 @@ try {
   }
   await run({ type: "cheat-off" }, "live-cheat-off");
   await run({ type: "go", map: "level 1", mode: "sr" }, "live-go");
-  await run({ type: "ready", map: `${customMapHash} 0`, mode: "sr" }, "live-custom-ready");
-  await run({ type: "go", map: `${customMapHash} 0`, mode: "sr" }, "live-custom-go");
+  await run({ type: "set-map", mapHash: customMapHash, displayName: "Contest Console Probe Map" }, "live-custom-set-map");
+  await run({ type: "ready", map: `${customMapHash} 0`, mapName: "Contest Console Probe Map", mode: "sr" }, "live-custom-ready");
+  await run({ type: "go", map: `${customMapHash} 0`, mapName: "Contest Console Probe Map", mode: "sr" }, "live-custom-go");
   await run({ type: "kick", playerName: `*${probeName}`, reason: "workflow-probe-finished" }, "live-kick");
 
   const artifact = {

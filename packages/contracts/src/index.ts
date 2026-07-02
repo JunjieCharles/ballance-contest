@@ -242,6 +242,8 @@ export interface CompetitionConfig {
   participants: readonly ParticipantView[];
 }
 
+export const CONTEST_REFEREE_NAME = "ContestConsole";
+
 export const normalizeRefereeName = (value: string): string => value.trim().replace(/^\*+/, "").trim();
 
 export const spectatorLoginName = (refereeName: string): string => `*${normalizeRefereeName(refereeName)}`;
@@ -249,7 +251,7 @@ export const spectatorLoginName = (refereeName: string): string => `*${normalize
 export const validateCompetitionConfigForPublish = (config: CompetitionConfig): string[] => {
   const issues: string[] = [];
   if (!config.name.trim()) issues.push("比赛名称不能为空");
-  if (!normalizeRefereeName(config.refereeName)) issues.push("裁判名不能为空");
+  if (normalizeRefereeName(config.refereeName) !== CONTEST_REFEREE_NAME) issues.push(`服务器控制身份固定为 ${CONTEST_REFEREE_NAME}`);
   if (!config.server.trim()) issues.push("服务器不能为空");
   if (["0.bmmo.win", "1.bmmo.win", "2.bmmo.win"].some((server) => config.server.startsWith(`${server}:`))) {
     issues.push("bmmo.win 预设服务器不得填写端口");
@@ -569,7 +571,7 @@ export const createDefaultCompetitionConfig = (name: string): CompetitionConfig 
     name,
     date: now.toISOString().slice(0, 10),
     timezone: "Asia/Shanghai",
-    refereeName: "ContestConsole",
+    refereeName: CONTEST_REFEREE_NAME,
     server: "1.bmmo.win",
     contestType: "small",
     scoring,

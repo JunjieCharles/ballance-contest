@@ -35,6 +35,11 @@ describe("parseLogLine", () => {
       .toMatchObject({ type: "player-list-summary", clients: 2, players: 1, spectators: 1 });
   });
 
+  it("recognizes the exact server permission failure", () => {
+    expect(parseLogLine("[07-02 10:00:00] Action failed: you don't have the permission to run this action.", context).event)
+      .toMatchObject({ type: "permission-denied", message: "Action failed: you don't have the permission to run this action." });
+  });
+
   it("parses the three player-facing notifications and the real 3/2/1 countdown", () => {
     expect(parseLogLine("[06-29 11:20:12] [Announcement] (2717249041, *Referee): READY!", context).event)
       .toMatchObject({ type: "notification", channel: "announce", refereeName: "*Referee", text: "READY!" });
@@ -54,6 +59,8 @@ describe("parseLogLine", () => {
       .toMatchObject({ type: "ready", mapKind: "custom", mapHashPrefix: prefix });
     expect(parseLogLine(`[07-01 19:25:46] [270699495, *Referee]: "${prefix}.." - Go!`, context).event)
       .toMatchObject({ type: "go", mapKind: "custom", mapHashPrefix: prefix });
+    expect(parseLogLine("[07-01 19:25:46] [270699495, *Referee]: \"云端决赛图\" - Go!", context).event)
+      .toMatchObject({ type: "go", mapKind: "custom", mapDisplayName: "云端决赛图" });
     expect(parseLogLine(`[07-01 19:26:19] (#42, Player) finished "${prefix}.." in 1st place (score: 120 [20]; real time: 00:00:02.045).`, context).event)
       .toMatchObject({ type: "finish", mapKind: "custom", mapHashPrefix: prefix, score: 120, elapsedMs: 2_045 });
     expect(parseLogLine(`[07-01 19:26:46] (#42, Player) did not finish "${prefix}.." (furthest reach: sector 1).`, context).event)

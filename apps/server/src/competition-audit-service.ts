@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import type { AttentionItem, CommandRecordView, RawClientLogLine, RefereeActionId } from "@ballance/contracts";
 import type { AutomationAction, AutomationSnapshot } from "@ballance/core";
 import type { CommandRecord } from "./command-queue.js";
+import { isPermissionDeniedLine } from "./command-queue.js";
 import type { EventJournal } from "./event-journal.js";
 import { commandView } from "./runtime-shared.js";
 import type { OpenedDatabase } from "./storage/database.js";
@@ -143,12 +144,15 @@ export class CompetitionAuditService {
     }
     if (record.action.type === "list" && record.status === "sent") this.onListSent(competitionId);
     if (record.status === "uncertain" || record.status === "failed" || record.status === "timed_out") {
+      const permissionDenied = Boolean(record.responseLine && isPermissionDeniedLine(record.responseLine));
       this.appendAttention(competitionId, {
         id: `command:${record.id}:${record.status}`,
         category: "command",
         severity: record.status === "timed_out" ? "warning" : "critical",
-        title: record.status === "uncertain" ? "命令结果不确定" : record.status === "timed_out" ? "命令等待回显超时" : "命令发送失败",
-        message: `${record.command}；不会自动重试，请结合服务器现场和原始日志核对。`,
+        title: permissionDenied ? "ContestConsole 权限不足" : record.status === "uncertain" ? "命令结果不确定" : record.status === "timed_out" ? "命令等待回显超时" : "命令发送失败",
+        message: permissionDenied
+          ? `${record.command} 被服务器拒绝；自动化已阻断，请修复 ContestConsole 权限后重新核对。`
+          : `${record.command}；不会自动重试，请结合服务器现场和原始日志核对。`,
         occurredAt: record.updatedAt
       });
     }

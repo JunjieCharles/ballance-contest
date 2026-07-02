@@ -692,8 +692,8 @@ function ConfigPanel({ snapshot, canWrite, saveDraft, publish }: {
     <div className="panel"><h2>基本信息</h2>
       <label>比赛名称<input defaultValue={config.name} disabled={!editable} onBlur={(event) => { if (event.target.value !== config.name) void saveDraft({ name: event.target.value }); }} /></label>
       <label>服务器<input defaultValue={config.server} disabled={!editable} onBlur={(event) => { if (event.target.value !== config.server) void saveDraft({ server: event.target.value }); }} /></label>
-      <label>裁判名<input defaultValue={config.refereeName} disabled={!editable} onBlur={(event) => { if (event.target.value !== config.refereeName) void saveDraft({ refereeName: event.target.value }); }} /></label>
-      <p className="muted">MockClient 登录名由裁判名派生，并强制使用一个 * 旁观标记。参赛者会从 login、disconnect 和定期 list 自动登记，无需发布前名单。</p>
+      <label>服务器控制身份<input value="ContestConsole" disabled /></label>
+      <p className="muted">MockClient 固定以 *ContestConsole 旁观登录，避免服务器权限因名称变化失效。参赛者会从 login、disconnect 和定期 list 自动登记，无需发布前名单。</p>
       <div className={publishIssues.length ? "validation-summary invalid" : "validation-summary valid"}><strong>发布检查</strong>{publishIssues.length ? <ul>{publishIssues.map((issue) => <li key={issue}>{issue}</li>)}</ul> : <span>配置完整，可以发布。</span>}</div>
       <button disabled={!editable || publishIssues.length > 0} onClick={() => void publish()}>发布比赛</button>
     </div>

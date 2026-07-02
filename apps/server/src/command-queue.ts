@@ -5,10 +5,11 @@ import type { NotificationChannel } from "@ballance/contracts";
 export type CommandStatus = "queued" | "sent" | "acknowledged" | "failed" | "timed_out" | "uncertain";
 export type CommandAction =
   | { type: "list" }
+  | { type: "set-map"; mapHash: string; displayName: string }
   | { type: "notification"; channel: NotificationChannel; text: string }
-  | { type: "ready"; map: string; mode: "sr" | "hs" }
+  | { type: "ready"; map: string; mapName?: string; mode: "sr" | "hs" }
   | { type: "cheat-off" }
-  | { type: "go"; map: string; mode: "sr" | "hs" }
+  | { type: "go"; map: string; mapName?: string; mode: "sr" | "hs" }
   | { type: "force-next-restart" }
   | { type: "scores"; map: string; mode: "sr" | "hs" }
   | { type: "kick"; playerName: string; reason: string }
@@ -30,7 +31,7 @@ const cleanText = (text: string): string => {
   return text.trim();
 };
 
-const mapEchoMatches = (line: string, map: string): boolean => {
+const mapEchoMatches = (line: string, map: string, mapName?: string): boolean => {
   const target = map.trim().toLowerCase();
   const official = /^level\s+(\d+)$/.exec(target);
   if (official) {
@@ -39,25 +40,43 @@ const mapEchoMatches = (line: string, map: string): boolean => {
     return /:\s*[0-9a-f]+\.\.\s+-/i.test(line);
   }
   const custom = /^([0-9a-f]{32})\s+0$/.exec(target);
-  const customEcho = /:\s*"([0-9a-f]+)\.\."\s+-/i.exec(line);
-  return Boolean(custom && customEcho?.[1] && custom[1]?.startsWith(customEcho[1].toLowerCase()));
+  const customEcho = /:\s*"([^"]+)"\s+-/i.exec(line)?.[1];
+  if (!custom || !customEcho) return false;
+  const prefix = /^([0-9a-f]+)\.\.$/i.exec(customEcho)?.[1];
+  return prefix ? Boolean(custom[1]?.startsWith(prefix.toLowerCase())) : Boolean(mapName && customEcho === mapName);
 };
 
-const encode = (action: CommandAction): { command: string; critical: boolean; acknowledge: (line: string) => boolean } => {
+const PERMISSION_DENIED_TEXT = "Action failed: you don't have the permission to run this action.";
+
+export const isPermissionDeniedLine = (line: string): boolean => line.includes(PERMISSION_DENIED_TEXT);
+
+const encode = (action: CommandAction): { command: string; critical: boolean; acknowledgeAfterWriteMs?: number; acknowledge: (line: string) => boolean } => {
   switch (action.type) {
     case "list": return {
       command: "list",
       critical: false,
       acknowledge: (line) => /player\(s\) online:|client\(s\) online:\s*\d+ player\(s\)/.test(line)
     };
+    case "set-map": {
+      const mapHash = cleanText(action.mapHash).toLowerCase();
+      if (!/^[0-9a-f]{32}$/.test(mapHash)) throw new Error("setmap requires a complete 32-character MD5");
+      return {
+        command: `setmap ${mapHash} 0 ${cleanText(action.displayName)}`,
+        critical: false,
+        // setmap has no success echo, but its permission failure is asynchronous.
+        // Keep a short observation window before treating the accepted stdin write as success.
+        acknowledgeAfterWriteMs: 250,
+        acknowledge: () => false
+      };
+    }
     case "notification": return {
       command: `${action.channel} ${cleanText(action.text)}`,
       critical: false,
       acknowledge: (line) => line.includes(action.text) || line.includes(`[${action.channel === "announce" ? "Announcement" : action.channel === "notice" ? "Notice" : "Bulletin"}]`) || /success/i.test(line)
     };
-    case "ready": return { command: `countdown ${cleanText(action.map)} ${action.mode} 4`, critical: false, acknowledge: (line) => /Get ready$/.test(line) && mapEchoMatches(line, action.map) };
+    case "ready": return { command: `countdown ${cleanText(action.map)} ${action.mode} 4`, critical: false, acknowledge: (line) => /Get ready$/.test(line) && mapEchoMatches(line, action.map, action.mapName) };
     case "cheat-off": return { command: "cheat off", critical: false, acknowledge: (line) => /cheat.*off/i.test(line) };
-    case "go": return { command: `countdown ${cleanText(action.map)} ${action.mode}`, critical: true, acknowledge: (line) => / - Go!$/.test(line) && mapEchoMatches(line, action.map) };
+    case "go": return { command: `countdown ${cleanText(action.map)} ${action.mode}`, critical: true, acknowledge: (line) => / - Go!$/.test(line) && mapEchoMatches(line, action.map, action.mapName) };
     case "force-next-restart": return { command: "forcenextrestart", critical: true, acknowledge: (line) => /force.*restart|success/i.test(line) };
     case "scores": return { command: `scores ${action.mode} ${cleanText(action.map)}`, critical: false, acknowledge: (line) => /place|score|ranking/i.test(line) };
     case "kick": return { command: `kick ${cleanText(action.playerName)} ${cleanText(action.reason)}`, critical: true, acknowledge: (line) => /kick|disconnect|success/i.test(line) };
@@ -86,21 +105,38 @@ export class CommandQueue {
     this.onChange?.(record);
     const result = new Promise<CommandRecord>((resolve) => {
       this.tail = this.tail.then(async () => {
-        try {
-          await this.transport.write(encoded.command);
-          this.update(record, "sent");
-          await new Promise<void>((done) => {
-            this.pending = { encoded, record, resolve: (final) => { resolve(final); done(); } };
-            setTimeout(() => {
-              if (this.pending?.record.id !== record.id) return;
-              this.pending = undefined;
-              const final = this.update(record, encoded.critical ? "uncertain" : "timed_out");
-              resolve(final); done();
-            }, typeof this.timeoutMs === "function" ? this.timeoutMs(action) : this.timeoutMs);
-          });
-        } catch {
-          resolve(this.update(record, "failed"));
-        }
+        await new Promise<void>((done) => {
+          let settled = false;
+          let timeout: ReturnType<typeof setTimeout> | undefined;
+          const settle = (final: CommandRecord): void => {
+            if (settled) return;
+            settled = true;
+            if (timeout) clearTimeout(timeout);
+            if (this.pending?.record.id === record.id) this.pending = undefined;
+            resolve(final);
+            done();
+          };
+          this.pending = { encoded, record, resolve: settle };
+          void (async () => {
+            try {
+              await this.transport.write(encoded.command);
+              if (settled) return;
+              this.update(record, "sent");
+              if (encoded.acknowledgeAfterWriteMs !== undefined) {
+                timeout = setTimeout(() => {
+                  settle(this.update(record, "acknowledged", "MockClient 已接受本地命令，权限观察窗口内未返回失败"));
+                }, encoded.acknowledgeAfterWriteMs);
+                return;
+              }
+              timeout = setTimeout(() => {
+                if (this.pending?.record.id !== record.id) return;
+                settle(this.update(record, encoded.critical ? "uncertain" : "timed_out"));
+              }, typeof this.timeoutMs === "function" ? this.timeoutMs(action) : this.timeoutMs);
+            } catch {
+              settle(this.update(record, "failed"));
+            }
+          })();
+        });
       });
     });
     return result;
@@ -108,9 +144,12 @@ export class CommandQueue {
 
   public observeLine(line: string): void {
     const pending = this.pending;
-    if (!pending || !pending.encoded.acknowledge(line)) return;
-    this.pending = undefined;
-    pending.resolve(this.update(pending.record, "acknowledged", line));
+    if (!pending) return;
+    if (isPermissionDeniedLine(line)) {
+      pending.resolve(this.update(pending.record, "failed", line));
+      return;
+    }
+    if (pending.encoded.acknowledge(line)) pending.resolve(this.update(pending.record, "acknowledged", line));
   }
 
   private update(record: CommandRecord, status: CommandStatus, responseLine?: string): CommandRecord {

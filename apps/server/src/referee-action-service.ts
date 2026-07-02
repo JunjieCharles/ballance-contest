@@ -13,7 +13,7 @@ import type { ServiceSnapshotPayload } from "./runtime-types.js";
 import { ServiceError } from "./service-error.js";
 import type { TestRuntimeManager } from "./test-runtime-manager.js";
 import type { WorkRuntime, WorkRuntimeManager } from "./work-runtime-manager.js";
-import { stageCommandTarget } from "@ballance/contracts";
+import { stageCommandTarget, stageDisplayName } from "@ballance/contracts";
 
 interface RefereeActionHost {
   getCompetition(competitionId: string): { mode: CompetitionMode };
@@ -173,9 +173,9 @@ export class RefereeActionService {
     if (!stage) throw new ServiceError("STATE_CONFLICT", "比赛没有可执行动作的轮次", 409);
     switch (action.type) {
       case "notification": return { type: "notification", channel: action.channel, text: action.text };
-      case "ready": return { type: "ready", map: stageCommandTarget(stage), mode: stage.mode.toLowerCase() as "sr" | "hs" };
+      case "ready": return { type: "ready", map: stageCommandTarget(stage), mapName: stageDisplayName(stage), mode: stage.mode.toLowerCase() as "sr" | "hs" };
       case "cheat-off": return { type: "cheat-off" };
-      case "manual-go": return { type: "go", map: stageCommandTarget(stage), mode: stage.mode.toLowerCase() as "sr" | "hs" };
+      case "manual-go": return { type: "go", map: stageCommandTarget(stage), mapName: stageDisplayName(stage), mode: stage.mode.toLowerCase() as "sr" | "hs" };
       case "kick": return { type: "kick", playerName: action.playerName, reason: "referee-kick" };
       case "raw-command": return { type: "raw", command: action.command };
       default: throw new ServiceError("CAPABILITY_UNSUPPORTED", `动作 ${action.type} 不需要或不支持 MockClient 命令`, 409);
@@ -188,9 +188,9 @@ export class RefereeActionService {
       case "notice":
       case "announce":
         return { type: "notification", channel: action.kind, text: action.message ?? "比赛流程通知" };
-      case "ready": return { type: "ready", map: action.map, mode: action.mode };
+      case "ready": return { type: "ready", map: action.map, ...(action.mapName === undefined ? {} : { mapName: action.mapName }), mode: action.mode };
       case "cheat-off": return { type: "cheat-off" };
-      case "go": return { type: "go", map: action.map, mode: action.mode };
+      case "go": return { type: "go", map: action.map, ...(action.mapName === undefined ? {} : { mapName: action.mapName }), mode: action.mode };
       case "force-next-restart": return { type: "force-next-restart" };
     }
   }

@@ -17,6 +17,11 @@ const elapsedToMs = (hours: string, minutes: string, seconds: string, millisecon
 
 const sourceIdFor = (line: string): string => createHash("sha256").update(line).digest("hex");
 
+const quotedMapReference = (value: string): { mapKind: "custom"; mapHashPrefix?: string; mapDisplayName?: string } => {
+  const prefix = /^([0-9a-f]+)\.\.$/i.exec(value)?.[1];
+  return prefix ? { mapKind: "custom", mapHashPrefix: prefix.toLowerCase() } : { mapKind: "custom", mapDisplayName: value };
+};
+
 export const stripAnsi = (text: string): string => text.replace(ANSI_PATTERN, "");
 
 export const parseLogLine = (input: string, context: ParseContext): ParsedLogLine => {
@@ -36,6 +41,8 @@ export const parseLogLine = (input: string, context: ParseContext): ParsedLogLin
 
   if (body === "Connected to server OK") {
     event = { ...metadata, type: "connected" };
+  } else if (body === "Action failed: you don't have the permission to run this action.") {
+    event = { ...metadata, type: "permission-denied", message: body };
   } else {
     const listStart = /^(\d+) player\(s\) online:$/.exec(body);
     const listSummary = /^(\d+) client\(s\) online:\s*(\d+) player\(s\),\s*(\d+) spectator\(s\)\.$/.exec(body);
@@ -44,15 +51,15 @@ export const parseLogLine = (input: string, context: ParseContext): ParsedLogLin
     const disconnect = /^(.*?) \(#(\d+)\) disconnected\.$/.exec(body);
     const listed = /^(.*?) \(#(\d+)\)( \[CHEAT\])?$/.exec(body);
     const readyOrGo = /^\[(\d+), (.*?)\]: Level (\d{2}) - (Get ready|3|2|1|Go!)$/.exec(body);
-    const customReadyOrGo = /^\[(\d+), (.*?)\]: "([0-9a-fA-F]+)\.\." - (Get ready|3|2|1|Go!)$/.exec(body);
+    const customReadyOrGo = /^\[(\d+), (.*?)\]: "([^"]+)" - (Get ready|3|2|1|Go!)$/.exec(body);
     const officialHashReadyOrGo = /^\[(\d+), (.*?)\]: ([0-9a-fA-F]+)\.\. - (Get ready|3|2|1|Go!)$/.exec(body);
     const noticeOrAnnouncement = /^\[(Notice|Announcement)\] \((\d+), (.*?)\): (.*)$/.exec(body);
     const bulletin = /^\[Bulletin\] (.*?): (.*)$/.exec(body);
     const finish = /^(\[CHEAT\] )?\(#(\d+), (.*?)\) finished Level (\d{2}) in (\d+)(?:st|nd|rd|th) place \(score: (-?\d+); real time: (\d+):(\d+):(\d+)\.(\d+)\)\.$/.exec(body);
-    const customFinish = /^(\[CHEAT\] )?\(#(\d+), (.*?)\) finished "([0-9a-fA-F]+)\.\." in (\d+)(?:st|nd|rd|th) place \(score: (-?\d+)(?: \[-?\d+\])?; real time: (\d+):(\d+):(\d+)\.(\d+)\)\.$/.exec(body);
+    const customFinish = /^(\[CHEAT\] )?\(#(\d+), (.*?)\) finished "([^"]+)" in (\d+)(?:st|nd|rd|th) place \(score: (-?\d+)(?: \[-?\d+\])?; real time: (\d+):(\d+):(\d+)\.(\d+)\)\.$/.exec(body);
     const officialHashFinish = /^(\[CHEAT\] )?\(#(\d+), (.*?)\) finished ([0-9a-fA-F]+)\.\. in (\d+)(?:st|nd|rd|th) place \(score: (-?\d+)(?: \[-?\d+\])?; real time: (\d+):(\d+):(\d+)\.(\d+)\)\.$/.exec(body);
     const dnf = /^(\[CHEAT\] )?\(#(\d+), (.*?)\) did not finish Level (\d{2}) \(furthest reach: sector (-?\d+)\)\.$/.exec(body);
-    const customDnf = /^(\[CHEAT\] )?\(#(\d+), (.*?)\) did not finish "([0-9a-fA-F]+)\.\." \(furthest reach: sector (-?\d+)\)\.$/.exec(body);
+    const customDnf = /^(\[CHEAT\] )?\(#(\d+), (.*?)\) did not finish "([^"]+)" \(furthest reach: sector (-?\d+)\)\.$/.exec(body);
     const officialHashDnf = /^(\[CHEAT\] )?\(#(\d+), (.*?)\) did not finish ([0-9a-fA-F]+)\.\. \(furthest reach: sector (-?\d+)\)\.$/.exec(body);
     const cheat = /^\(?#?(\d+), (.*?)\)? turned cheat (on|off)\.$/.exec(body);
 
@@ -89,7 +96,7 @@ export const parseLogLine = (input: string, context: ParseContext): ParsedLogLin
         refereeName: match[2] ?? "",
         ...(readyOrGo
           ? { mapKind: "official" as const, level: Number(match[3]) }
-          : { mapKind: customReadyOrGo ? "custom" as const : "official" as const, mapHashPrefix: (match[3] ?? "").toLowerCase() })
+          : customReadyOrGo ? quotedMapReference(match[3] ?? "") : { mapKind: "official" as const, mapHashPrefix: (match[3] ?? "").toLowerCase() })
       };
       event = value === "Go!" ? { ...common, type: "go" }
         : value === "Get ready" ? { ...common, type: "ready" }
@@ -115,7 +122,7 @@ export const parseLogLine = (input: string, context: ParseContext): ParsedLogLin
         playerName: match[3] ?? "",
         ...(finish
           ? { mapKind: "official" as const, level: Number(match[4]) }
-          : { mapKind: customFinish ? "custom" as const : "official" as const, mapHashPrefix: (match[4] ?? "").toLowerCase() }),
+          : customFinish ? quotedMapReference(match[4] ?? "") : { mapKind: "official" as const, mapHashPrefix: (match[4] ?? "").toLowerCase() }),
         serverPlace: Number(match[5]),
         score: Number(match[6]),
         elapsedMs: elapsedToMs(match[7] ?? "0", match[8] ?? "0", match[9] ?? "0", match[10] ?? "0")
@@ -130,7 +137,7 @@ export const parseLogLine = (input: string, context: ParseContext): ParsedLogLin
         playerName: match[3] ?? "",
         ...(dnf
           ? { mapKind: "official" as const, level: Number(match[4]) }
-          : { mapKind: customDnf ? "custom" as const : "official" as const, mapHashPrefix: (match[4] ?? "").toLowerCase() }),
+          : customDnf ? quotedMapReference(match[4] ?? "") : { mapKind: "official" as const, mapHashPrefix: (match[4] ?? "").toLowerCase() }),
         furthestSector: Number(match[5])
       };
     } else if (cheat) {

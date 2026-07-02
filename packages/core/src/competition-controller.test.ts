@@ -282,7 +282,7 @@ describe("CompetitionController", () => {
     const results = controller.snapshot().attempts[0]?.results ?? [];
     expect(results).toContainEqual(expect.objectContaining({ playerId: "p1", status: "excluded", reason: "cheat-enabled" }));
     expect(results.filter((result) => result.playerId === "p2")).toEqual([expect.objectContaining({ status: "finished" })]);
-    expect(controller.snapshot().incidents.filter((item) => item.type === "cheat-violation")).toHaveLength(1);
+    expect(controller.snapshot().incidents.filter((item) => item.type === "cheat-violation")).toHaveLength(0);
   });
 
   it("suggests restart for a protected crash or configured group disconnect, not a lone normal disconnect", () => {
@@ -311,5 +311,15 @@ describe("CompetitionController", () => {
     expect(controller.snapshot()).toMatchObject({ phase: "paused", automationEnabled: false, attempts: [] });
     expect(controller.snapshot().actions.filter((item) => item.kind === "go")).toHaveLength(0);
     expect(controller.snapshot().incidents).toContainEqual(expect.objectContaining({ type: "timing-discontinuity" }));
+  });
+
+  it("pauses and exposes an explicit blocker after a permission failure", () => {
+    const clock = new FakeClock();
+    const controller = new CompetitionController(configuration(), clock);
+    connectAll(controller);
+    controller.enable(0);
+    controller.observePermissionDenied("Action failed: you don't have the permission to run this action.");
+    expect(controller.snapshot()).toMatchObject({ phase: "paused", automationEnabled: false });
+    expect(controller.snapshot().blockers).toContainEqual(expect.objectContaining({ code: "PERMISSION_DENIED", severity: "critical" }));
   });
 });

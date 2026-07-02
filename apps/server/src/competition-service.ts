@@ -6,7 +6,6 @@ import {
   capabilitiesFor,
   createDefaultCompetitionConfig,
   minimumScoringPlaceFor,
-  normalizeRefereeName,
   stageDisplayName,
   stageMapKind,
   validateCompetitionConfigForPublish,
@@ -997,10 +996,11 @@ export class CompetitionService {
   }
 
   private parseStoredConfig(payload: string): CompetitionConfig {
-    const { loginName, ...config } = JSON.parse(payload) as CompetitionConfig & { loginName?: string };
+    const config = JSON.parse(payload) as CompetitionConfig & { loginName?: string };
+    delete config.loginName;
     return {
       ...config,
-      refereeName: normalizeRefereeName(config.refereeName || loginName || "ContestConsole"),
+      refereeName: "ContestConsole",
       playerAliases: config.playerAliases ?? [],
       stages: config.stages.map((stage) => migrateStageMap(stage))
     };
@@ -1009,7 +1009,7 @@ export class CompetitionService {
   private normalizeConfig(config: CompetitionConfig): CompetitionConfig {
     const name = config.name.trim();
     if (!name) throw new ServiceError("VALIDATION_FAILED", "比赛名称不能为空", 400);
-    const refereeName = normalizeRefereeName(config.refereeName);
+    const refereeName = "ContestConsole";
     const normalizedPoints = config.scoring.points.map((point) => {
       if (!Number.isFinite(point)) throw new ServiceError("VALIDATION_FAILED", "计分必须是有限数字", 400);
       if (point < 0 && !config.scoring.allowNegative) throw new ServiceError("VALIDATION_FAILED", "默认不允许负分", 400);
@@ -1070,9 +1070,30 @@ export class CompetitionService {
 
   private recoverSentCommands(competitionId: string): void {
     if (!this.options.database) return;
+    const payload = this.getPayload(competitionId);
+    let recoveredAutomation = payload.work?.automation;
     const sent = rows<{ id: string; payload: string }>(this.options.database, "SELECT id,payload FROM command_audits WHERE competition_id=? AND status='sent'", competitionId);
     for (const item of sent) {
       const stored = JSON.parse(item.payload) as CommandRecord;
+      const matchingAction = recoveredAutomation?.actions.find((action) => action.idempotencyKey === stored.idempotencyKey && action.kind === "go");
+      const authoritativeAttempt = matchingAction && recoveredAutomation?.attempts.find((attempt) =>
+        attempt.stageId === matchingAction.stageId && !attempt.voided && attempt.goAtMs >= matchingAction.createdAtMs);
+      if (stored.action.type === "go" && recoveredAutomation && matchingAction && authoritativeAttempt) {
+        const acknowledged: CommandRecord = {
+          ...stored,
+          status: "acknowledged",
+          responseLine: "由持久化权威 Go 与尝试记录恢复确认",
+          updatedAt: new Date().toISOString()
+        };
+        this.options.database.sqlite.prepare("UPDATE command_audits SET status='acknowledged',payload=?,updated_at=? WHERE id=?")
+          .run(JSON.stringify(acknowledged), acknowledged.updatedAt, item.id);
+        const currentAutomation = recoveredAutomation;
+        recoveredAutomation = {
+          ...currentAutomation,
+          actions: currentAutomation.actions.map((action) => action.id === matchingAction.id ? { ...action, status: "acknowledged" as const } : action)
+        };
+        continue;
+      }
       const recovered: CommandRecord = { ...stored, status: "uncertain", updatedAt: new Date().toISOString() };
       this.options.database.sqlite.prepare("UPDATE command_audits SET status='uncertain',payload=?,updated_at=? WHERE id=?").run(JSON.stringify(recovered), recovered.updatedAt, item.id);
       this.appendAttention(competitionId, {
@@ -1084,6 +1105,7 @@ export class CompetitionService {
         occurredAt: recovered.updatedAt
       });
     }
+    if (recoveredAutomation && payload.work) this.savePayload(competitionId, { ...payload, work: { ...payload.work, automation: recoveredAutomation } });
   }
 
   private saveScoreboards(competitionId: string, versions: readonly ScoreboardVersion[]): void {

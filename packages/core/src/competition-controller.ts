@@ -63,13 +63,14 @@ export interface AutomationAction {
   createdAtMs: number;
   stageId: string;
   map: string;
+  mapName?: string;
   mode: "sr" | "hs";
   message?: string;
   status: "pending" | "acknowledged" | "failed" | "uncertain" | "referee-confirmed";
 }
 
 export interface AutomationBlocker {
-  code: "AUTOMATION_PAUSED" | "PARTICIPANT_OFFLINE" | "PARTICIPANT_CHEAT" | "COMMAND_UNCONFIRMED" | "INCIDENT_OPEN";
+  code: "AUTOMATION_PAUSED" | "PERMISSION_DENIED" | "PARTICIPANT_OFFLINE" | "PARTICIPANT_CHEAT" | "COMMAND_UNCONFIRMED" | "INCIDENT_OPEN";
   severity: "warning" | "critical";
   autoRecoverable: boolean;
   participantId?: string;
@@ -234,6 +235,7 @@ export class CompetitionController {
   private goActionId: string | undefined;
   private manualFlow = false;
   private countdownValue: 3 | 2 | 1 | undefined;
+  private permissionDeniedEvidence: string | undefined;
 
   public constructor(private readonly configuration: AutomationConfiguration, private readonly clock: MonotonicClock) {
     if (configuration.stages.length === 0) throw new Error("At least one stage is required");
@@ -309,10 +311,6 @@ export class CompetitionController {
     const attempt = this.currentAttempt;
     if (enabled && attempt?.intakeOpen && (this.phase === "running" || this.phase === "tail-intake") && !attempt.results.some((result) => result.playerId === participantId)) {
       this.acceptResult(attempt, { playerId: participantId, status: "excluded", sourceId, receivedAtMs: this.clock.now(), reason: "cheat-enabled" });
-      this.incidents.push({
-        id: randomUUID(), type: "cheat-violation", severity: "high", createdAtMs: this.clock.now(), attemptId: attempt.id,
-        participantIds: [participantId], recommendedRestart: false, status: "open", evidence: `cheat ${previous ? "on" : "off"} -> on`
-      });
     }
     this.bump();
   }
@@ -331,10 +329,6 @@ export class CompetitionController {
     } else {
       this.acceptResult(attempt, { playerId: participantId, status: "excluded", sourceId, receivedAtMs: this.clock.now(), reason });
     }
-    this.incidents.push({
-      id: randomUUID(), type: "cheat-violation", severity: "high", createdAtMs: this.clock.now(), attemptId: attempt.id,
-      participantIds: [participantId], recommendedRestart: false, status: "open", evidence: reason
-    });
     this.bump();
   }
 
@@ -365,6 +359,14 @@ export class CompetitionController {
       id: randomUUID(), type: "timing-discontinuity", severity: "critical", createdAtMs: this.clock.now(),
       ...(attempt ? { attemptId: attempt.id } : {}), participantIds: [], recommendedRestart: false, status: "open", evidence
     });
+    this.automationEnabled = false;
+    if (this.phase !== "paused") this.pausedFromPhase = this.phase;
+    this.phase = "paused";
+    this.bump();
+  }
+
+  public observePermissionDenied(evidence: string): void {
+    this.permissionDeniedEvidence = evidence;
     this.automationEnabled = false;
     if (this.phase !== "paused") this.pausedFromPhase = this.phase;
     this.phase = "paused";
@@ -771,6 +773,7 @@ export class CompetitionController {
     const action: AutomationAction = {
       id: randomUUID(), kind, idempotencyKey: `${this.configuration.competitionId}:${this.stage.id}:${kind}:${this.stateVersion + 1}`,
       createdAtMs: this.clock.now(), stageId: this.stage.id, map: this.stage.map, mode: this.stage.mode,
+      ...(this.stage.displayName === undefined ? {} : { mapName: this.stage.displayName }),
       ...(message === undefined ? {} : { message }), status: "pending"
     };
     this.actions.push(action);
@@ -792,6 +795,7 @@ export class CompetitionController {
 
   private startBlockers(includeAutomation = true): AutomationBlocker[] {
     const blockers: AutomationBlocker[] = [];
+    if (this.permissionDeniedEvidence) blockers.push({ code: "PERMISSION_DENIED", severity: "critical", autoRecoverable: false, suggestion: "ContestConsole 权限不足；请在服务器修复权限后重新启动工作运行" });
     if (includeAutomation && !this.automationEnabled) blockers.push({ code: "AUTOMATION_PAUSED", severity: "critical", autoRecoverable: false, suggestion: "由裁判核对现场后恢复自动化" });
     for (const participantId of this.participantIds) {
       if (this.absent.has(participantId)) continue;

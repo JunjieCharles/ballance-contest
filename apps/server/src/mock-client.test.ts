@@ -12,8 +12,8 @@ describe("MockClient launch", () => {
   it("rejects ports on preset servers", () => {
     expect(() => buildMockClientArguments({ ...options, server: "1.bmmo.win:26676" })).toThrow("must not include a port");
   });
-  it("always enforces the spectator marker", () => {
-    expect(buildMockClientArguments({ ...options, refereeName: "**Referee" })[3]).toBe("*Referee");
+  it("ignores configurable names and always uses the fixed server identity", () => {
+    expect(buildMockClientArguments({ ...options, refereeName: "**Referee" })[3]).toBe("*ContestConsole");
   });
 
   it("reads a persisted UUID from a local file when present", () => {

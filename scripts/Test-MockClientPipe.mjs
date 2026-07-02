@@ -54,7 +54,7 @@ try {
   const lines = [];
   client = new ManagedMockClient({
     executable: join(serverDirectory, "BallanceMMOMockClient.exe"), workingDirectory: serverDirectory,
-    server: `127.0.0.1:${port}`, refereeName: "ConsolePipeProbe",
+    server: `127.0.0.1:${port}`, refereeName: "ContestConsole",
     uuid: "00010002-0003-0004-0005-000600070008", logPath: join(temporary, "mock-client.log")
   });
   client.onLine((line) => lines.push(line));
@@ -64,12 +64,14 @@ try {
   const commandBoundary = lines.length;
   await client.write("list");
   const listLine = await waitForLine(lines, (line) => /1 client\(s\) online:/i.test(line), 5_000, commandBoundary);
+  await client.write("setmap e90b2f535c8bf881e9cb83129fba241d 0 Contest Map With Spaces");
   await client.stop();
   client = undefined;
   const artifact = {
     checkedAt: new Date().toISOString(), server: `127.0.0.1:${port}`,
     mockClientVersion: readMockClientVersion(join(serverDirectory, "BallanceMMOMockClient.exe"), serverDirectory),
-    connected: true, stdinCommand: "list", acknowledgedBy: listLine
+    connected: true, stdinCommand: "list", acknowledgedBy: listLine,
+    refereeName: "*ContestConsole", setMapCommand: "setmap e90b2f535c8bf881e9cb83129fba241d 0 Contest Map With Spaces"
   };
   await mkdir(join(root, "test", "artifacts"), { recursive: true });
   await writeFile(artifactPath, `${JSON.stringify(artifact, null, 2)}\n`, "utf8");

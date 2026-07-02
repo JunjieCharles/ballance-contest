@@ -8,10 +8,12 @@ export interface EventMapReference {
   mapKind: "official" | "custom";
   level?: number;
   mapHashPrefix?: string;
+  mapDisplayName?: string;
 }
 
 export type DomainEvent =
   | (EventMetadata & { type: "connected" })
+  | (EventMetadata & { type: "permission-denied"; message: string })
   | (EventMetadata & { type: "player-list-start"; count: number })
   | (EventMetadata & { type: "player-list-summary"; clients: number; players: number; spectators: number })
   | (EventMetadata & { type: "player-login"; connectionId: string; playerName: string; cheat: boolean })

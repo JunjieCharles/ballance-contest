@@ -887,7 +887,9 @@ export class TestRuntimeManager {
       case "exclude": return `${prefix} [Warning] ${playerName} result excluded: ${event.reason}`;
       case "cheat": return `${prefix} (${connectionId}, ${playerName}) turned cheat ${event.enabled ? "on" : "off"}.`;
       case "ready": return `${prefix} [${event.refereeConnectionId}, *ContestConsole]: ${mapEcho} - Get ready`;
-      case "go": return `${prefix} [${event.refereeConnectionId}, *ContestConsole]: ${mapEcho} - Go!`;
+      case "go":
+        runtime.stageFinishOrdinals.set(event.stageId, 0);
+        return `${prefix} [${event.refereeConnectionId}, *ContestConsole]: ${mapEcho} - Go!`;
       case "warning": return `${prefix} [Warning] ${event.playerId ? `${playerName} ` : ""}${event.message}`;
       case "fault": return `${prefix} ${event.fault === "server-disconnect" ? "Disconnected from server." : `Fault: ${event.fault}${event.playerId ? ` (${playerName})` : ""}`}`;
     }
@@ -911,7 +913,7 @@ export class TestRuntimeManager {
   }
 
   private testStageEcho(stage: ScenarioDefinition["stages"][number] | undefined): string {
-    if (stage?.mapKind === "custom" && stage.mapHash) return `"${stage.mapHash.slice(0, 20).toLowerCase()}.."`;
+    if (stage?.mapKind === "custom" && stage.mapHash) return `"${stage.displayName?.trim() || `${stage.mapHash.slice(0, 20).toLowerCase()}..`}"`;
     return `Level ${String(stage?.level ?? 0).padStart(2, "0")}`;
   }
 

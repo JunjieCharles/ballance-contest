@@ -28,6 +28,40 @@ describe("CommandQueue", () => {
     expect(transport.writes).toEqual(["forcenextrestart"]);
   });
 
+  it("observes a synchronous echo produced while stdin is still being written", async () => {
+    const transport = new FakeTransport();
+    const queue = new CommandQueue(transport, 5);
+    transport.onWrite = () => queue.observeLine("[7, *ContestConsole]: Level 01 - Go!");
+    expect((await queue.enqueue({ type: "go", map: "level 1", mode: "sr" }, "sync-go")).status).toBe("acknowledged");
+  });
+
+  it("fails the pending command immediately when the server reports missing permission", async () => {
+    const transport = new FakeTransport();
+    const queue = new CommandQueue(transport, 100);
+    transport.onWrite = () => queue.observeLine("[07-02 10:00:00] Action failed: you don't have the permission to run this action.");
+    const result = await queue.enqueue({ type: "go", map: "level 1", mode: "sr" }, "denied-go");
+    expect(result).toMatchObject({ status: "failed", responseLine: expect.stringContaining("don't have the permission") });
+  });
+
+  it("writes custom map names once with the required hidden level zero", async () => {
+    const transport = new FakeTransport();
+    const queue = new CommandQueue(transport, 100);
+    const result = await queue.enqueue({ type: "set-map", mapHash: "E90B2F535C8BF881E9CB83129FBA241D", displayName: "Contest Map With Spaces" }, "set-map");
+    expect(result.status).toBe("acknowledged");
+    expect(transport.writes).toEqual(["setmap e90b2f535c8bf881e9cb83129fba241d 0 Contest Map With Spaces"]);
+  });
+
+  it("keeps setmap pending long enough to capture an asynchronous permission failure", async () => {
+    const transport = new FakeTransport();
+    const queue = new CommandQueue(transport, 100);
+    transport.onWrite = () => setTimeout(() => queue.observeLine("Action failed: you don't have the permission to run this action."), 0);
+    expect((await queue.enqueue({
+      type: "set-map",
+      mapHash: "e90b2f535c8bf881e9cb83129fba241d",
+      displayName: "Contest Map With Spaces"
+    }, "set-map-denied")).status).toBe("failed");
+  });
+
   it("acknowledges list from the current trailing summary format", async () => {
     const transport = new FakeTransport();
     const queue = new CommandQueue(transport, 100);
@@ -52,6 +86,15 @@ describe("CommandQueue", () => {
       `countdown ${hash} 0 hs 4`,
       `countdown ${hash} 0 hs`
     ]);
+  });
+
+  it("accepts the published custom map name echoed after setmap registration", async () => {
+    const transport = new FakeTransport();
+    const queue = new CommandQueue(transport, 100);
+    const hash = "e90b2f535c8bf881e9cb83129fba241d";
+    transport.onWrite = () => setTimeout(() => queue.observeLine("[7, *ContestConsole]: \"Contest Map With Spaces\" - Get ready"), 0);
+    expect((await queue.enqueue({ type: "ready", map: `${hash} 0`, mapName: "Contest Map With Spaces", mode: "hs" }, "named-custom-ready")).status)
+      .toBe("acknowledged");
   });
 
   it("accepts the live server's unquoted official-map hash echo", async () => {

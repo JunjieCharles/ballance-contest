@@ -91,7 +91,7 @@ describe("competition configuration", () => {
         online: false,
         currentStageStatus: "not-started"
       }]
-    })).toEqual(["裁判名不能为空"]);
+    })).toEqual(["服务器控制身份固定为 ContestConsole"]);
   });
 
   it("derives the last scoring place from the configured rank-to-points table", () => {

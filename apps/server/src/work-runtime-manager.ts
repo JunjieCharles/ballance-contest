@@ -3,6 +3,7 @@ import { existsSync, mkdirSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { performance } from "node:perf_hooks";
 import {
+  CONTEST_REFEREE_NAME,
   normalizeRefereeName,
   stageCommandTarget,
   stageDisplayName,
@@ -59,6 +60,8 @@ export interface WorkRuntime {
   automationDispatching?: boolean;
   listReconciliation?: { expected?: number; seen: number; onlinePlayerIds: Set<string> };
   mapEchoPrefixes: Map<string, string>;
+  customMapRegistration?: Promise<void>;
+  customMapsRegistered?: boolean;
 }
 
 export interface WorkRuntimeHost {
@@ -300,6 +303,8 @@ export class WorkRuntimeManager {
     if (!config) return;
     this.host.appendRawLog(runtime.competitionId, "mock-client", line);
     const parsed = parseLogLine(line, { year: Number(config.date.slice(0, 4)), utcOffsetMinutes: utcOffsetMinutes(config.timezone) });
+    if (parsed.event.type === "connected") void this.registerPublishedCustomMaps(runtime, config).catch(() => undefined);
+    if (parsed.event.type === "permission-denied") runtime.controller.observePermissionDenied(parsed.event.message);
     const before = runtime.controller.snapshot();
     const currentStage = config.stages.find((candidate) => candidate.id === before.currentStageId);
     this.bindOfficialMapEcho(runtime, config, parsed.event, currentStage, before.phase);
@@ -366,6 +371,36 @@ export class WorkRuntimeManager {
     this.saveSnapshot(runtime);
   }
 
+  public registerPublishedCustomMaps(runtime: WorkRuntime, config = this.host.getOperationalConfig(runtime.competitionId)): Promise<void> {
+    if (runtime.customMapsRegistered) return Promise.resolve();
+    if (runtime.customMapRegistration) return runtime.customMapRegistration;
+    runtime.customMapRegistration = (async () => {
+      for (const stage of [...config.stages].sort((left, right) => left.order - right.order)) {
+        if (stageMapKind(stage) !== "custom" || !stage.mapHash) continue;
+        const record = await runtime.commands.enqueue({
+          type: "set-map",
+          mapHash: stage.mapHash,
+          displayName: stageDisplayName(stage)
+        }, `custom-map:${runtime.competitionId}:${stage.id}:${stage.mapHash.toLowerCase()}`);
+        if (record.status !== "acknowledged") throw new Error(`Custom map registration failed for ${stageDisplayName(stage)}`);
+      }
+      runtime.customMapsRegistered = true;
+    })().catch((error) => {
+      delete runtime.customMapRegistration;
+      runtime.controller.pause();
+      this.host.appendAttention(runtime.competitionId, {
+        id: `custom-map-registration:${Date.now()}`,
+        category: "command",
+        severity: "critical",
+        title: "自制图映射发送失败",
+        message: error instanceof Error ? error.message : "MockClient 未接受自制图映射命令。",
+        occurredAt: new Date().toISOString()
+      });
+      throw error;
+    });
+    return runtime.customMapRegistration;
+  }
+
   private handleWarning(runtime: WorkRuntime, config: CompetitionConfig, event: Extract<DomainEvent, { type: "warning" }>): void {
     if (!event.playerName || event.level === undefined || !event.violationCode) {
       this.host.appendAttention(runtime.competitionId, {
@@ -408,7 +443,7 @@ export class WorkRuntimeManager {
     if ((event.type !== "ready" && event.type !== "countdown" && event.type !== "go")
       || event.mapKind !== "official" || !event.mapHashPrefix || !currentStage
       || stageMapKind(currentStage) !== "official"
-      || normalizeRefereeName(event.refereeName) !== normalizeRefereeName(config.refereeName)) return;
+      || normalizeRefereeName(event.refereeName) !== CONTEST_REFEREE_NAME) return;
     const phaseMatches = event.type === "ready" ? phase === "ready" : phase === "ready" || phase === "countdown" || phase === "running";
     if (phaseMatches) runtime.mapEchoPrefixes.set(currentStage.id, event.mapHashPrefix.toLowerCase());
   }
@@ -417,6 +452,11 @@ export class WorkRuntimeManager {
     if (event.type !== "ready" && event.type !== "countdown" && event.type !== "go" && event.type !== "finish" && event.type !== "dnf") return undefined;
     if (event.mapKind === "official" && event.level !== undefined) {
       const candidates = config.stages.filter((candidate) => stageMapKind(candidate) === "official" && candidate.level === event.level);
+      return candidates.find((candidate) => candidate.id === preferredStageId) ?? (candidates.length === 1 ? candidates[0] : undefined);
+    }
+    if (event.mapKind === "custom" && event.mapDisplayName) {
+      const candidates = config.stages.filter((candidate) =>
+        stageMapKind(candidate) === "custom" && stageDisplayName(candidate) === event.mapDisplayName);
       return candidates.find((candidate) => candidate.id === preferredStageId) ?? (candidates.length === 1 ? candidates[0] : undefined);
     }
     const prefix = event.mapHashPrefix?.toLowerCase();
@@ -443,7 +483,7 @@ export class WorkRuntimeManager {
         return participant ? { atMs: Date.parse(event.occurredAt), sourceId: event.sourceId, type: "disconnect", playerId: participant.id, connectionId: event.connectionId } : undefined;
       }
       case "go":
-        if (!stage || normalizeRefereeName(event.refereeName) !== normalizeRefereeName(config.refereeName)) return undefined;
+        if (!stage || normalizeRefereeName(event.refereeName) !== CONTEST_REFEREE_NAME) return undefined;
         return { atMs: Date.parse(event.occurredAt), sourceId: event.sourceId, type: "go", stageId: stage.id, refereeConnectionId: "work-referee" };
       case "finish": {
         if (!stage) return undefined;

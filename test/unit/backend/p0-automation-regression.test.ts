@@ -111,7 +111,7 @@ describe("P0 centralized automation and command regression", () => {
       expect.objectContaining({ playerId: "p1", status: "finished", sourceId: "p1-finish" }),
       expect.objectContaining({ playerId: "p2", status: "excluded", sourceId: "p2-cheat-running", reason: "cheat-enabled" })
     ]);
-    expect(controller.snapshot().incidents).toEqual([expect.objectContaining({ type: "cheat-violation", participantIds: ["p2"], recommendedRestart: false })]);
+    expect(controller.snapshot().incidents).toEqual([]);
     expect(controller.recordResult({ stageId: "s1", playerId: "p2", status: "finished", sourceId: "p2-finish-after-cheat" })).toBe("accepted");
   });
 

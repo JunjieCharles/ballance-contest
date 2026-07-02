@@ -10,9 +10,9 @@ const toCommand = (action: AutomationAction): CommandAction => {
     case "bulletin":
     case "notice":
     case "announce": return { type: "notification", channel: action.kind, text: action.message ?? "比赛流程通知" };
-    case "ready": return { type: "ready", map: action.map, mode: action.mode };
+    case "ready": return { type: "ready", map: action.map, ...(action.mapName === undefined ? {} : { mapName: action.mapName }), mode: action.mode };
     case "cheat-off": return { type: "cheat-off" };
-    case "go": return { type: "go", map: action.map, mode: action.mode };
+    case "go": return { type: "go", map: action.map, ...(action.mapName === undefined ? {} : { mapName: action.mapName }), mode: action.mode };
     case "force-next-restart": return { type: "force-next-restart" };
   }
 };
