@@ -358,6 +358,9 @@ describe("CompetitionController", () => {
     expect(controller.snapshot()).toMatchObject({ phase: "restart-preparing", plannedReadyAtMs: 120_000 });
     clock.set(120_000);
     controller.tick();
+    const force = action(controller, "force-next-restart");
+    controller.acknowledgeAction(force.id, "acknowledged");
+    controller.tick();
     expect(controller.snapshot().phase).toBe("ready");
     controller.observeConnection("p2", false);
     snapshot = controller.snapshot();
@@ -457,6 +460,9 @@ describe("CompetitionController", () => {
     expect(() => controller.requestManualGo()).toThrow("MANUAL_GO_CHEAT_OFF_REQUIRED");
     clock.advance(60_000);
     controller.tick();
+    const force = action(controller, "force-next-restart");
+    controller.acknowledgeAction(force.id, "acknowledged");
+    controller.tick();
     controller.acknowledgeAction(action(controller, "ready").id, "acknowledged");
     for (let index = 0; index < 2; index += 1) {
       clock.advance(5_000); controller.tick(); controller.acknowledgeAction(action(controller, "ready").id, "acknowledged");
@@ -464,9 +470,6 @@ describe("CompetitionController", () => {
     clock.advance(5_000); controller.tick(); controller.acknowledgeAction(action(controller, "announce").id, "acknowledged");
     clock.advance(5_000); controller.tick(); controller.acknowledgeAction(action(controller, "cheat-off").id, "acknowledged");
     clock.advance(10_000);
-    controller.tick();
-    const force = action(controller, "force-next-restart");
-    controller.acknowledgeAction(force.id, "acknowledged");
     controller.tick();
     const go = action(controller, "go");
     controller.acknowledgeAction(go.id, "acknowledged");

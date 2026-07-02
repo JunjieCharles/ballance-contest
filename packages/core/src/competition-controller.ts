@@ -513,6 +513,10 @@ export class CompetitionController {
       return;
     }
     if ((this.phase === "preparing" || this.phase === "restart-preparing") && this.plannedReadyAtMs !== undefined && now >= this.plannedReadyAtMs) {
+      if (this.restartPending && !this.isAcknowledged(this.forceRestartActionId)) {
+        if (!this.forceRestartActionId) this.forceRestartActionId = this.queueAction("force-next-restart").id;
+        return;
+      }
       if (this.readyFlowBlockers().length > 0) return;
       this.enterReady();
       return;
