@@ -335,11 +335,44 @@ header > span:last-of-type { margin-left: auto; font-size: 13px; }
   border-radius: 7px;
   background: #f7f9fb;
 }
+.stage-editor.official-stage {
+  grid-template-columns: 74px 130px minmax(100px, .7fr) 120px minmax(240px, 1.5fr) minmax(136px, auto);
+}
 .stage-editor label { margin: 0; }
 .stage-order { display: flex; gap: 4px; align-items: center; }
-.drag-handle { min-width: 34px; padding: 7px 8px; cursor: grab; font-size: 18px; line-height: 1; letter-spacing: -3px; }
+.drag-handle { min-width: 34px; padding: 7px 8px; cursor: grab; touch-action: none; }
 .drag-handle:active { cursor: grabbing; }
 .drag-handle:disabled { cursor: not-allowed; }
+.drag-bars { width: 17px; display: grid; gap: 3px; margin: auto; }
+.drag-bars i { display: block; height: 2px; border-radius: 999px; background: currentColor; }
+.stage-actions { justify-content: flex-end; flex-wrap: nowrap; align-self: end; }
+.stage-editor-drag-source {
+  position: absolute !important;
+  height: 0 !important;
+  min-height: 0 !important;
+  padding-top: 0 !important;
+  padding-bottom: 0 !important;
+  border-width: 0 !important;
+  overflow: hidden;
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+}
+.stage-drop-placeholder {
+  box-sizing: border-box;
+  border: 2px dashed #2784c4;
+  border-radius: 7px;
+  background: #e8f4fc;
+}
+.stage-drag-ghost {
+  position: fixed;
+  z-index: 1000;
+  box-sizing: border-box;
+  margin: 0;
+  pointer-events: none;
+  opacity: .94;
+  box-shadow: 0 16px 36px rgb(28 48 66 / 28%);
+}
 .stage-scoring { min-width: 220px; }
 .scoring-presets {
   display: flex;
@@ -576,6 +609,7 @@ header > span:last-of-type { margin-left: auto; font-size: 13px; }
   .notification-form,
   .schedule-editor,
   .stage-editor,
+  .stage-editor.official-stage,
   .unconfirmed-command-row { grid-template-columns: 1fr; }
   .timeline-row { grid-template-columns: 68px minmax(0, 1fr); }
   .timeline-row small { grid-column: 2; }

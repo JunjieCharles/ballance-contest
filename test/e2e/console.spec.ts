@@ -99,8 +99,27 @@ test("edits per-stage scoring and replaces the stage draft through inline confir
   await firstStage.getByLabel("时限（分钟）").fill("12");
   await firstStage.getByLabel("单关计分").fill("50,30,20");
   await firstStage.getByLabel("单关计分").blur();
-  await firstStage.getByRole("button", { name: "拖拽第 1 关" }).dragTo(page.locator(".stage-editor").nth(2));
   const customStage = page.locator('.stage-editor[data-stage-id="hs-1"]');
+  const rowBox = await customStage.boundingBox();
+  const handleBox = await customStage.getByRole("button", { name: "拖拽第 1 关" }).boundingBox();
+  const targetBox = await page.locator(".stage-editor").nth(2).boundingBox();
+  expect(rowBox).not.toBeNull();
+  expect(handleBox).not.toBeNull();
+  expect(targetBox).not.toBeNull();
+  if (!rowBox || !handleBox || !targetBox) return;
+  await page.mouse.move(handleBox.x + handleBox.width / 2, handleBox.y + handleBox.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(targetBox.x + targetBox.width / 2, targetBox.y + targetBox.height * .75, { steps: 6 });
+  await expect(page.locator(".stage-drag-ghost")).toBeVisible();
+  const ghostBox = await page.locator(".stage-drag-ghost").boundingBox();
+  const placeholderBox = await page.locator(".stage-drop-placeholder").boundingBox();
+  expect(ghostBox).not.toBeNull();
+  expect(placeholderBox).not.toBeNull();
+  expect(Math.abs((ghostBox?.height ?? 0) - rowBox.height)).toBeLessThan(2);
+  expect(Math.abs((placeholderBox?.height ?? 0) - rowBox.height)).toBeLessThan(2);
+  await page.mouse.up();
+  await expect(page.locator(".stage-drag-ghost")).toHaveCount(0);
+  await expect(page.locator(".stage-drop-placeholder")).toHaveCount(0);
   await expect(customStage.locator(".stage-order strong")).toHaveText("#3");
   await expect(customStage.getByLabel("自制图名称")).toHaveValue("决赛关");
   await expect(page.getByRole("button", { name: "发布比赛" })).toBeDisabled();
@@ -115,6 +134,27 @@ test("edits per-stage scoring and replaces the stage draft through inline confir
   await expect(page.locator(".competition-list button.selected")).toContainText("published");
   await page.getByRole("button", { name: "玩家", exact: true }).click();
   await expect(page.getByText("尚未观察到普通玩家；无需在比赛开始前手工登记。")).toBeVisible();
+});
+
+test("hides test controls in work mode and keeps official-stage actions clear of scoring", async ({ page }, testInfo) => {
+  await page.goto("/#token=e2e-bootstrap-token");
+  await expect(page.getByText(/已取得控制权|只读标签页/)).toBeVisible();
+  await acquireControl(page);
+  await createCompetition(page, `E2E 工作布局 ${testInfo.project.name}`, "work");
+  await expect(page.getByRole("button", { name: "测试", exact: true })).toHaveCount(0);
+  await expect(page.getByText("工作模式不提供测试运行控制。")).toHaveCount(0);
+
+  const official = page.locator(".stage-editor.official-stage").first();
+  const scoringBox = await official.getByLabel("单关计分").boundingBox();
+  const actionsBox = await official.locator(".stage-actions").boundingBox();
+  expect(scoringBox).not.toBeNull();
+  expect(actionsBox).not.toBeNull();
+  if (!scoringBox || !actionsBox) return;
+  const overlaps = scoringBox.x < actionsBox.x + actionsBox.width
+    && scoringBox.x + scoringBox.width > actionsBox.x
+    && scoringBox.y < actionsBox.y + actionsBox.height
+    && scoringBox.y + scoringBox.height > actionsBox.y;
+  expect(overlaps).toBe(false);
 });
 
 test("runs the 20-player sandbox from the console and edits a score without losing the player", async ({ page }, testInfo) => {
@@ -187,9 +227,11 @@ test("runs the 20-player sandbox from the console and edits a score without losi
   await expect(page.locator(".score-cell-editor")).toHaveCount(0);
 
   const secondRow = page.locator(".scoreboard tbody tr").nth(1);
-  const dnfEditorButton = secondRow.locator(".cell-button").filter({ hasText: /^#/ }).first();
+  const secondPlayerName = (await secondRow.locator("td").nth(3).innerText()).trim();
+  const targetRow = page.locator(".scoreboard tbody tr").filter({ has: page.getByRole("cell", { name: secondPlayerName, exact: true }) });
+  const dnfEditorButton = targetRow.locator(".cell-button").filter({ hasText: /^#/ }).first();
   await dnfEditorButton.click();
-  const secondEditor = secondRow.locator(".score-cell-editor");
+  const secondEditor = targetRow.locator(".score-cell-editor");
   await expect(secondEditor).toBeVisible();
   const dnfButton = secondEditor.getByRole("button", { name: "设为 DNF" });
   await expect(dnfButton).toBeVisible();
@@ -244,12 +286,35 @@ test("runs the 20-player sandbox from the console and edits a score without losi
   expect(externalRequests).toEqual([]);
 });
 
-test("resizes the raw client log window from the top-left handle", async ({ page }, testInfo) => {
+test("keeps a scrolled raw log in place, follows at the bottom, and resizes the window", async ({ page }, testInfo) => {
   await page.goto("/#token=e2e-bootstrap-token");
   await expect(page.getByText(/已取得控制权|只读标签页/)).toBeVisible();
   await acquireControl(page);
   const name = `E2E 日志浮窗 ${testInfo.project.name}`;
   await createCompetition(page, name, "test");
+  await page.getByRole("button", { name: "发布比赛" }).click();
+  await page.getByRole("button", { name: "测试", exact: true }).click();
+  await page.getByRole("button", { name: /20 人小型综合沙盒/ }).click();
+  await page.getByRole("button", { name: "创建测试运行" }).click();
+  const logBody = page.locator(".raw-log-body");
+  await expect.poll(() => page.locator(".raw-log-line").count()).toBeGreaterThan(15);
+  await logBody.evaluate((element) => { element.scrollTop = 0; element.dispatchEvent(new Event("scroll")); });
+
+  await page.getByRole("button", { name: "控制台", exact: true }).click();
+  const notification = page.locator(".notification-form");
+  const firstCount = await page.locator(".raw-log-line").count();
+  await notification.getByLabel("通知文本").fill("日志停留检查");
+  await notification.getByRole("button", { name: "发送" }).click();
+  await expect.poll(() => page.locator(".raw-log-line").count()).toBeGreaterThan(firstCount);
+  expect(await logBody.evaluate((element) => element.scrollTop)).toBe(0);
+
+  await logBody.evaluate((element) => { element.scrollTop = element.scrollHeight; element.dispatchEvent(new Event("scroll")); });
+  const secondCount = await page.locator(".raw-log-line").count();
+  await notification.getByLabel("通知文本").fill("日志底部跟随检查");
+  await notification.getByRole("button", { name: "发送" }).click();
+  await expect.poll(() => page.locator(".raw-log-line").count()).toBeGreaterThan(secondCount);
+  expect(await logBody.evaluate((element) => element.scrollHeight - element.scrollTop - element.clientHeight)).toBeLessThanOrEqual(4);
+
   const rawLog = page.getByRole("complementary", { name: "原始客户端日志" });
   const handle = page.getByRole("button", { name: "拖动左上角缩放原始客户端日志" });
   const before = await rawLog.boundingBox();

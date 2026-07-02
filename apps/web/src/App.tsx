@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
 import {
   LARGE_SCORING,
   SMALL_SCORING,
@@ -492,6 +492,9 @@ export function App() {
 
   const runtime = snapshot?.runtime;
   const versionKey = snapshot ? `${snapshot.competition.stateVersion}:${snapshot.runtime.stateVersion}` : "none";
+  const visibleTabs = (["config", "console", "players", "scoreboard", "test", "archive"] as const)
+    .filter((item) => snapshot?.competition.mode === "test" || item !== "test");
+  const activeTab = snapshot?.competition.mode === "work" && tab === "test" ? "console" : tab;
   return <main className={snapshot?.competition.mode === "test" ? "test-mode" : "work-mode"}>
     {snapshot?.competition.mode === "test" && <div className="watermark">测试数据</div>}
     <header>
@@ -507,7 +510,7 @@ export function App() {
       <aside className="sidebar">
         <section className="panel create-panel"><h2>比赛</h2>
           <label>名称<input value={name} onChange={(event) => setName(event.target.value)} /></label>
-          <label>模式<select value={mode} onChange={(event) => setMode(event.target.value as CompetitionMode)}><option value="work">工作模式（默认）</option><option value="test">测试模式</option></select></label>
+          <label>模式<select value={mode} onChange={(event) => setMode(event.target.value as CompetitionMode)}><option value="work">工作模式</option><option value="test">测试模式</option></select></label>
           <button disabled={!canWrite} onClick={() => void createCompetition()}>新建比赛</button>
         </section>
         <nav className="competition-list">{competitions.map((item) => <button className={item.id === selectedId ? "selected" : "ghost"} key={item.id} onClick={() => selectCompetition(item.id)}>
@@ -524,24 +527,24 @@ export function App() {
             <div><span>下一 Ready（UTC+8）</span><strong>{formatUtc8DateTime(runtime.plannedReadyAt)}</strong></div>
             <div><span>自动化 / 倒数</span><strong>{runtime.automationEnabled ? "启用" : "暂停"}{runtime.countdownValue ? ` · ${runtime.countdownValue}` : ""}</strong></div>
           </section>
-          <div className="tabs">{(["config", "console", "players", "scoreboard", "test", "archive"] as const).map((item) =>
-            <button className={tab === item ? "active" : ""} key={item} onClick={() => setTab(item)}>{({ config: "比赛配置", console: "控制台", players: "玩家", scoreboard: "成绩", test: "测试", archive: "归档" })[item]}</button>)}</div>
-          {tab === "console" && <ConsolePanel snapshot={snapshot} canWrite={canWrite} versionKey={versionKey}
+          <div className="tabs">{visibleTabs.map((item) =>
+            <button className={activeTab === item ? "active" : ""} key={item} onClick={() => setTab(item)}>{({ config: "比赛配置", console: "控制台", players: "玩家", scoreboard: "成绩", test: "测试", archive: "归档" })[item]}</button>)}</div>
+          {activeTab === "console" && <ConsolePanel snapshot={snapshot} canWrite={canWrite} versionKey={versionKey}
             startWork={() => startWork()} enableAutomation={() => enableAutomation()} pauseAutomation={() => pauseAutomation()}
             performAction={(action) => performAction(action)} requestConfirmation={requestConfirmation} />}
-          {tab === "config" && <ConfigPanel key={`${snapshot.competition.id}:${snapshot.competition.stateVersion}`} snapshot={snapshot} canWrite={canWrite}
+          {activeTab === "config" && <ConfigPanel key={`${snapshot.competition.id}:${snapshot.competition.stateVersion}`} snapshot={snapshot} canWrite={canWrite}
             saveDraft={(patch) => saveDraft(patch)} publish={() => publish()} />}
-          {tab === "players" && <PlayersPanel snapshot={snapshot} canWrite={canWrite} performAction={(action) => performAction(action)} />}
-          {tab === "scoreboard" && <ScoreboardPanel snapshot={snapshot} canWrite={canWrite} versionKey={versionKey}
+          {activeTab === "players" && <PlayersPanel snapshot={snapshot} canWrite={canWrite} performAction={(action) => performAction(action)} />}
+          {activeTab === "scoreboard" && <ScoreboardPanel snapshot={snapshot} canWrite={canWrite} versionKey={versionKey}
             requestConfirmation={requestConfirmation} overrideScoreboard={overrideScoreboard} downloadExport={downloadExport} />}
-          {tab === "test" && <TestPanel snapshot={snapshot} scenarios={scenarios} scenarioDetail={scenarioDetail} canWrite={canWrite}
+          {activeTab === "test" && <TestPanel snapshot={snapshot} scenarios={scenarios} scenarioDetail={scenarioDetail} canWrite={canWrite}
             loadScenario={loadScenario} createRun={createRun} advanceClock={(ms) => advanceClock(ms)} />}
-          {tab === "archive" && <ArchivePanel snapshot={snapshot} canWrite={canWrite} versionKey={versionKey}
+          {activeTab === "archive" && <ArchivePanel snapshot={snapshot} canWrite={canWrite} versionKey={versionKey}
             requestConfirmation={requestConfirmation} archiveCompetition={archiveCompetition} finishCompetition={finishCompetition} deleteCompetition={deleteCompetition} />}
         </> : <section className="empty-state">请选择或新建比赛</section>}
       </section>
     </div>
-    {snapshot && <RawLogWindow logs={rawLogs} minimized={rawLogsMinimized} setMinimized={setRawLogsMinimized}
+    {snapshot && <RawLogWindow key={snapshot.competition.id} logs={rawLogs} minimized={rawLogsMinimized} setMinimized={setRawLogsMinimized}
       refresh={() => session && selectedId ? void refreshRawLogs(session, selectedId) : undefined} mode={snapshot.competition.mode} />}
   </main>;
 }
@@ -637,7 +640,20 @@ function ConfigPanel({ snapshot, canWrite, saveDraft, publish }: {
   const [scoringDirty, setScoringDirty] = useState(false);
   const [stages, setStages] = useState<StageConfig[]>(config.stages.map((stage) => ({ ...stage, scoring: [...stage.scoring] })));
   const [stagesDirty, setStagesDirty] = useState(false);
-  const draggedStageId = useRef<string | undefined>(undefined);
+  const stageDrag = useRef<{
+    pointerId: number;
+    sourceId: string;
+    targetId: string;
+    afterTarget: boolean;
+    offsetX: number;
+    offsetY: number;
+    originTop: number;
+    sourceHeight: number;
+    rowGap: number;
+    source: HTMLElement;
+    ghost: HTMLElement;
+    placeholder: HTMLElement;
+  } | null>(null);
   const lastScoringPlace = minimumScoringPlaceFor(points);
   const draft = { ...config, contestType, scoring: { ...config.scoring, contestType, points, minimumScoringPlace: lastScoringPlace }, stages };
   const publishIssues = [...validateCompetitionConfigForPublish(draft), ...(stagesDirty ? ["请先保存关卡列表"] : [])];
@@ -671,17 +687,94 @@ function ConfigPanel({ snapshot, canWrite, saveDraft, publish }: {
     setStages((current) => current.map((stage) => stage.id === id ? { ...stage, ...patch } : stage));
     setStagesDirty(true);
   };
-  const reorder = (sourceId: string, targetId: string) => setStages((current) => {
+  const reorder = (sourceId: string, targetId: string, afterTarget = false) => setStages((current) => {
     const index = current.findIndex((stage) => stage.id === sourceId);
-    const target = current.findIndex((stage) => stage.id === targetId);
-    if (index < 0 || target < 0 || index === target) return current;
+    if (index < 0 || current.every((stage) => stage.id !== targetId) || sourceId === targetId) return current;
     const copy = [...current];
     const [moved] = copy.splice(index, 1);
-    copy.splice(target, 0, moved as StageConfig);
+    const target = copy.findIndex((stage) => stage.id === targetId);
+    copy.splice(target + (afterTarget ? 1 : 0), 0, moved as StageConfig);
     const nextStages = copy.map((stage, order) => ({ ...stage, order: order + 1 }));
     setStagesDirty(true);
     return nextStages;
   });
+  const beginStageDrag = (event: ReactPointerEvent<HTMLButtonElement>, sourceId: string) => {
+    if (!editable || stageDrag.current) return;
+    const source = event.currentTarget.closest<HTMLElement>(".stage-editor");
+    const parent = source?.parentElement;
+    if (!source || !parent) return;
+    const bounds = source.getBoundingClientRect();
+    const ghost = source.cloneNode(true) as HTMLElement;
+    const sourceControls = source.querySelectorAll<HTMLInputElement | HTMLSelectElement>("input, select");
+    const ghostControls = ghost.querySelectorAll<HTMLInputElement | HTMLSelectElement>("input, select");
+    sourceControls.forEach((control, index) => {
+      const cloned = ghostControls.item(index);
+      if (cloned) cloned.value = control.value;
+    });
+    ghost.classList.add("stage-drag-ghost");
+    ghost.setAttribute("aria-hidden", "true");
+    ghost.style.width = `${bounds.width}px`;
+    ghost.style.height = `${bounds.height}px`;
+    ghost.style.left = `${bounds.left}px`;
+    ghost.style.top = `${bounds.top}px`;
+    const placeholder = document.createElement("div");
+    placeholder.className = "stage-drop-placeholder";
+    placeholder.style.height = `${bounds.height}px`;
+    parent.insertBefore(placeholder, source);
+    source.classList.add("stage-editor-drag-source");
+    document.body.append(ghost);
+    stageDrag.current = {
+      pointerId: event.pointerId,
+      sourceId,
+      targetId: sourceId,
+      afterTarget: false,
+      offsetX: event.clientX - bounds.left,
+      offsetY: event.clientY - bounds.top,
+      originTop: bounds.top,
+      sourceHeight: bounds.height,
+      rowGap: Number.parseFloat(getComputedStyle(parent).rowGap) || 0,
+      source,
+      ghost,
+      placeholder
+    };
+    event.currentTarget.setPointerCapture(event.pointerId);
+    event.preventDefault();
+  };
+  const moveStageDrag = (event: ReactPointerEvent<HTMLButtonElement>) => {
+    const drag = stageDrag.current;
+    if (!drag || drag.pointerId !== event.pointerId) return;
+    drag.ghost.style.left = `${event.clientX - drag.offsetX}px`;
+    drag.ghost.style.top = `${event.clientY - drag.offsetY}px`;
+    const parent = drag.placeholder.parentElement;
+    if (!parent) return;
+    drag.placeholder.remove();
+    const candidates = [...parent.querySelectorAll<HTMLElement>(".stage-editor")]
+      .filter((candidate) => candidate.dataset.stageId && candidate.dataset.stageId !== drag.sourceId);
+    const listY = event.clientY > drag.originTop ? event.clientY - drag.sourceHeight - drag.rowGap : event.clientY;
+    const before = candidates.find((candidate) => listY < candidate.getBoundingClientRect().top + candidate.getBoundingClientRect().height / 2);
+    if (before?.dataset.stageId) {
+      drag.targetId = before.dataset.stageId;
+      drag.afterTarget = false;
+      parent.insertBefore(drag.placeholder, before);
+      return;
+    }
+    const last = candidates.at(-1);
+    if (last?.dataset.stageId) {
+      drag.targetId = last.dataset.stageId;
+      drag.afterTarget = true;
+    }
+    parent.append(drag.placeholder);
+  };
+  const finishStageDrag = (event: ReactPointerEvent<HTMLButtonElement>, commit: boolean) => {
+    const drag = stageDrag.current;
+    if (!drag || drag.pointerId !== event.pointerId) return;
+    stageDrag.current = null;
+    drag.ghost.remove();
+    drag.placeholder.remove();
+    drag.source.classList.remove("stage-editor-drag-source");
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
+    if (commit && drag.targetId !== drag.sourceId) reorder(drag.sourceId, drag.targetId, drag.afterTarget);
+  };
   const addStage = () => {
     const order = stages.length + 1;
     const level = Math.min(13, order);
@@ -716,11 +809,11 @@ function ConfigPanel({ snapshot, canWrite, saveDraft, publish }: {
       <button className="ghost" disabled={!editable} onClick={addStage}>添加关卡</button>
       <button disabled={!editable || !stagesDirty || stages.length === 0} onClick={() => void saveStages(stages)}>保存关卡列表</button>
     </div></div>
-      <div className="stage-editor-list">{stages.map((stage, index) => <div className="stage-editor" data-stage-id={stage.id} key={stage.id}
-        onMouseUp={() => { const sourceId = draggedStageId.current; if (sourceId && sourceId !== stage.id) reorder(sourceId, stage.id); draggedStageId.current = undefined; }}>
+      <div className="stage-editor-list">{stages.map((stage, index) => <div className={`stage-editor ${stageMapKind(stage)}-stage`} data-stage-id={stage.id} key={stage.id}>
         <div className="stage-order"><button type="button" className="drag-handle" aria-label={`拖拽第 ${index + 1} 关`} title="拖拽调整顺序" disabled={!editable}
-          onMouseDown={(event) => { event.preventDefault(); draggedStageId.current = stage.id; }}
-          onMouseUp={() => { draggedStageId.current = undefined; }}>⋮⋮</button><strong>#{index + 1}</strong></div>
+          onPointerDown={(event) => beginStageDrag(event, stage.id)} onPointerMove={moveStageDrag}
+          onPointerUp={(event) => finishStageDrag(event, true)} onPointerCancel={(event) => finishStageDrag(event, false)}>
+          <span className="drag-bars" aria-hidden="true"><i /><i /><i /></span></button><strong>#{index + 1}</strong></div>
         <label>关卡模式<select aria-label={`第 ${index + 1} 关关卡模式`} value={`${stageMapKind(stage)}-${stage.mode}`} disabled={!editable} onChange={(event) => {
           const [mapKind, mode] = event.target.value.split("-") as ["official" | "custom", "SR" | "HS"];
           if (mapKind === "official") {
@@ -738,7 +831,7 @@ function ConfigPanel({ snapshot, canWrite, saveDraft, publish }: {
           const scoring = event.target.value.split(",").map((value) => Number(value.trim())).filter(Number.isFinite);
           persistStage(stage.id, { scoring, minimumScoringPlace: minimumScoringPlaceFor(scoring) });
         }} /></label>
-        <div className="button-row compact"><button className="ghost" disabled={!editable} onClick={() => {
+        <div className="button-row compact stage-actions"><button className="ghost" disabled={!editable} onClick={() => {
           const copy = { ...stage, id: `copy-${crypto.randomUUID()}`, label: stageMapKind(stage) === "custom" ? `${stage.label} 副本` : stageDisplayName(stage), scoring: [...stage.scoring] };
           const nextStages = [...stages.slice(0, index + 1), copy, ...stages.slice(index + 1)].map((item, order) => ({ ...item, order: order + 1 }));
           setStages(nextStages);
@@ -799,7 +892,7 @@ function ScoreboardPanel({ snapshot, canWrite, versionKey, requestConfirmation, 
       {row.cells.slice(0, 4).map((cell, index) => <td className={cell.style === "plain" ? "" : cell.style} key={`${entry.playerId}:fixed:${index}`}>{cell.text}</td>)}
       {snapshot.config.stages.map((stage, index) => {
         const permission = editPermissions.get(stage.id);
-        return <EditableScoreCell key={`${stage.id}:${versionKey}`} value={entry.stages[stage.id] as { status?: string; place?: number; points?: number; reason?: string } | undefined} stage={stage} playerId={entry.playerId} playerName={entry.displayName}
+        return <EditableScoreCell key={stage.id} value={entry.stages[stage.id] as { status?: string; place?: number; points?: number; reason?: string } | undefined} stage={stage} playerId={entry.playerId} playerName={entry.displayName}
           display={row.cells[index + 4] as ScoreboardTableCell}
           canWrite={canWrite && Boolean(permission?.editable)} {...(!canWrite ? { disabledReason: "实时连接或控制权不可用" } : permission?.reason ? { disabledReason: permission.reason } : {})}
           versionKey={versionKey} requestConfirmation={requestConfirmation} save={(draft, confirmation) => overrideScoreboard(draft, confirmation)} />;
@@ -889,10 +982,14 @@ function ArchivePanel({ snapshot, canWrite, versionKey, requestConfirmation, arc
 
 function RawLogWindow({ logs, minimized, setMinimized, refresh, mode }: { logs: readonly RawClientLogLine[]; minimized: boolean; setMinimized(value: boolean): void; refresh(): void; mode: CompetitionMode }) {
   const bodyRef = useRef<HTMLDivElement>(null);
+  const stickToBottom = useRef(true);
   const dragRef = useRef<{ pointerId: number; offsetX: number; offsetY: number } | null>(null);
   const resizeRef = useRef<{ pointerId: number; startX: number; startY: number; startLeft: number; startTop: number; startWidth: number; startHeight: number } | null>(null);
   const [box, setBox] = useState<{ x: number; y: number; width: number; height: number } | null>(null);
-  useEffect(() => { if (!minimized) bodyRef.current?.scrollTo({ top: bodyRef.current.scrollHeight }); }, [logs, minimized]);
+  useLayoutEffect(() => {
+    const body = bodyRef.current;
+    if (!minimized && body && stickToBottom.current) body.scrollTo({ top: body.scrollHeight });
+  }, [logs, minimized]);
   return <aside className={minimized ? "raw-log-window minimized" : "raw-log-window"} aria-label="原始客户端日志" style={box ? { left: box.x, top: box.y, width: box.width, height: box.height, right: "auto", bottom: "auto" } : undefined}>
     <button className="raw-log-resize-handle" aria-label="拖动左上角缩放原始客户端日志" onPointerDown={(event) => {
       const bounds = event.currentTarget.parentElement?.getBoundingClientRect();
@@ -930,7 +1027,10 @@ function RawLogWindow({ logs, minimized, setMinimized, refresh, mode }: { logs: 
     }} onPointerUp={(event) => { if (dragRef.current?.pointerId === event.pointerId) dragRef.current = null; event.currentTarget.releasePointerCapture(event.pointerId); }}>
       <strong>原始 Client 日志</strong><span>{mode === "work" ? "真实 MockClient" : "模拟玩家/裁判"} · {logs.length} 行</span><button className="ghost" onClick={refresh}>刷新</button><button onClick={() => setMinimized(!minimized)}>{minimized ? "展开" : "最小化"}</button>
     </div>
-    {!minimized && <div className="raw-log-body" ref={bodyRef}>{logs.map((line) => <div className="raw-log-line" key={line.id}><time>{new Date(line.occurredAt).toLocaleTimeString()}</time><span>{line.source}</span><code>{line.rawLine}</code></div>)}{logs.length === 0 && <p>当前暂无客户端日志。</p>}</div>}
+    {!minimized && <div className="raw-log-body" ref={bodyRef} onScroll={(event) => {
+      const body = event.currentTarget;
+      stickToBottom.current = body.scrollHeight - body.scrollTop - body.clientHeight <= 4;
+    }}>{logs.map((line) => <div className="raw-log-line" key={line.id}><time>{new Date(line.occurredAt).toLocaleTimeString()}</time><span>{line.source}</span><code>{line.rawLine}</code></div>)}{logs.length === 0 && <p>当前暂无客户端日志。</p>}</div>}
   </aside>;
 }
 
