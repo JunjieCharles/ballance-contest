@@ -841,6 +841,8 @@ export class CompetitionController {
     this.restartPending = false;
     this.forceRestartActionId = undefined;
     this.disconnectedDuringAttempt.clear();
+    const stageName = this.stage.displayName ?? `${this.stage.mode.toUpperCase()}${this.stage.map}`;
+    this.queueActionForStage("bulletin", this.stage, `${stageName}已起跑`, false);
   }
 
   private acceptResult(attempt: MutableAttempt, result: AutomationResult): void {

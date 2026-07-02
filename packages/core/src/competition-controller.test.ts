@@ -106,7 +106,7 @@ describe("CompetitionController", () => {
 
     expect(controller.snapshot()).toMatchObject({ phase: "running", attempts: [{ goAtMs: 30_000, deadlineAtMs: 50_000 }] });
     expect(controller.snapshot().actions.map((item) => item.kind)).toEqual([
-      "bulletin", "notice", "ready", "ready", "ready", "announce", "cheat-off", "go"
+      "bulletin", "notice", "ready", "ready", "ready", "announce", "cheat-off", "go", "bulletin"
     ]);
   });
 
@@ -386,7 +386,8 @@ describe("CompetitionController", () => {
     const correction = controller.drainActions();
     expect(correction.find((candidate) => candidate.kind === "announce")?.message)
       .toBe("第一关：玩家 p2 在起跑保护期发生 fatal error，当前尝试及成绩已作废，第一条 Ready 改至 08:02。");
-    expect(correction.find((candidate) => candidate.kind === "bulletin")?.message)
+    const correctionBulletins = correction.filter((candidate) => candidate.kind === "bulletin");
+    expect(correctionBulletins.find((candidate) => candidate.message?.includes("起跑保护"))?.message)
       .toBe("第一关 将在 08:02 发令（玩家：p2，起跑保护改期）\n本关起跑保护已被使用，后续不再延时。");
     for (const item of correction) controller.acknowledgeAction(item.id, "acknowledged");
 

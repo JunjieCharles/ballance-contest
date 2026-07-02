@@ -112,8 +112,8 @@ export class CompetitionAuditService {
   public recordAutomationAttention(competitionId: string, action: AutomationAction): void {
     const details = action.kind === "bulletin" ? ["flow", "info", "赛程计划已更新"] as const
       : action.kind === "notice" ? ["flow", "info", "流程通知"] as const
-      : action.kind === "announce" ? ["flow", "warning", action.message === "READY!" ? "已发出 READY" : "重要比赛通知"] as const
-      : action.kind === "go" ? ["flow", "info", "本关已发令 Go"] as const
+      : action.kind === "announce" ? ["flow", "info", action.message === "READY!" ? "已发出 READY" : "重要比赛通知"] as const
+      : action.kind === "go" ? ["flow", "warning", "本关已发令 Go"] as const
       : ["command", "info", "裁判命令已确认"] as const;
     this.appendAttention(competitionId, {
       id: `automation:${action.id}`,
@@ -144,7 +144,7 @@ export class CompetitionAuditService {
       this.database.sqlite.prepare("INSERT INTO command_audits(id,competition_id,idempotency_key,action_type,status,payload,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(competition_id,idempotency_key) DO UPDATE SET status=excluded.status,payload=excluded.payload,updated_at=excluded.updated_at")
         .run(record.id, competitionId, record.idempotencyKey, record.action.type, record.status, JSON.stringify(record), record.createdAt, record.updatedAt);
     }
-    if (record.action.type === "list" && record.status === "sent") this.onListSent(competitionId);
+    if (record.action.type === "list" && record.status === "queued") this.onListSent(competitionId);
     if (record.status === "uncertain" || record.status === "failed" || record.status === "timed_out") {
       const permissionDenied = Boolean(record.responseLine && isPermissionDeniedLine(record.responseLine));
       this.appendAttention(competitionId, {
