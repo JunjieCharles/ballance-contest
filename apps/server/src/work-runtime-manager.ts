@@ -340,6 +340,7 @@ export class WorkRuntimeManager {
     if (parsed.event.type === "player-list-summary") this.completeListReconciliation(runtime, parsed.event.clients, parsed.event.players, parsed.event.spectators);
     if (parsed.event.type === "countdown" && eventStage?.id === currentStage?.id) runtime.controller.observeCountdown(parsed.event.value);
     if (parsed.event.type === "warning") this.handleWarning(runtime, config, parsed.event);
+    if (parsed.event.type === "unknown" && typeof (parsed.event as { text?: string }).text === "string" && /toggled cheat off globally/i.test((parsed.event as { text?: string }).text ?? "")) runtime.controller.resetAllCheat();
     const event = this.domainToScenarioEvent(runtime.competitionId, config, parsed.event, eventStage);
     if (event) {
       if ("playerId" in event) {

@@ -375,7 +375,7 @@ export class CompetitionController {
     this.bump();
   }
 
-  private resetAllCheat(): void {
+  public resetAllCheat(): void {
     for (const participantId of this.participantIds) this.cheat.set(participantId, false);
     this.cheatEnabledAtMs.clear();
   }
