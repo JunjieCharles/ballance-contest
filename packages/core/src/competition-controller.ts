@@ -375,6 +375,11 @@ export class CompetitionController {
     this.bump();
   }
 
+  private resetAllCheat(): void {
+    for (const participantId of this.participantIds) this.cheat.set(participantId, false);
+    this.cheatEnabledAtMs.clear();
+  }
+
   public observeViolation(participantId: string, sourceId: string, reason: string): void {
     this.assertParticipant(participantId);
     const attempt = this.currentAttempt;
@@ -471,7 +476,7 @@ export class CompetitionController {
     action.status = status;
     if (status === "acknowledged" || status === "referee-confirmed") {
       action.acknowledgedAtMs = this.clock.now();
-      if (action.kind === "cheat-off") this.lastCheatOffAcknowledgedAtMs = this.clock.now();
+      if (action.kind === "cheat-off") { this.lastCheatOffAcknowledgedAtMs = this.clock.now(); this.resetAllCheat(); }
     }
     if ((status === "acknowledged" || status === "referee-confirmed") && action.kind === "go") this.startAttemptForStage(action.stageId);
     this.bump();
@@ -583,7 +588,7 @@ export class CompetitionController {
       return;
     }
     action.acknowledgedAtMs = this.clock.now();
-    if (action.kind === "cheat-off") this.lastCheatOffAcknowledgedAtMs = this.clock.now();
+    if (action.kind === "cheat-off") { this.lastCheatOffAcknowledgedAtMs = this.clock.now(); this.resetAllCheat(); }
     if (action.kind === "go") this.startAttemptForStage(action.stageId);
     this.bump();
   }
