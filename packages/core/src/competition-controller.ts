@@ -375,17 +375,6 @@ export class CompetitionController {
     this.bump();
   }
 
-  private sendCheatStaleNotice(): void {
-    if (this.cheatWarningSent) return;
-    for (const participantId of this.participantIds) {
-      if (this.cheat.get(participantId)) {
-        this.cheatWarningSent = true;
-        this.queueAction("notice", "检测到有玩家开启了cheat，请在发令前及时关闭，发令后仍开启视作违规。");
-        return;
-      }
-    }
-  }
-
   public observeViolation(participantId: string, sourceId: string, reason: string): void {
     this.assertParticipant(participantId);
     const attempt = this.currentAttempt;
@@ -591,10 +580,7 @@ export class CompetitionController {
       return;
     }
     action.acknowledgedAtMs = this.clock.now();
-    if (action.kind === "cheat-off") {
-      this.lastCheatOffAcknowledgedAtMs = this.clock.now();
-      this.sendCheatStaleNotice();
-    }
+    if (action.kind === "cheat-off") this.lastCheatOffAcknowledgedAtMs = this.clock.now();
     if (action.kind === "go") this.startAttemptForStage(action.stageId);
     this.bump();
   }
