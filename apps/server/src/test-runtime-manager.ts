@@ -611,6 +611,7 @@ export class TestRuntimeManager {
       this.observeScenarioPhase(runtime, beforeSnapshot);
       this.applyScheduledRecoveries(runtime);
       this.applyDueScenarioFaults(runtime);
+      this.mirrorVoidedAttempts(runtime);
       this.advancePendingCountdown(runtime);
       this.drivePlayers(runtime);
       const knownResultSources = new Set(runtime.engine.snapshot().currentScoreboard.flatMap((entry) =>
@@ -688,6 +689,17 @@ export class TestRuntimeManager {
         });
         this.host.journal.append({ type: "test-run.event", competitionId: runtime.competitionId, data: event });
       }
+    }
+  }
+
+  private mirrorVoidedAttempts(runtime: TestRuntime): void {
+    const engineAttempts = runtime.engine.snapshot().attempts;
+    for (const attempt of runtime.automation.snapshot().attempts) {
+      if (!attempt.voided) continue;
+      const engineAttempt = engineAttempts.find((candidate) =>
+        candidate.stageId === attempt.stageId && candidate.attemptNumber === attempt.attemptNumber && !candidate.voided);
+      if (!engineAttempt) continue;
+      runtime.engine.voidAttempt(attempt.stageId, attempt.attemptNumber, `start-protection:${attempt.id}`);
     }
   }
 
@@ -842,6 +854,7 @@ export class TestRuntimeManager {
       case "player-crash":
         if (!input.playerId) throw new ServiceError("VALIDATION_FAILED", "玩家崩溃故障需要 playerId", 400);
         runtime.automation.observeCrash(input.playerId, "测试注入玩家崩溃");
+        runtime.automation.observeConnection(input.playerId, false);
         break;
       case "clock-jump":
         runtime.automationClock.advanceBy(input.milliseconds ?? 60_000);

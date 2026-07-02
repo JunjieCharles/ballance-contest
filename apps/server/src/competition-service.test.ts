@@ -146,6 +146,40 @@ describe("CompetitionService dynamic participants", () => {
     ]));
   });
 
+  it("uses a live fatal-error line once and mirrors the voided protected attempt into scoring", () => {
+    dataRoot = mkdtempSync(join(tmpdir(), "ballance-fatal-protection-"));
+    database = openDatabase(join(dataRoot, "console.sqlite"));
+    const service = new CompetitionService(undefined, { database, dataRoot });
+    const record = service.create({ name: "Fatal protection", mode: "work", idempotencyKey: "create-fatal" });
+    service.publish(record.id, 0, "publish-fatal");
+    const manager = workRuntimeManager(service);
+    const runtime = manager.makeRuntime(record.id, service.snapshot(record.id).publishedConfig as CompetitionConfig, { write: async () => undefined });
+    manager.register(record.id, runtime);
+
+    manager.ingestLine(runtime, "[07-02 12:00:00] Player One (#42) logged in with cheat mode off.");
+    manager.ingestLine(runtime, "[07-02 12:00:01] [7, *ContestConsole]: Level 01 - Go!");
+    manager.ingestLine(runtime, "[07-02 12:00:02] (#42, Player One) finished Level 01 in 1st place (score: 100; real time: 00:00:01.000).");
+    manager.ingestLine(runtime, "[07-02 12:00:03] Player One was kicked by the server (fatal error) and crashed subsequently.");
+    manager.ingestLine(runtime, "[07-02 12:00:04] Player One (#42) disconnected.");
+
+    const automation = runtime.controller.snapshot();
+    expect(automation).toMatchObject({
+      phase: "restart-preparing",
+      startProtectionUsedStageIds: ["sr-1"],
+      attempts: [{ attemptNumber: 1, voided: true, intakeOpen: false }],
+      incidents: [expect.objectContaining({ type: "protected-crash", status: "resolved", participantIds: ["Player One"] })]
+    });
+    expect(automation.incidents.filter((incident) => incident.type === "protected-crash")).toHaveLength(1);
+    expect(automation.actions.filter((action) => action.kind === "bulletin").at(-1)?.message)
+      .toContain("\n本关起跑保护已被使用，后续不再延时。");
+    expect(runtime.engine.snapshot().attempts).toMatchObject([{ attemptNumber: 1, voided: true, open: false }]);
+    expect(runtime.engine.snapshot().currentScoreboard.every((entry) => Object.keys(entry.stages).length === 0)).toBe(true);
+    expect(service.snapshot(record.id).config.participants).toContainEqual(expect.objectContaining({ id: "Player One", online: false }));
+    const restoredRuntime = manager.makeRuntime(record.id, service.snapshot(record.id).publishedConfig as CompetitionConfig, { write: async () => undefined });
+    expect(restoredRuntime.controller.snapshot().startProtectionUsedStageIds).toEqual(["sr-1"]);
+    service.close();
+  });
+
   it("registers every published custom map once after connection and attributes its quoted echoes", async () => {
     dataRoot = mkdtempSync(join(tmpdir(), "ballance-custom-map-"));
     database = openDatabase(join(dataRoot, "console.sqlite"));

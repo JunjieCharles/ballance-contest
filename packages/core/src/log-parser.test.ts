@@ -40,6 +40,15 @@ describe("parseLogLine", () => {
       .toMatchObject({ type: "permission-denied", message: "Action failed: you don't have the permission to run this action." });
   });
 
+  it("parses the live fatal-error line with the affected player", () => {
+    expect(parseLogLine("[06-29 11:10:32] Player One was kicked by the server (fatal error) and crashed subsequently.", context).event)
+      .toMatchObject({
+        type: "fatal-error",
+        playerName: "Player One",
+        message: "Player One was kicked by the server (fatal error) and crashed subsequently."
+      });
+  });
+
   it("parses the three player-facing notifications and the real 3/2/1 countdown", () => {
     expect(parseLogLine("[06-29 11:20:12] [Announcement] (2717249041, *Referee): READY!", context).event)
       .toMatchObject({ type: "notification", channel: "announce", refereeName: "*Referee", text: "READY!" });

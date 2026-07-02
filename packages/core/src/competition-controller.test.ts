@@ -297,50 +297,122 @@ describe("CompetitionController", () => {
     const clock = new FakeClock();
     const controller = new CompetitionController(configuration({
       stages: [
-        { id: "s1", map: "1", mode: "sr", timeLimitMs: 5_000, minimumScoringPlace: 3 },
+        { id: "s1", map: "1", mode: "sr", timeLimitMs: 50_000, minimumScoringPlace: 3 },
         { id: "s2", map: "2", mode: "hs", timeLimitMs: 5_000, minimumScoringPlace: 3 }
       ]
     }), clock);
     connectAll(controller);
     enterRunning(controller, clock);
     for (const playerId of ["p1", "p2", "p3"]) controller.recordResult({ stageId: "s1", playerId, status: "finished", sourceId: playerId });
+    clock.set(46_000);
     controller.observeConnection("p5", false);
-
-    clock.set(33_000);
     controller.tick();
     expect(controller.snapshot()).toMatchObject({ phase: "tail-intake", attempts: [{ intakeOpen: true }] });
     expect(controller.recordResult({ stageId: "s1", playerId: "p4", status: "finished", sourceId: "p4" })).toBe("accepted");
 
-    clock.set(35_000);
+    clock.set(80_000);
     controller.tick();
-    expect(controller.snapshot().attempts[0]).toMatchObject({ intakeOpen: false, intakeClosedAtMs: 35_000 });
+    expect(controller.snapshot().attempts[0]).toMatchObject({ intakeOpen: false, intakeClosedAtMs: 80_000 });
     expect(controller.snapshot().attempts[0]?.results).toContainEqual(expect.objectContaining({ playerId: "p5", status: "dnf", reason: "time-limit" }));
   });
 
-  it("restarts the full Ready flow only after every reconnected player is stable for 15 seconds", () => {
+  it("uses pre-Go protection once, keeps the full two-minute delay, and emits exact newline suffixes", () => {
     const clock = new FakeClock();
     const controller = new CompetitionController(configuration(), clock);
     connectAll(controller);
     controller.enable(0);
-    controller.drainActions();
+    for (const item of controller.drainActions()) controller.acknowledgeAction(item.id, "acknowledged");
     controller.tick();
-    controller.drainActions();
+    const initial = controller.drainActions();
+    for (const item of initial.filter((candidate) => candidate.kind !== "ready")) controller.acknowledgeAction(item.id, "acknowledged");
 
     controller.observeConnection("p1", false);
+    let snapshot = controller.snapshot();
+    expect(snapshot).toMatchObject({
+      phase: "restart-preparing",
+      plannedReadyAtMs: 120_000,
+      startProtectionUsedStageIds: ["s1"],
+      attempts: []
+    });
+    expect(snapshot.actions.find((candidate) => candidate.kind === "ready")?.status).toBe("cancelled");
+    const correction = controller.drainActions();
+    expect(correction.find((candidate) => candidate.kind === "notice")?.message)
+      .toBe("第一关：玩家 p1 在起跑敏感期掉线，发令流程已中止，第一条 Ready 改至 08:02。");
+    expect(correction.find((candidate) => candidate.kind === "bulletin")?.message)
+      .toBe("第一关 将在 08:02 发令（玩家：p1，起跑保护改期）\n本关起跑保护已被使用，后续不再延时。");
+    for (const item of correction) controller.acknowledgeAction(item.id, "acknowledged");
+
+    clock.set(10_000);
     controller.observeConnection("p1", true);
-    clock.advance(14_000);
-    controller.observeConnection("p1", false);
-    controller.observeConnection("p1", true);
-    clock.advance(14_999);
+    clock.set(60_000);
     controller.tick();
-    expect(controller.snapshot().phase).toBe("pre-start-wait");
-    clock.advance(1);
+    const notice = action(controller, "notice");
+    expect(notice.message).toBe("第一关 1 分钟后即将发令，请提前做好重启游戏等准备，避免影响发令流程。\n本关起跑保护已被使用，后续不再延时。");
+    expect(notice.message).toContain("\n");
+    expect(notice.message).not.toContain("\\n");
+    controller.acknowledgeAction(notice.id, "acknowledged");
+
+    clock.set(119_999);
     controller.tick();
-    expect(controller.snapshot()).toMatchObject({ phase: "preparing", plannedReadyAtMs: clock.now() + 60_000 });
-    clock.advance(60_000);
+    expect(controller.snapshot()).toMatchObject({ phase: "restart-preparing", plannedReadyAtMs: 120_000 });
+    clock.set(120_000);
     controller.tick();
     expect(controller.snapshot().phase).toBe("ready");
-    expect(controller.drainActions().filter((item) => item.kind === "ready")).toHaveLength(1);
+    controller.observeConnection("p2", false);
+    snapshot = controller.snapshot();
+    expect(snapshot.phase).toBe("ready");
+    expect(snapshot.startProtectionUsedStageIds).toEqual(["s1"]);
+    expect(snapshot.incidents.filter((incident) => incident.type === "protected-crash")).toHaveLength(1);
+  });
+
+  it("voids a protected post-Go attempt and forces one restart before a manual re-launch", () => {
+    const clock = new FakeClock();
+    const controller = new CompetitionController(configuration(), clock);
+    connectAll(controller);
+    enterRunning(controller, clock);
+    controller.recordResult({ stageId: "s1", playerId: "p1", status: "finished", sourceId: "finish-before-crash" });
+
+    clock.advance(5_000);
+    controller.observeCrash("p2", "p2 was kicked by the server (fatal error) and crashed subsequently.");
+    controller.observeConnection("p2", false);
+    let snapshot = controller.snapshot();
+    expect(snapshot).toMatchObject({
+      phase: "restart-preparing",
+      plannedReadyAtMs: 155_000,
+      attempts: [{ attemptNumber: 1, intakeOpen: false, voided: true }]
+    });
+    expect(snapshot.attempts[0]?.results).toEqual([expect.objectContaining({ sourceId: "finish-before-crash" })]);
+    expect(snapshot.attempts[0]?.results.some((result) => result.status === "dnf")).toBe(false);
+    const correction = controller.drainActions();
+    expect(correction.find((candidate) => candidate.kind === "announce")?.message)
+      .toBe("第一关：玩家 p2 在起跑保护期发生 fatal error，当前尝试及成绩已作废，第一条 Ready 改至 08:02。");
+    expect(correction.find((candidate) => candidate.kind === "bulletin")?.message)
+      .toBe("第一关 将在 08:02 发令（玩家：p2，起跑保护改期）\n本关起跑保护已被使用，后续不再延时。");
+    for (const item of correction) controller.acknowledgeAction(item.id, "acknowledged");
+
+    controller.manualCheatOff();
+    const cheatOff = action(controller, "cheat-off");
+    controller.acknowledgeAction(cheatOff.id, "acknowledged");
+    controller.requestManualGo();
+    const force = action(controller, "force-next-restart");
+    expect(force.manual).toBe(true);
+    expect(controller.snapshot().actions.filter((candidate) => candidate.kind === "go")).toHaveLength(1);
+    controller.acknowledgeAction(force.id, "acknowledged");
+    controller.tick();
+    const go = action(controller, "go");
+    expect(go.manual).toBe(true);
+    controller.acknowledgeAction(go.id, "acknowledged");
+    expect(controller.snapshot().attempts).toMatchObject([
+      { attemptNumber: 1, voided: true },
+      { attemptNumber: 2, voided: false, goAtMs: 35_000 }
+    ]);
+
+    clock.advance(1_000);
+    controller.observeConnection("p3", false);
+    snapshot = controller.snapshot();
+    expect(snapshot.phase).toBe("running");
+    expect(snapshot.attempts[1]).toMatchObject({ intakeOpen: true, voided: false });
+    expect(snapshot.incidents.filter((incident) => incident.type === "protected-crash")).toHaveLength(1);
   });
 
   it("does not create an attempt when the Go command is uncertain", () => {

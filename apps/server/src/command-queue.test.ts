@@ -114,10 +114,23 @@ describe("CommandQueue", () => {
     expect(transport.writes).toEqual(["bulletin SR1 20:10", "notice wait Player", "announce READY!"]);
   });
 
+  it("keeps a business newline but protocol-escapes it into one MockClient command", async () => {
+    const transport = new FakeTransport();
+    const queue = new CommandQueue(transport, 100);
+    transport.onWrite = () => setTimeout(() => queue.observeLine("[Notice] accepted"), 0);
+    await queue.enqueue({
+      type: "notification",
+      channel: "notice",
+      text: "SR1 即将发令。\n本关起跑保护已被使用，后续不再延时。"
+    }, "protected-notice");
+    expect(transport.writes).toEqual(["notice SR1 即将发令。\\n本关起跑保护已被使用，后续不再延时。"]);
+  });
+
   it("rejects control characters before writing", async () => {
     const transport = new FakeTransport();
     const queue = new CommandQueue(transport);
-    expect(() => queue.enqueue({ type: "notification", channel: "notice", text: "hello\nstop" }, "unsafe")).toThrow("control characters");
+    expect(() => queue.enqueue({ type: "raw", command: "hello\nstop" }, "unsafe")).toThrow("control characters");
+    expect(() => queue.enqueue({ type: "notification", channel: "notice", text: "hello\rstop" }, "unsafe-notice")).toThrow("control characters");
     expect(transport.writes).toEqual([]);
   });
 });

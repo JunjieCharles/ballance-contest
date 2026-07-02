@@ -45,6 +45,7 @@ export interface AutomationConfiguration {
   policy?: Partial<AutomationPolicy>;
   confirmationSecret?: string;
   wallClockOriginMs?: number;
+  startProtectionUsedStageIds?: readonly string[] | undefined;
 }
 
 const formatDelay = (milliseconds: number): string => {
@@ -69,7 +70,7 @@ export interface AutomationAction {
   message?: string;
   manual?: boolean;
   acknowledgedAtMs?: number;
-  status: "pending" | "acknowledged" | "failed" | "uncertain" | "referee-confirmed";
+  status: "pending" | "acknowledged" | "failed" | "uncertain" | "referee-confirmed" | "cancelled";
 }
 
 export interface AutomationBlocker {
@@ -132,6 +133,9 @@ export interface AutomationSnapshot {
   countdownValue?: 3 | 2 | 1;
   blockers: readonly AutomationBlocker[];
   waitingParticipants: readonly string[];
+  startProtectionUsedStageIds?: readonly string[];
+  startProtectionSensitiveStageId?: string;
+  startProtectionUntilMs?: number;
   attempts: readonly ControlledAttempt[];
   incidents: readonly AutomationIncident[];
   rejectedResults: readonly RejectedResult[];
@@ -171,6 +175,8 @@ const defaults = (participantCount: number): AutomationPolicy => ({
 const READY_STEP_MS = 5_000;
 const CHEAT_CONFIRMATION_BUFFER_MS = 10_000;
 const READY_NOTICE_LEAD_MS = 60_000;
+const START_PROTECTION_DELAY_MS = 2 * 60_000;
+const START_PROTECTION_USED_SUFFIX = "\n本关起跑保护已被使用，后续不再延时。";
 
 const formatUtc8Time = (epochMs: number): string => {
   const utc8 = new Date(epochMs + 8 * 60 * 60_000);
@@ -223,6 +229,8 @@ export class CompetitionController {
   private readonly waiting = new Set<string>();
   private readonly absent = new Set<string>();
   private readonly disconnectedDuringAttempt = new Set<string>();
+  private readonly startProtectionUsedStageIds = new Set<string>();
+  private readonly ignoredProtectionOfflineParticipants = new Set<string>();
   private readonly actions: AutomationAction[] = [];
   private readonly undeliveredActionIds = new Set<string>();
   private readonly attempts: MutableAttempt[] = [];
@@ -249,8 +257,11 @@ export class CompetitionController {
   private forceRestartActionId: string | undefined;
   private goActionId: string | undefined;
   private manualFlow = false;
+  private pendingManualGoStageId: string | undefined;
   private countdownValue: 3 | 2 | 1 | undefined;
   private permissionDeniedEvidence: string | undefined;
+  private startProtectionSensitiveStageId: string | undefined;
+  private startProtectionUntilMs: number | undefined;
   private readonly wallClockOriginMs: number;
 
   public constructor(private readonly configuration: AutomationConfiguration, private readonly clock: MonotonicClock) {
@@ -263,6 +274,9 @@ export class CompetitionController {
     this.wallClockOriginMs = configuration.wallClockOriginMs ?? 0;
     if (this.policy.groupDisconnectThreshold < 1) throw new Error("Group disconnect threshold must be positive");
     this.tokenService = new RestartConfirmationTokens(configuration.confirmationSecret ?? randomUUID());
+    for (const stageId of configuration.startProtectionUsedStageIds ?? []) {
+      if (this.stages.some((stage) => stage.id === stageId)) this.startProtectionUsedStageIds.add(stageId);
+    }
     for (const participantId of this.participantIds) {
       this.online.set(participantId, false);
       this.cheat.set(participantId, false);
@@ -305,6 +319,16 @@ export class CompetitionController {
     this.online.set(participantId, online);
     if (online) this.stableSince.set(participantId, this.clock.now());
     else this.stableSince.delete(participantId);
+
+    if (online) this.ignoredProtectionOfflineParticipants.delete(participantId);
+    if (!online && this.isStartProtectionSensitive()) {
+      this.ignoredProtectionOfflineParticipants.add(participantId);
+      if (!this.startProtectionUsedStageIds.has(this.stage.id)) {
+        this.triggerStartProtection(participantId, "掉线", `起跑敏感期掉线：${participantId}`);
+      }
+      this.bump();
+      return;
+    }
 
     if (this.phase === "ready" || this.phase === "countdown" || this.phase === "preparing" || this.phase === "restart-preparing" || this.phase === "pre-start-wait") {
       if (!online) {
@@ -362,12 +386,9 @@ export class CompetitionController {
 
   public observeCrash(participantId: string, evidence: string): void {
     this.assertParticipant(participantId);
-    const attempt = this.currentAttempt;
-    if (!attempt || !attempt.intakeOpen) return;
-    if (this.clock.now() - attempt.goAtMs <= this.policy.protectionWindowMs) {
-      this.openRestartIncident("protected-crash", [participantId], evidence);
-      this.bump();
-    }
+    if (!this.isStartProtectionSensitive()) return;
+    if (!this.startProtectionUsedStageIds.has(this.stage.id)) this.triggerStartProtection(participantId, "fatal error", evidence);
+    this.bump();
   }
 
   public observeServerDisconnect(evidence: string): void {
@@ -451,6 +472,16 @@ export class CompetitionController {
     if (attempt?.intakeOpen && now >= attempt.deadlineAtMs) this.closeAtDeadline(attempt);
     if (this.automationEnabled) this.queueDueReadyNotice();
     if (!this.automationEnabled && this.phase !== "ready" && this.phase !== "countdown") return;
+
+    if (this.pendingManualGoStageId && this.isAcknowledged(this.forceRestartActionId)) {
+      const target = this.stages.find((stage) => stage.id === this.pendingManualGoStageId);
+      if (!target || this.startBlockers(false).length > 0) return;
+      this.goActionId = this.queueActionForStage("go", target, undefined, true).id;
+      this.pendingManualGoStageId = undefined;
+      this.phase = "countdown";
+      this.bump();
+      return;
+    }
 
     if (this.phase === "pre-start-wait") {
       const allStable = [...this.waiting].every((participantId) =>
@@ -645,6 +676,12 @@ export class CompetitionController {
     if (this.actions.some((action) => action.status === "pending")) throw new Error("MANUAL_GO_COMMAND_PENDING");
     if (this.startBlockers(false).length > 0) throw new Error("MANUAL_GO_BLOCKED");
     this.manualFlow = true;
+    if (this.restartPending && !this.isAcknowledged(this.forceRestartActionId)) {
+      this.pendingManualGoStageId = target.id;
+      this.forceRestartActionId ??= this.queueActionForStage("force-next-restart", target, undefined, true).id;
+      this.bump();
+      return;
+    }
     this.goActionId = this.queueActionForStage("go", target, undefined, true).id;
     this.phase = "countdown";
     this.bump();
@@ -737,6 +774,9 @@ export class CompetitionController {
       ...(this.countdownValue === undefined ? {} : { countdownValue: this.countdownValue }),
       blockers: this.startBlockers(!this.manualFlow),
       waitingParticipants: [...this.waiting],
+      startProtectionUsedStageIds: [...this.startProtectionUsedStageIds],
+      ...(this.startProtectionSensitiveStageId === undefined ? {} : { startProtectionSensitiveStageId: this.startProtectionSensitiveStageId }),
+      ...(this.startProtectionUntilMs === undefined ? {} : { startProtectionUntilMs: this.startProtectionUntilMs }),
       attempts: this.attempts.map(cloneAttempt),
       incidents: this.incidents.map(cloneIncident),
       rejectedResults: this.rejectedResults.map((result) => ({ ...result })),
@@ -755,9 +795,12 @@ export class CompetitionController {
       if (previous) this.closeIntake(previous);
       this.stageIndex = targetStageIndex;
       this.nextStagePending = false;
+      this.ignoredProtectionOfflineParticipants.clear();
     }
     this.phase = "ready";
     this.readyAtMs = this.clock.now();
+    this.startProtectionSensitiveStageId = targetStage.id;
+    this.startProtectionUntilMs = undefined;
     this.plannedReadyAtMs = undefined;
     this.plannedReadyStageIndex = undefined;
     this.noticeActionId = undefined;
@@ -790,8 +833,11 @@ export class CompetitionController {
       deadlineAtMs: now + this.stage.timeLimitMs, intakeOpen: true, voided: false, results: []
     });
     this.phase = "running";
+    this.startProtectionSensitiveStageId = this.stage.id;
+    this.startProtectionUntilMs = now + this.policy.protectionWindowMs;
     this.countdownValue = undefined;
     this.manualFlow = false;
+    this.pendingManualGoStageId = undefined;
     this.restartPending = false;
     this.forceRestartActionId = undefined;
     this.disconnectedDuringAttempt.clear();
@@ -839,6 +885,70 @@ export class CompetitionController {
     attempt.intakeClosedAtMs = this.clock.now();
   }
 
+  private isStartProtectionSensitive(): boolean {
+    if (this.startProtectionSensitiveStageId !== this.stage.id) return false;
+    return this.startProtectionUntilMs === undefined || this.clock.now() <= this.startProtectionUntilMs;
+  }
+
+  private triggerStartProtection(participantId: string, eventLabel: string, evidence: string): void {
+    const now = this.clock.now();
+    const attempt = this.currentAttempt;
+    const postGo = Boolean(attempt?.intakeOpen && now <= attempt.goAtMs + this.policy.protectionWindowMs);
+    const plannedReadyAtMs = now + START_PROTECTION_DELAY_MS;
+    const stage = this.stage;
+    const name = stage.displayName ?? `${stage.mode.toUpperCase()}${stage.map}`;
+    const readyTime = formatUtc8Time(this.wallClockOriginMs + plannedReadyAtMs);
+    const eventText = eventLabel === "掉线" ? "掉线" : `发生 ${eventLabel}`;
+    this.startProtectionUsedStageIds.add(stage.id);
+    this.cancelPendingLaunchActions(stage.id);
+    this.incidents.push({
+      id: randomUUID(),
+      type: "protected-crash",
+      severity: "critical",
+      createdAtMs: now,
+      ...(attempt ? { attemptId: attempt.id } : {}),
+      participantIds: [participantId],
+      recommendedRestart: false,
+      status: "resolved",
+      evidence
+    });
+    if (postGo && attempt) {
+      attempt.voided = true;
+      this.closeIntake(attempt);
+    }
+    this.automationEnabled = true;
+    this.pausedFromPhase = undefined;
+    this.phase = "restart-preparing";
+    this.restartPending = true;
+    this.nextStagePending = false;
+    this.manualFlow = false;
+    this.pendingManualGoStageId = undefined;
+    this.countdownValue = undefined;
+    this.readyAtMs = undefined;
+    this.waitDeadlineAtMs = undefined;
+    this.waiting.clear();
+    this.readyActionId = undefined;
+    this.readyActionIds.length = 0;
+    this.readyAnnouncementActionId = undefined;
+    this.cheatOffActionId = undefined;
+    this.forceRestartActionId = undefined;
+    this.goActionId = undefined;
+    const message = postGo
+      ? `${name}：玩家 ${participantId} 在起跑保护期${eventText}，当前尝试及成绩已作废，第一条 Ready 改至 ${readyTime}。`
+      : `${name}：玩家 ${participantId} 在起跑敏感期${eventText}，发令流程已中止，第一条 Ready 改至 ${readyTime}。`;
+    this.queueActionForStage(postGo ? "announce" : "notice", stage, message);
+    this.planReady(this.stageIndex, plannedReadyAtMs, participantId);
+  }
+
+  private cancelPendingLaunchActions(stageId: string): void {
+    for (const action of this.actions) {
+      if (action.stageId !== stageId || action.status !== "pending"
+        || !["ready", "announce", "cheat-off", "go", "force-next-restart"].includes(action.kind)) continue;
+      action.status = "cancelled";
+      this.undeliveredActionIds.delete(action.id);
+    }
+  }
+
   private openRestartIncident(type: "protected-crash" | "group-disconnect", participantIds: string[], evidence: string): void {
     const attempt = this.currentAttempt;
     if (!attempt || this.incidents.some((incident) => incident.status === "open" && incident.type === type && incident.attemptId === attempt.id)) return;
@@ -868,18 +978,20 @@ export class CompetitionController {
     return action;
   }
 
-  private planReady(stageIndex: number, plannedReadyAtMs: number): void {
+  private planReady(stageIndex: number, plannedReadyAtMs: number, protectionPlayerId?: string): void {
     const target = this.stages[stageIndex];
     if (!target || !Number.isFinite(plannedReadyAtMs)) throw new Error("INVALID_READY_PLAN");
     this.plannedReadyAtMs = plannedReadyAtMs;
     this.plannedReadyStageIndex = stageIndex;
     this.noticeActionId = undefined;
-    this.queueBulletin(target, plannedReadyAtMs);
+    this.queueBulletin(target, plannedReadyAtMs, protectionPlayerId);
   }
 
-  private queueBulletin(stage: AutomationStage, plannedReadyAtMs: number): void {
+  private queueBulletin(stage: AutomationStage, plannedReadyAtMs: number, protectionPlayerId?: string): void {
     const name = stage.displayName ?? `${stage.mode.toUpperCase()}${stage.map}`;
-    this.queueActionForStage("bulletin", stage, `${name} 将在 ${formatUtc8Time(this.wallClockOriginMs + plannedReadyAtMs)} 发令`);
+    const protectionContext = protectionPlayerId ? `（玩家：${protectionPlayerId}，起跑保护改期）` : "";
+    const suffix = this.startProtectionUsedStageIds.has(stage.id) ? START_PROTECTION_USED_SUFFIX : "";
+    this.queueActionForStage("bulletin", stage, `${name} 将在 ${formatUtc8Time(this.wallClockOriginMs + plannedReadyAtMs)} 发令${protectionContext}${suffix}`);
   }
 
   private queueDueReadyNotice(): void {
@@ -887,10 +999,11 @@ export class CompetitionController {
     if (this.clock.now() < this.plannedReadyAtMs - READY_NOTICE_LEAD_MS) return;
     const stage = this.plannedReadyStage;
     const name = stage.displayName ?? `${stage.mode.toUpperCase()}${stage.map}`;
+    const suffix = this.startProtectionUsedStageIds.has(stage.id) ? START_PROTECTION_USED_SUFFIX : "";
     this.noticeActionId = this.queueActionForStage(
       "notice",
       stage,
-      `${name} 1 分钟后即将发令，请提前做好重启游戏等准备，避免影响发令流程。`
+      `${name} 1 分钟后即将发令，请提前做好重启游戏等准备，避免影响发令流程。${suffix}`
     ).id;
   }
 
@@ -921,7 +1034,7 @@ export class CompetitionController {
     if (includeAutomation && !this.automationEnabled) blockers.push({ code: "AUTOMATION_PAUSED", severity: "critical", autoRecoverable: false, suggestion: "由裁判核对现场后恢复自动化" });
     for (const participantId of this.participantIds) {
       if (this.absent.has(participantId)) continue;
-      if (!this.online.get(participantId)) blockers.push({ code: "PARTICIPANT_OFFLINE", severity: "warning", autoRecoverable: true, participantId, suggestion: "等待选手重连并保持稳定在线" });
+      if (!this.online.get(participantId) && !this.ignoredProtectionOfflineParticipants.has(participantId)) blockers.push({ code: "PARTICIPANT_OFFLINE", severity: "warning", autoRecoverable: true, participantId, suggestion: "等待选手重连并保持稳定在线" });
       if (this.cheat.get(participantId)) blockers.push({ code: "PARTICIPANT_CHEAT", severity: "critical", autoRecoverable: true, participantId, suggestion: "关闭该选手 cheat 后重新检查" });
     }
     if (this.actions.some((action) => action.status === "failed" || action.status === "uncertain")) blockers.push({ code: "COMMAND_UNCONFIRMED", severity: "critical", autoRecoverable: false, suggestion: "核对服务器现场与命令审计，禁止自动补发" });

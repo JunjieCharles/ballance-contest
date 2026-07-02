@@ -1227,7 +1227,9 @@ export class CompetitionService {
         !refereeActionsUnlocked ? "请先发布比赛配置" : !hasRuntime ? "请先启动运行" : "当前阶段或流程阻断不允许发送手动 Ready"),
       descriptor("cheat-off", "关闭 cheat", "只发送一次关闭 cheat 命令；成功回显将作为目标关手动发令的前置证据，不改变计划。", refereeActionsUnlocked && hasRuntime && !["review", "incident"].includes(phase) && !hasUnconfirmedAutomationActions,
         !refereeActionsUnlocked ? "请先发布比赛配置" : !hasRuntime ? "请先启动运行" : "当前阶段不可发送"),
-      descriptor("manual-go", "手动发令", "不等待计划时间并立即触发真实 3/2/1；只有权威 Go 回显后才创建尝试和设置本关时间。",
+      descriptor("manual-go", "手动发令", phase === "restart-preparing"
+        ? "先执行本次重发令所需的一次 forcenextrestart，确认后立即触发真实 3/2/1；只有权威 Go 后才创建尝试和设置本关时间。"
+        : "不等待计划时间并立即触发真实 3/2/1；只有权威 Go 回显后才创建尝试和设置本关时间。",
         refereeActionsUnlocked && hasRuntime && !["countdown", "running", "review", "incident"].includes(phase) && cheatOffConfirmed && !hasPendingCommands && !hasBlockingIssue,
         !refereeActionsUnlocked ? "请先发布比赛配置" : !hasRuntime ? "请先启动运行" : !cheatOffConfirmed ? "目标关尚无关闭 cheat 成功回显" : hasPendingCommands ? "仍有命令等待回显" : "存在离线、cheat、权限或未决命令阻断"),
       descriptor("delay-ready", "Ready 延后 1 分钟", "将下一次已安排的 Ready 时间顺延 1 分钟。", refereeActionsUnlocked && snapshot?.plannedReadyAtMs !== undefined && ["preparing", "pre-start-wait", "tail-intake", "restart-preparing"].includes(phase),

@@ -69,8 +69,9 @@
 - 命令队列必须在写入 stdin 前建立回显观察，防止同步或极快回显落入观察空窗。恢复 `sent` 命令前应先核对已持久化的权威回显和尝试；已有充分执行证据的 Go 应恢复为 `acknowledged`，不能误报 `uncertain`。
 - 发布配置后的工作 MockClient 首次连接成功时，按发布顺序一次性发送全部自制图名称映射 `setmap <完整MD5> 0 <地图名>`；同一 MockClient 运行中不得因 Ready、重赛或手动发令重复发送。
 - 命令反馈精确文本 `Action failed: you don't have the permission to run this action.` 时，必须立即标记失败、阻断自动化并明确报告 `ContestConsole` 权限不足。
-- 自动及人工改动第一条 Ready 计划时，Bulletin 固定为 `关卡名 将在 HH:mm 发令`，`HH:mm` 按 UTC+8 计算但不显示日期或时区；下一 Ready 与 Bulletin 使用同一个第一条 Get ready 计划源。第一条 Ready 前一分钟的 Notice 必须使用已约定的完整句子，不得改成“下一轮”或其他相对描述。
+- 自动及人工改动第一条 Ready 计划时，普通 Bulletin 固定为 `关卡名 将在 HH:mm 发令`，`HH:mm` 按 UTC+8 计算但不显示日期或时区；下一 Ready 与 Bulletin 使用同一个第一条 Get ready 计划源。起跑保护更正 Bulletin 还要注明玩家，并与保护用后的 T-60 Notice 一样在业务消息中保存真实换行和完整后缀 `本关起跑保护已被使用，后续不再延时。`，不得在状态/界面中写成 `\\n` 字符；MockClient stdin 适配器须按上游通知协议把真实换行编码为单个 `\n` 转义，确保仍只写一条命令。第一条 Ready 前一分钟的 Notice 必须使用已约定的完整句子，不得改成“下一轮”或其他相对描述。
 - “手动 Ready”和“关闭 cheat”只发送单次命令，不得改变阶段、计划、Bulletin 或自动步骤进度；关闭 cheat 的成功回显必须绑定目标关和当前发令周期，重赛不得沿用旧尝试证据。手动 Go 不依赖 Ready 序列或计划时间，但必须无 cheat、权限/连接/命令阻断；只有权威 Go 后才以尝试中的真实 `goAt` 写入发令和最晚结束时间，不能使用倒数命令发送时刻。
+- 起跑保护按关卡只可消费一次，敏感期从第一条 Ready 到权威 Go 后 15 秒。首次掉线/fatal error 固定把第一条 Ready 改为事件后 2 分钟，不因提前重连缩短；Go 后自动作废尝试和有效榜但不造 DNF，下一倒数前一次 `forcenextrestart`。同关后续敏感期事件只记录；实服 `was kicked by the server (fatal error) and crashed subsequently.` 与紧随 disconnect 必须去重，保护使用记录要随运行快照恢复。
 - 参赛者不得成为发布前置名单：工作模式按游戏内玩家名称从 login、disconnect 和定期 `list` 自动登记，数字连接 ID 仅作连接历史，`*` 旁观者排除。
 - 游戏内玩家 ID 与排行榜显示名必须解耦；显示名映射只影响展示和导出，不得改变成绩归属、尝试或计分哈希。
 - 仅依赖增量上下线会漏掉服务启动前已在线玩家；工作模式启动后必须立即并定期执行只读 `list` 对账。解析和确认必须同时覆盖旧式 `N player(s) online` 列表头，以及实服“逐客户端行 + 末尾玩家/旁观者汇总”格式；不得假设汇总一定先于列表项出现。

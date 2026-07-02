@@ -59,9 +59,9 @@ describe("P0 centralized automation and command regression", () => {
     const clock = new ManualClock();
     const controller = makeController(clock);
     putEveryoneOnline(controller);
-    controller.enable(0);
+    controller.enable(60_000);
     settle(controller);
-    expect(controller.snapshot()).toMatchObject({ phase: "ready", attempts: [] });
+    expect(controller.snapshot()).toMatchObject({ phase: "preparing", attempts: [] });
 
     controller.observeConnection("p2", false);
     expect(controller.snapshot()).toMatchObject({ phase: "pre-start-wait", waitingParticipants: ["p2"] });

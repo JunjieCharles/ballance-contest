@@ -49,6 +49,7 @@ export const parseLogLine = (input: string, context: ParseContext): ParsedLogLin
     const modernListed = /^(\d+):\s+(.+?)\s+(-?\d+)ms(?:\s+(\[CHEAT\]))?$/.exec(body);
     const login = /^(.*?) \(#(\d+)\) logged in with cheat mode (on|off)\.$/.exec(body);
     const disconnect = /^(.*?) \(#(\d+)\) disconnected\.$/.exec(body);
+    const fatalError = /^(.*?) was kicked by the server \(fatal error\) and crashed subsequently\.$/.exec(body);
     const listed = /^(.*?) \(#(\d+)\)( \[CHEAT\])?$/.exec(body);
     const readyOrGo = /^\[(\d+), (.*?)\]: Level (\d{2}) - (Get ready|3|2|1|Go!)$/.exec(body);
     const customReadyOrGo = /^\[(\d+), (.*?)\]: "([^"]+)" - (Get ready|3|2|1|Go!)$/.exec(body);
@@ -83,6 +84,8 @@ export const parseLogLine = (input: string, context: ParseContext): ParsedLogLin
       };
     } else if (login) {
       event = { ...metadata, type: "player-login", playerName: login[1] ?? "", connectionId: login[2] ?? "", cheat: login[3] === "on" };
+    } else if (fatalError) {
+      event = { ...metadata, type: "fatal-error", playerName: fatalError[1] ?? "", message: body };
     } else if (disconnect) {
       event = { ...metadata, type: "player-disconnect", playerName: disconnect[1] ?? "", connectionId: disconnect[2] ?? "" };
     } else if (listed) {

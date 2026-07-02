@@ -19,6 +19,7 @@ export type DomainEvent =
   | (EventMetadata & { type: "player-login"; connectionId: string; playerName: string; cheat: boolean })
   | (EventMetadata & { type: "player-listed"; connectionId: string; playerName: string; cheat: boolean })
   | (EventMetadata & { type: "player-disconnect"; connectionId: string; playerName: string })
+  | (EventMetadata & { type: "fatal-error"; playerName: string; message: string })
   | (EventMetadata & EventMapReference & { type: "ready"; connectionId: string; refereeName: string })
   | (EventMetadata & EventMapReference & { type: "countdown"; connectionId: string; refereeName: string; value: 3 | 2 | 1 })
   | (EventMetadata & EventMapReference & { type: "go"; connectionId: string; refereeName: string })

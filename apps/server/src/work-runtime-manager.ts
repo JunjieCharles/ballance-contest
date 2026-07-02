@@ -167,7 +167,10 @@ export class WorkRuntimeManager {
         };
       }),
       policy: automationPolicyFor(config),
-      wallClockOriginMs: Date.now() - performance.now()
+      wallClockOriginMs: Date.now() - performance.now(),
+      ...(this.host.getPayload(competitionId).work?.automation?.startProtectionUsedStageIds === undefined
+        ? {}
+        : { startProtectionUsedStageIds: this.host.getPayload(competitionId).work?.automation?.startProtectionUsedStageIds })
     }, new SystemMonotonicClock());
     const commands = new CommandQueue(
       transport,
@@ -209,6 +212,7 @@ export class WorkRuntimeManager {
     try {
       runtime.controller.tick();
       this.mirrorSystemResults(runtime);
+      this.mirrorVoidedAttempts(runtime);
       const records = await runtime.runtime.dispatch();
       const snapshot = runtime.controller.snapshot();
       this.host.completeCompetitionOnReview(runtime.competitionId, snapshot);
@@ -278,6 +282,20 @@ export class WorkRuntimeManager {
     if (changed) this.host.saveScoreboards(runtime.competitionId, runtime.engine.snapshot().scoreboardVersions);
   }
 
+  public mirrorVoidedAttempts(runtime: WorkRuntime): void {
+    const engineAttempts = runtime.engine.snapshot().attempts;
+    let changed = false;
+    for (const attempt of runtime.controller.snapshot().attempts) {
+      if (!attempt.voided) continue;
+      const engineAttempt = engineAttempts.find((candidate) =>
+        candidate.stageId === attempt.stageId && candidate.attemptNumber === attempt.attemptNumber && !candidate.voided);
+      if (!engineAttempt) continue;
+      runtime.engine.voidAttempt(attempt.stageId, attempt.attemptNumber, `start-protection:${attempt.id}`);
+      changed = true;
+    }
+    if (changed) this.host.saveScoreboards(runtime.competitionId, runtime.engine.snapshot().scoreboardVersions);
+  }
+
   public async remove(competitionId: string): Promise<void> {
     const runtime = this.runtimes.get(competitionId);
     if (!runtime) return;
@@ -306,6 +324,7 @@ export class WorkRuntimeManager {
     const parsed = parseLogLine(line, { year: Number(config.date.slice(0, 4)), utcOffsetMinutes: utcOffsetMinutes(config.timezone) });
     if (parsed.event.type === "connected") void this.registerPublishedCustomMaps(runtime, config).catch(() => undefined);
     if (parsed.event.type === "permission-denied") runtime.controller.observePermissionDenied(parsed.event.message);
+    if (parsed.event.type === "fatal-error") this.handleFatalError(runtime, parsed.event);
     const before = runtime.controller.snapshot();
     const currentStage = config.stages.find((candidate) => candidate.id === before.currentStageId);
     this.bindOfficialMapEcho(runtime, config, parsed.event, before);
@@ -366,6 +385,7 @@ export class WorkRuntimeManager {
       }
       this.host.saveScoreboards(runtime.competitionId, runtime.engine.snapshot().scoreboardVersions);
     }
+    this.mirrorVoidedAttempts(runtime);
     if (parsed.event.type === "player-listed") this.recordListParticipant(runtime, parsed.event.playerName);
     this.host.completeCompetitionOnReview(runtime.competitionId, runtime.controller.snapshot());
     this.host.journal.append({ type: "work.log", competitionId: runtime.competitionId, data: parsed });
@@ -438,6 +458,23 @@ export class WorkRuntimeManager {
     this.observeParticipant(runtime.competitionId, participant.id, participant.connectionIds.at(-1) ?? participant.id, true, "excluded");
     this.host.recordExclusionAttention(runtime.competitionId, stage.id, participant.id, sourceId, event.message);
     this.host.saveScoreboards(runtime.competitionId, runtime.engine.snapshot().scoreboardVersions);
+  }
+
+  private handleFatalError(runtime: WorkRuntime, event: Extract<DomainEvent, { type: "fatal-error" }>): void {
+    const config = this.host.getDraftConfig(runtime.competitionId);
+    const existing = config.participants.find((participant) =>
+      participant.id.toLocaleLowerCase("en-US") === event.playerName.trim().toLocaleLowerCase("en-US"));
+    const participant = this.observeParticipant(
+      runtime.competitionId,
+      event.playerName,
+      existing?.connectionIds.at(-1) ?? event.playerName,
+      false
+    );
+    if (!participant) return;
+    runtime.controller.registerParticipant(participant.id);
+    runtime.engine.registerPlayer(participant.id, participant.displayName);
+    runtime.controller.observeCrash(participant.id, event.message);
+    runtime.controller.observeConnection(participant.id, false);
   }
 
   private bindOfficialMapEcho(runtime: WorkRuntime, config: CompetitionConfig, event: DomainEvent, snapshot: AutomationSnapshot): void {

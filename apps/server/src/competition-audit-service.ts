@@ -91,14 +91,16 @@ export class CompetitionAuditService {
         occurredAt: new Date().toISOString(),
         ...(blocker.participantId ? { participantIds: [blocker.participantId] } : {})
       })),
-      ...(snapshot?.incidents ?? []).filter((incident) => (incident as { status?: string }).status === "open").map((incident) => {
-        const value = incident as { id: string; type: string; evidence: string; participantIds: readonly string[]; createdAtMs: number };
+      ...(snapshot?.incidents ?? []).filter((incident) =>
+        (incident as { status?: string }).status === "open" || incident.type === "protected-crash").map((incident) => {
+        const value = incident as { id: string; type: string; status?: string; evidence: string; participantIds: readonly string[]; createdAtMs: number };
+        const automaticProtection = value.type === "protected-crash" && value.status === "resolved";
         return {
           id: `incident:${value.id}`,
           category: "incident" as const,
-          severity: "critical" as const,
-          title: "待处理事故",
-          message: `${value.type}：${value.evidence}`,
+          severity: automaticProtection ? "warning" as const : "critical" as const,
+          title: automaticProtection ? "起跑保护已自动执行" : "待处理事故",
+          message: automaticProtection ? `尝试已按规则自动处理；证据：${value.evidence}` : `${value.type}：${value.evidence}`,
           occurredAt: new Date().toISOString(),
           ...(value.participantIds.length ? { participantIds: value.participantIds } : {})
         };

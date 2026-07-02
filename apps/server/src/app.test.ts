@@ -314,9 +314,27 @@ describe("local API", () => {
     const runId = run.json<{ data: { runId: string } }>().data.runId;
     await app.inject({ method: "POST", url: `/api/v1/competitions/${competitionId}/automation/enable`, headers: auth(token), payload: { runId } });
     const advanced = await app.inject({ method: "POST", url: `/api/v1/competitions/${competitionId}/test-runs/${runId}/automation/advance`, headers: auth(token), payload: { milliseconds: 218_000 } });
-    expect(advanced.json()).toMatchObject({ data: { phase: "incident", incidents: [expect.objectContaining({ type: "protected-crash", recommendedRestart: true })] } });
+    expect(advanced.json()).toMatchObject({
+      data: {
+        phase: "restart-preparing",
+        startProtectionUsedStageIds: [expect.any(String)],
+        attempts: [expect.objectContaining({ attemptNumber: 1, intakeOpen: false, voided: true })],
+        incidents: [expect.objectContaining({ type: "protected-crash", recommendedRestart: false, status: "resolved" })],
+        actions: expect.arrayContaining([
+          expect.objectContaining({
+            kind: "bulletin",
+            message: expect.stringContaining("\n本关起跑保护已被使用，后续不再延时。")
+          })
+        ])
+      }
+    });
     const snapshot = await app.inject({ method: "GET", url: `/api/v1/competitions/${competitionId}/snapshot`, headers: auth(token) });
-    expect(snapshot.json()).toMatchObject({ data: { runtime: { attentionItems: expect.arrayContaining([expect.objectContaining({ title: "场景故障已触发" })]) } } });
+    expect(snapshot.json()).toMatchObject({ data: { runtime: { attentionItems: expect.arrayContaining([
+      expect.objectContaining({ title: "场景故障已触发" }),
+      expect.objectContaining({ title: "起跑保护已自动执行" })
+    ]) } } });
+    expect(snapshot.json<{ data: { runtime: { attentionItems: Array<{ title: string }> } } }>().data.runtime.attentionItems)
+      .not.toContainEqual(expect.objectContaining({ title: "待处理事故" }));
     expect((await app.inject({ method: "POST", url: `/api/v1/competitions/${competitionId}/test-runs/${runId}/faults`, headers: auth(token), payload: { fault: "player-crash" } })).statusCode).toBe(404);
   });
 

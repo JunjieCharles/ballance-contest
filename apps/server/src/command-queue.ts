@@ -31,6 +31,11 @@ const cleanText = (text: string): string => {
   return text.trim();
 };
 
+const cleanNotificationText = (text: string): string => {
+  if (text.includes("\r") || text.length > 500) throw new Error("Notification text contains invalid control characters or is too long");
+  return text.trim().replaceAll("\\", "\\\\").replaceAll("\n", "\\n");
+};
+
 const mapEchoMatches = (line: string, map: string, mapName?: string): boolean => {
   const target = map.trim().toLowerCase();
   const official = /^level\s+(\d+)$/.exec(target);
@@ -70,7 +75,7 @@ const encode = (action: CommandAction): { command: string; critical: boolean; ac
       };
     }
     case "notification": return {
-      command: `${action.channel} ${cleanText(action.text)}`,
+      command: `${action.channel} ${cleanNotificationText(action.text)}`,
       critical: false,
       acknowledge: (line) => line.includes(action.text) || line.includes(`[${action.channel === "announce" ? "Announcement" : action.channel === "notice" ? "Notice" : "Bulletin"}]`) || /success/i.test(line)
     };
