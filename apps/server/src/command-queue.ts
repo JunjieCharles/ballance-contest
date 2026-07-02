@@ -72,14 +72,14 @@ const encode = (action: CommandAction): { command: string; critical: boolean; ac
         critical: false,
         // setmap has no success echo, but its permission failure is asynchronous.
         // Keep a short observation window before treating the accepted stdin write as success.
-        acknowledgeAfterWriteMs: 250,
+        acknowledgeAfterWriteMs: 500,
         acknowledge: () => false
       };
     }
     case "set-official-map": return {
       command: `setmap level ${action.level} ${cleanText(action.displayName)}`,
       critical: false,
-      acknowledgeAfterWriteMs: 250,
+      acknowledgeAfterWriteMs: 500,
       acknowledge: () => false
     };
     case "notification": return {
@@ -93,7 +93,7 @@ const encode = (action: CommandAction): { command: string; critical: boolean; ac
     case "force-next-restart": return {
       command: "forcenextrestart",
       critical: true,
-      acknowledgeAfterWriteMs: 250,
+      acknowledgeAfterWriteMs: 500,
       acknowledge: () => false
     };
     case "listmap": {
