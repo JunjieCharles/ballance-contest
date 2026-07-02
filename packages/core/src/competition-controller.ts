@@ -324,7 +324,7 @@ export class CompetitionController {
     if (!online && this.isStartProtectionSensitive()) {
       this.ignoredProtectionOfflineParticipants.add(participantId);
       if (!this.startProtectionUsedStageIds.has(this.stage.id)) {
-        this.triggerStartProtection(participantId, "掉线", `起跑敏感期掉线：${participantId}`);
+        this.triggerStartProtection(participantId, `起跑敏感期掉线：${participantId}`);
       }
       this.bump();
       return;
@@ -387,7 +387,7 @@ export class CompetitionController {
   public observeCrash(participantId: string, evidence: string): void {
     this.assertParticipant(participantId);
     if (!this.isStartProtectionSensitive()) return;
-    if (!this.startProtectionUsedStageIds.has(this.stage.id)) this.triggerStartProtection(participantId, "fatal error", evidence);
+    if (!this.startProtectionUsedStageIds.has(this.stage.id)) this.triggerStartProtection(participantId, evidence);
     this.bump();
   }
 
@@ -892,7 +892,7 @@ export class CompetitionController {
     return this.startProtectionUntilMs === undefined || this.clock.now() <= this.startProtectionUntilMs;
   }
 
-  private triggerStartProtection(participantId: string, eventLabel: string, evidence: string): void {
+  private triggerStartProtection(participantId: string, evidence: string): void {
     const now = this.clock.now();
     const attempt = this.currentAttempt;
     const postGo = Boolean(attempt?.intakeOpen && now <= attempt.goAtMs + this.policy.protectionWindowMs);
@@ -900,7 +900,7 @@ export class CompetitionController {
     const stage = this.stage;
     const name = stage.displayName ?? `${stage.mode.toUpperCase()}${stage.map}`;
     const readyTime = formatUtc8Time(this.wallClockOriginMs + plannedReadyAtMs);
-    const eventText = eventLabel === "掉线" ? "掉线" : `发生 ${eventLabel}`;
+    const eventText = "掉线";
     this.startProtectionUsedStageIds.add(stage.id);
     this.cancelPendingLaunchActions(stage.id);
     this.incidents.push({
