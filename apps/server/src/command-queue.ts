@@ -6,6 +6,7 @@ export type CommandStatus = "queued" | "sent" | "acknowledged" | "failed" | "tim
 export type CommandAction =
   | { type: "list" }
   | { type: "set-map"; mapHash: string; displayName: string }
+  | { type: "set-official-map"; level: number; displayName: string }
   | { type: "notification"; channel: NotificationChannel; text: string }
   | { type: "ready"; map: string; mapName?: string; mode: "sr" | "hs" }
   | { type: "cheat-off" }
@@ -40,7 +41,7 @@ const mapEchoMatches = (line: string, map: string, mapName?: string): boolean =>
   const target = map.trim().toLowerCase();
   const official = /^level\s+(\d+)$/.exec(target);
   if (official) {
-    const levelEcho = /Level\s+(\d+)\s+-/i.exec(line);
+    const levelEcho = /Level[\s_]+(\d+)\s+-/i.exec(line);
     if (levelEcho) return Number(levelEcho[1]) === Number(official[1]);
     return /:\s*[0-9a-f]+\.\.\s+-/i.test(line);
   }
@@ -74,6 +75,12 @@ const encode = (action: CommandAction): { command: string; critical: boolean; ac
         acknowledge: () => false
       };
     }
+    case "set-official-map": return {
+      command: `setmap level ${action.level} ${cleanText(action.displayName)}`,
+      critical: false,
+      acknowledgeAfterWriteMs: 250,
+      acknowledge: () => false
+    };
     case "notification": return {
       command: `${action.channel} ${cleanNotificationText(action.text)}`,
       critical: false,
@@ -82,7 +89,12 @@ const encode = (action: CommandAction): { command: string; critical: boolean; ac
     case "ready": return { command: `countdown ${cleanText(action.map)} ${action.mode} 4`, critical: false, acknowledge: (line) => /Get ready$/.test(line) && mapEchoMatches(line, action.map, action.mapName) };
     case "cheat-off": return { command: "cheat off", critical: false, acknowledge: (line) => /cheat.*off/i.test(line) };
     case "go": return { command: `countdown ${cleanText(action.map)} ${action.mode}`, critical: true, acknowledge: (line) => / - Go!$/.test(line) && mapEchoMatches(line, action.map, action.mapName) };
-    case "force-next-restart": return { command: "forcenextrestart", critical: true, acknowledge: (line) => /force.*restart|success/i.test(line) };
+    case "force-next-restart": return {
+      command: "forcenextrestart",
+      critical: true,
+      acknowledgeAfterWriteMs: 250,
+      acknowledge: () => false
+    };
     case "scores": return { command: `scores ${action.mode} ${cleanText(action.map)}`, critical: false, acknowledge: (line) => /place|score|ranking/i.test(line) };
     case "kick": return { command: `kick ${cleanText(action.playerName)} ${cleanText(action.reason)}`, critical: true, acknowledge: (line) => /kick|disconnect|success/i.test(line) };
     case "raw": return { command: cleanText(action.command), critical: true, acknowledge: (line) => /success|error|warning|ready|go|disconnect/i.test(line) };

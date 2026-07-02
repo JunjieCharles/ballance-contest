@@ -1100,7 +1100,7 @@ export class CompetitionService {
         id: `recovered-command:${item.id}`,
         category: "command",
         severity: "critical",
-        title: "重启前命令结果不确定",
+        title: "命令结果待核实",
         message: `${recovered.command}；不会自动重试，请裁判核对现场。`,
         occurredAt: recovered.updatedAt
       });

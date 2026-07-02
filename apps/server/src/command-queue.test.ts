@@ -21,10 +21,10 @@ describe("CommandQueue", () => {
     expect(transport.writes).toEqual(["list", "countdown level 1 sr"]);
   });
 
-  it("marks an unconfirmed critical command uncertain without retry", async () => {
+  it("acknowledges forcenextrestart after write without server echo", async () => {
     const transport = new FakeTransport();
     const queue = new CommandQueue(transport, 5);
-    expect((await queue.enqueue({ type: "force-next-restart" }, "critical")).status).toBe("uncertain");
+    expect((await queue.enqueue({ type: "force-next-restart" }, "critical")).status).toBe("acknowledged");
     expect(transport.writes).toEqual(["forcenextrestart"]);
   });
 
@@ -60,6 +60,21 @@ describe("CommandQueue", () => {
       mapHash: "e90b2f535c8bf881e9cb83129fba241d",
       displayName: "Contest Map With Spaces"
     }, "set-map-denied")).status).toBe("failed");
+  });
+
+  it("sends setmap for official maps with zero-padded level label", async () => {
+    const transport = new FakeTransport();
+    const queue = new CommandQueue(transport, 100);
+    const result = await queue.enqueue({ type: "set-official-map", level: 3, displayName: "Level_03" }, "official-map");
+    expect(result.status).toBe("acknowledged");
+    expect(transport.writes).toEqual(["setmap level 3 Level_03"]);
+  });
+
+  it("matches official map echo after setmap registration with Level_0N format", async () => {
+    const transport = new FakeTransport();
+    const queue = new CommandQueue(transport, 100);
+    transport.onWrite = () => setTimeout(() => queue.observeLine("[7, *ContestConsole]: Level_03 - Go!"), 0);
+    expect((await queue.enqueue({ type: "go", map: "level 3", mode: "sr" }, "level3-with-underscore-go")).status).toBe("acknowledged");
   });
 
   it("acknowledges list from the current trailing summary format", async () => {

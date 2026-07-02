@@ -397,13 +397,23 @@ export class WorkRuntimeManager {
     if (runtime.customMapRegistration) return runtime.customMapRegistration;
     runtime.customMapRegistration = (async () => {
       for (const stage of [...config.stages].sort((left, right) => left.order - right.order)) {
-        if (stageMapKind(stage) !== "custom" || !stage.mapHash) continue;
-        const record = await runtime.commands.enqueue({
-          type: "set-map",
-          mapHash: stage.mapHash,
-          displayName: stageDisplayName(stage)
-        }, `custom-map:${runtime.competitionId}:${stage.id}:${stage.mapHash.toLowerCase()}`);
-        if (record.status !== "acknowledged") throw new Error(`Custom map registration failed for ${stageDisplayName(stage)}`);
+        if (stageMapKind(stage) === "official") {
+          const label = `Level_${String(stage.level).padStart(2, "0")}`;
+          const record = await runtime.commands.enqueue({
+            type: "set-official-map",
+            level: stage.level,
+            displayName: label
+          }, `official-map:${runtime.competitionId}:${stage.id}:${stage.level}`);
+          if (record.status !== "acknowledged") throw new Error(`Official map registration failed for ${label}`);
+        }
+        if (stageMapKind(stage) === "custom" && stage.mapHash) {
+          const record = await runtime.commands.enqueue({
+            type: "set-map",
+            mapHash: stage.mapHash,
+            displayName: stageDisplayName(stage)
+          }, `custom-map:${runtime.competitionId}:${stage.id}:${stage.mapHash.toLowerCase()}`);
+          if (record.status !== "acknowledged") throw new Error(`Custom map registration failed for ${stageDisplayName(stage)}`);
+        }
       }
       runtime.customMapsRegistered = true;
     })().catch((error) => {

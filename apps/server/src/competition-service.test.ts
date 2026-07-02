@@ -372,7 +372,7 @@ describe("CompetitionService dynamic participants", () => {
 
     const restored = new CompetitionService(undefined, { database, dataRoot }).snapshot(record.id);
     expect(restored.runtime.commands).toContainEqual(expect.objectContaining({ id: "sent-command", status: "uncertain" }));
-    expect(restored.runtime.attentionItems).toContainEqual(expect.objectContaining({ title: "重启前命令结果不确定", severity: "critical" }));
+    expect(restored.runtime.attentionItems).toContainEqual(expect.objectContaining({ title: "命令结果待核实", severity: "critical" }));
     expect(restored.runtime.automationEnabled).toBe(false);
   });
 
@@ -399,7 +399,7 @@ describe("CompetitionService dynamic participants", () => {
 
     const restored = new CompetitionService(undefined, { database, dataRoot }).snapshot(record.id);
     expect(restored.runtime.commands).toContainEqual(expect.objectContaining({ id: "sent-go", status: "acknowledged" }));
-    expect(restored.runtime.attentionItems).not.toContainEqual(expect.objectContaining({ title: "重启前命令结果不确定" }));
+    expect(restored.runtime.attentionItems).not.toContainEqual(expect.objectContaining({ title: "命令结果待核实" }));
   });
 
   it("reads legacy stages as official maps without rewriting immutable published snapshots", () => {
