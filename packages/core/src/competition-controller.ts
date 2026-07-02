@@ -1003,7 +1003,7 @@ export class CompetitionController {
     this.noticeActionId = this.queueActionForStage(
       "notice",
       stage,
-      `${name} 1 分钟后即将发令，请提前做好重启游戏等准备，避免影响发令流程。${suffix}`
+      `${name} 即将在 1 分钟后发令，请提前做好重启游戏等准备，避免影响发令流程。${suffix}`
     ).id;
   }
 

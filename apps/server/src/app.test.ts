@@ -172,7 +172,7 @@ describe("local API", () => {
     const logsAfterFlow = (await app.inject({ method: "GET", url: `/api/v1/competitions/${competitionId}/logs/raw?limit=50`, headers: auth(token) }))
       .json<{ data: Array<{ rawLine: string }> }>().data.map((line) => line.rawLine);
     expect(logsAfterFlow).toContainEqual(expect.stringMatching(/\[Bulletin\].*SR1 将在 \d{2}:\d{2} 发令$/));
-    expect(logsAfterFlow).toContainEqual(expect.stringContaining("SR1 1 分钟后即将发令，请提前做好重启游戏等准备，避免影响发令流程。"));
+    expect(logsAfterFlow).toContainEqual(expect.stringContaining("SR1 即将在 1 分钟后发令，请提前做好重启游戏等准备，避免影响发令流程。"));
 
     expect((await app.inject({
       method: "POST", url: `/api/v1/competitions/${competitionId}/actions`, headers: auth(token),

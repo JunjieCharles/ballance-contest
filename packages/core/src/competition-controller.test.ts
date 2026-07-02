@@ -66,7 +66,7 @@ describe("CompetitionController", () => {
     const initialActions = controller.drainActions();
     const notice = initialActions.find((item) => item.kind === "notice");
     let current = initialActions.find((item) => item.kind === "ready");
-    expect(notice?.message).toBe("第一关 1 分钟后即将发令，请提前做好重启游戏等准备，避免影响发令流程。");
+    expect(notice?.message).toBe("第一关 即将在 1 分钟后发令，请提前做好重启游戏等准备，避免影响发令流程。");
     if (!notice || !current) throw new Error("Missing initial Notice or Ready");
     controller.acknowledgeAction(notice.id, "acknowledged");
     expect(current.createdAtMs).toBe(0);
@@ -347,7 +347,7 @@ describe("CompetitionController", () => {
     clock.set(60_000);
     controller.tick();
     const notice = action(controller, "notice");
-    expect(notice.message).toBe("第一关 1 分钟后即将发令，请提前做好重启游戏等准备，避免影响发令流程。\n本关起跑保护已被使用，后续不再延时。");
+    expect(notice.message).toBe("第一关 即将在 1 分钟后发令，请提前做好重启游戏等准备，避免影响发令流程。\n本关起跑保护已被使用，后续不再延时。");
     expect(notice.message).toContain("\n");
     expect(notice.message).not.toContain("\\n");
     controller.acknowledgeAction(notice.id, "acknowledged");
