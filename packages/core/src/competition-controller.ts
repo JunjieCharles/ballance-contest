@@ -255,6 +255,8 @@ export class CompetitionController {
   private readyAnnouncementActionId: string | undefined;
   private cheatOffActionId: string | undefined;
   private cheatWarningSent = false;
+  private readonly cheatEnabledAtMs = new Map<string, number>();
+  private lastCheatOffAcknowledgedAtMs: number | undefined;
   private forceRestartActionId: string | undefined;
   private goActionId: string | undefined;
   private manualFlow = false;
@@ -361,6 +363,7 @@ export class CompetitionController {
     const previous = this.cheat.get(participantId) ?? false;
     if (previous === enabled) return;
     this.cheat.set(participantId, enabled);
+    if (enabled) this.cheatEnabledAtMs.set(participantId, this.clock.now());
     const attempt = this.currentAttempt;
     if (enabled && attempt?.intakeOpen && (this.phase === "running" || this.phase === "tail-intake") && !attempt.results.some((result) => result.playerId === participantId)) {
       this.acceptResult(attempt, { playerId: participantId, status: "excluded", sourceId, receivedAtMs: this.clock.now(), reason: "cheat-enabled" });
@@ -370,6 +373,17 @@ export class CompetitionController {
       this.queueAction("notice", "检测到有玩家开启了cheat，请在发令前及时关闭，发令后仍开启视作违规。");
     }
     this.bump();
+  }
+
+  private sendCheatStaleNotice(): void {
+    if (this.cheatWarningSent) return;
+    for (const participantId of this.participantIds) {
+      if (this.cheat.get(participantId)) {
+        this.cheatWarningSent = true;
+        this.queueAction("notice", "检测到有玩家开启了cheat，请在发令前及时关闭，发令后仍开启视作违规。");
+        return;
+      }
+    }
   }
 
   public observeViolation(participantId: string, sourceId: string, reason: string): void {
@@ -577,6 +591,10 @@ export class CompetitionController {
       return;
     }
     action.acknowledgedAtMs = this.clock.now();
+    if (action.kind === "cheat-off") {
+      this.lastCheatOffAcknowledgedAtMs = this.clock.now();
+      this.sendCheatStaleNotice();
+    }
     if (action.kind === "go") this.startAttemptForStage(action.stageId);
     this.bump();
   }
@@ -816,6 +834,7 @@ export class CompetitionController {
     this.readyActionIds.length = 0;
     this.readyAnnouncementActionId = undefined;
     this.cheatOffActionId = undefined;
+    this.lastCheatOffAcknowledgedAtMs = undefined;
     const readyAction = this.queueAction("ready");
     this.readyActionIds.push(readyAction.id);
     this.readyActionId = readyAction.id;
@@ -852,7 +871,7 @@ export class CompetitionController {
     this.forceRestartActionId = undefined;
     this.disconnectedDuringAttempt.clear();
     for (const participantId of this.participantIds) {
-      if (this.cheat.get(participantId)) {
+      if (this.cheat.get(participantId) && this.lastCheatOffAcknowledgedAtMs !== undefined && (this.cheatEnabledAtMs.get(participantId) ?? 0) > this.lastCheatOffAcknowledgedAtMs) {
         this.acceptResult(this.attempts[this.attempts.length - 1]!, { playerId: participantId, status: "excluded", sourceId: randomUUID(), receivedAtMs: now, reason: "cheat-enabled" });
       }
     }
