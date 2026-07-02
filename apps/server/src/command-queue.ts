@@ -89,7 +89,7 @@ const encode = (action: CommandAction): { command: string; critical: boolean; ac
     };
     case "ready": return { command: `countdown ${cleanText(action.map)} ${action.mode} 4`, critical: false, acknowledge: (line) => /Get ready$/.test(line) && mapEchoMatches(line, action.map, action.mapName) };
     case "cheat-off": return { command: "cheat off", critical: false, acknowledge: (line) => /cheat.*off/i.test(line) };
-    case "go": return { command: `countdown ${cleanText(action.map)} ${action.mode}`, critical: true, acknowledge: (line) => / - Go!$/.test(line) && mapEchoMatches(line, action.map, action.mapName) };
+    case "go": return { command: `countdown ${cleanText(action.map)} ${action.mode}`, critical: true, acknowledge: (line) => / - (?:Go!|[321])$/.test(line) && mapEchoMatches(line, action.map, action.mapName) };
     case "force-next-restart": return {
       command: "forcenextrestart",
       critical: true,
