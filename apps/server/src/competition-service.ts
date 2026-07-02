@@ -183,6 +183,7 @@ export class CompetitionService {
       workRuntimeManager: this.workRuntimeManager
     });
     this.loadCompetitions();
+    this.recoverAllSentCommands();
   }
 
   public list(): readonly CompetitionRecord[] {
@@ -917,6 +918,12 @@ export class CompetitionService {
         updatedAt: item.updated_at,
         ...(payload.activeRunId === undefined ? {} : { activeRunId: payload.activeRunId })
       });
+    }
+  }
+
+  private recoverAllSentCommands(): void {
+    if (!this.options.database) return;
+    for (const item of this.competitions.values()) {
       this.recoverSentCommands(item.id);
     }
   }
