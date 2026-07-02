@@ -1051,7 +1051,6 @@ export class CompetitionController {
     for (const participantId of this.participantIds) {
       if (this.absent.has(participantId)) continue;
       if (!this.online.get(participantId) && !this.ignoredProtectionOfflineParticipants.has(participantId)) blockers.push({ code: "PARTICIPANT_OFFLINE", severity: "warning", autoRecoverable: true, participantId, suggestion: "等待选手重连并保持稳定在线" });
-      if (this.cheat.get(participantId)) blockers.push({ code: "PARTICIPANT_CHEAT", severity: "critical", autoRecoverable: true, participantId, suggestion: "关闭该选手 cheat 后重新检查" });
     }
     if (this.actions.some((action) => action.status === "failed" || action.status === "uncertain")) blockers.push({ code: "COMMAND_UNCONFIRMED", severity: "critical", autoRecoverable: false, suggestion: "核对服务器现场与命令审计，禁止自动补发" });
     if (this.incidents.some((incident) => incident.status === "open" && incident.recommendedRestart)) blockers.push({ code: "INCIDENT_OPEN", severity: "critical", autoRecoverable: false, suggestion: "裁判选择继续或使用短时确认令牌重赛" });
