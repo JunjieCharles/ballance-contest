@@ -254,6 +254,7 @@ export class CompetitionController {
   private readonly readyActionIds: string[] = [];
   private readyAnnouncementActionId: string | undefined;
   private cheatOffActionId: string | undefined;
+  private cheatWarningSent = false;
   private forceRestartActionId: string | undefined;
   private goActionId: string | undefined;
   private manualFlow = false;
@@ -363,6 +364,10 @@ export class CompetitionController {
     const attempt = this.currentAttempt;
     if (enabled && attempt?.intakeOpen && (this.phase === "running" || this.phase === "tail-intake") && !attempt.results.some((result) => result.playerId === participantId)) {
       this.acceptResult(attempt, { playerId: participantId, status: "excluded", sourceId, receivedAtMs: this.clock.now(), reason: "cheat-enabled" });
+    }
+    if (enabled && this.phase !== "running" && this.phase !== "tail-intake" && !this.cheatWarningSent) {
+      this.cheatWarningSent = true;
+      this.queueAction("notice", "检测到有玩家开启了cheat，请在发令前及时关闭，发令后仍开启视作违规。");
     }
     this.bump();
   }
@@ -544,7 +549,7 @@ export class CompetitionController {
     }
     const cheatAcknowledgedAt = this.actionAcknowledgedAt(this.cheatOffActionId);
     if (cheatAcknowledgedAt === undefined || now < cheatAcknowledgedAt + CHEAT_CONFIRMATION_BUFFER_MS) return;
-    if (this.startBlockers().length > 0) return;
+    if (this.readyFlowBlockers().length > 0) return;
     if (this.restartPending && !this.isAcknowledged(this.forceRestartActionId)) {
       if (!this.forceRestartActionId) this.forceRestartActionId = this.queueAction("force-next-restart").id;
       return;
@@ -674,7 +679,7 @@ export class CompetitionController {
     const target = this.commandTargetStage;
     if (!this.hasCurrentCheatOffConfirmation(target.id)) throw new Error("MANUAL_GO_CHEAT_OFF_REQUIRED");
     if (this.actions.some((action) => action.status === "pending")) throw new Error("MANUAL_GO_COMMAND_PENDING");
-    if (this.startBlockers(false).length > 0) throw new Error("MANUAL_GO_BLOCKED");
+    if (this.readyFlowBlockers(false).length > 0) throw new Error("MANUAL_GO_BLOCKED");
     this.manualFlow = true;
     if (this.restartPending && !this.isAcknowledged(this.forceRestartActionId)) {
       this.pendingManualGoStageId = target.id;
@@ -837,6 +842,7 @@ export class CompetitionController {
     this.startProtectionUntilMs = now + this.policy.protectionWindowMs;
     this.countdownValue = undefined;
     this.manualFlow = false;
+    this.cheatWarningSent = false;
     this.pendingManualGoStageId = undefined;
     this.restartPending = false;
     this.forceRestartActionId = undefined;

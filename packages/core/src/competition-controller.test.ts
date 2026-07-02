@@ -185,17 +185,18 @@ describe("CompetitionController", () => {
     expect(controller.snapshot()).toMatchObject({ phase: "running", attempts: [{ goAtMs: 3_000, deadlineAtMs: 23_000 }] });
   });
 
-  it("allows the Ready flow to close cheat later but keeps manual Go blocked while a player still shows cheat", () => {
+  it("sends a cheat warning notice but does not block manual Go while a player still shows cheat", () => {
     const clock = new FakeClock();
     const controller = new CompetitionController(configuration(), clock);
     connectAll(controller);
     controller.observeCheat("p1", true, "practice-cheat");
+    expect(controller.snapshot().actions.some((action) => action.kind === "notice")).toBe(true);
     expect(() => controller.startReadyFlow()).not.toThrow();
     for (const item of controller.drainActions()) controller.acknowledgeAction(item.id, "acknowledged");
     controller.manualCheatOff();
     const cheatOff = action(controller, "cheat-off");
     controller.acknowledgeAction(cheatOff.id, "acknowledged");
-    expect(() => controller.requestManualGo()).toThrow("MANUAL_GO_BLOCKED");
+    expect(() => controller.requestManualGo()).not.toThrow();
   });
 
   it("formats Bulletin as UTC+8 HH:mm across midnight and republishes it after every schedule change", () => {
