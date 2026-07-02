@@ -337,6 +337,13 @@ export interface RuntimeSnapshot {
     stageId: string;
     status: "failed" | "uncertain";
   }[];
+  unconfirmedCommands: readonly {
+    id: string;
+    actionType: string;
+    status: "failed" | "uncertain";
+    command: string;
+    createdAt: string;
+  }[];
 }
 
 export type RefereeActionId =
@@ -437,7 +444,7 @@ export interface CompetitionSnapshot {
   archives: readonly { version: number; directory: string; packagePath: string; manifestHash: string; createdAt: string }[];
 }
 
-export type ConfirmationKind = "restart-stage" | "manual-action" | "manual-go" | "scoreboard-override" | "automation-command-resolution" | "high-risk";
+export type ConfirmationKind = "restart-stage" | "manual-action" | "manual-go" | "scoreboard-override" | "automation-command-resolution" | "command-resolution" | "high-risk";
 
 export interface ConfirmationSummary {
   token: string;
@@ -500,6 +507,13 @@ export type CompetitionAction =
       type: "resolve-automation-command";
       actionId: string;
       resolution: "confirm-executed" | "resend";
+      confirmationToken: string;
+      impactHash: string;
+    }
+  | {
+      type: "resolve-command";
+      commandId: string;
+      resolution: "confirm-executed" | "dismiss-failed" | "resend";
       confirmationToken: string;
       impactHash: string;
     }

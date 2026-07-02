@@ -13,7 +13,6 @@ const toCommand = (action: AutomationAction): CommandAction => {
     case "ready": return { type: "ready", map: action.map, ...(action.mapName === undefined ? {} : { mapName: action.mapName }), mode: action.mode };
     case "cheat-off": return { type: "cheat-off" };
     case "go": return { type: "go", map: action.map, ...(action.mapName === undefined ? {} : { mapName: action.mapName }), mode: action.mode };
-    case "force-next-restart": return { type: "force-next-restart" };
   }
 };
 

@@ -923,7 +923,6 @@ export class TestRuntimeManager {
       case "notice": return [`${prefix} [Notice] (${referee}, *ContestConsole): ${action.message ?? "比赛流程通知"}`];
       case "announce": return [`${prefix} [Announcement] (${referee}, *ContestConsole): ${action.message ?? "比赛流程通知"}`];
       case "cheat-off": return runtime.definition.players.map((player) => `${prefix} (${player.connectionId}, ${player.displayName}) turned cheat off.`);
-      case "force-next-restart": return [`${prefix} [${referee}, *ContestConsole]: The next countdown will restart the level.`];
     }
   }
 

@@ -56,7 +56,7 @@ const formatDelay = (milliseconds: number): string => {
   return seconds === 0 ? `${minutes} 分钟` : `${minutes} 分 ${seconds} 秒`;
 };
 
-export type AutomationActionKind = "bulletin" | "notice" | "announce" | "ready" | "cheat-off" | "go" | "force-next-restart";
+export type AutomationActionKind = "bulletin" | "notice" | "announce" | "ready" | "cheat-off" | "go";
 
 export interface AutomationAction {
   id: string;
@@ -255,9 +255,7 @@ export class CompetitionController {
   private cheatWarningSent = false;
   private readonly cheatEnabledAfterCurrentOff = new Set<string>();
   private lastCheatOffAcknowledgedAtMs: number | undefined;
-  private forceRestartActionId: string | undefined;
   private goActionId: string | undefined;
-  private pendingManualGoStageId: string | undefined;
   private countdownValue: 3 | 2 | 1 | undefined;
   private permissionDeniedEvidence: string | undefined;
   private startProtectionSensitiveStageId: string | undefined;
@@ -485,16 +483,6 @@ export class CompetitionController {
     if (this.automationEnabled) this.queueDueReadyNotice();
     if (!this.automationEnabled && this.phase !== "ready" && this.phase !== "countdown") return;
 
-    if (this.pendingManualGoStageId && this.isAcknowledged(this.forceRestartActionId)) {
-      const target = this.stages.find((stage) => stage.id === this.pendingManualGoStageId);
-      if (!target || this.startBlockers().length > 0) return;
-      this.goActionId = this.queueActionForStage("go", target, undefined, true).id;
-      this.pendingManualGoStageId = undefined;
-      this.phase = "countdown";
-      this.bump();
-      return;
-    }
-
     if (this.phase === "pre-start-wait") {
       const allStable = [...this.waiting].every((participantId) =>
         this.online.get(participantId) && now - (this.stableSince.get(participantId) ?? now) >= this.policy.reconnectStableMs);
@@ -520,10 +508,6 @@ export class CompetitionController {
       return;
     }
     if ((this.phase === "preparing" || this.phase === "restart-preparing") && this.plannedReadyAtMs !== undefined && now >= this.plannedReadyAtMs) {
-      if (this.restartPending && !this.isAcknowledged(this.forceRestartActionId)) {
-        if (!this.forceRestartActionId) this.forceRestartActionId = this.queueAction("force-next-restart").id;
-        return;
-      }
       if (this.readyFlowBlockers().length > 0) return;
       this.enterReady();
       return;
@@ -561,10 +545,6 @@ export class CompetitionController {
     const cheatAcknowledgedAt = this.actionAcknowledgedAt(this.cheatOffActionId);
     if (cheatAcknowledgedAt === undefined || now < cheatAcknowledgedAt + CHEAT_CONFIRMATION_BUFFER_MS) return;
     if (this.readyFlowBlockers().length > 0) return;
-    if (this.restartPending && !this.isAcknowledged(this.forceRestartActionId)) {
-      if (!this.forceRestartActionId) this.forceRestartActionId = this.queueAction("force-next-restart").id;
-      return;
-    }
     if (!this.goActionId) {
       this.goActionId = this.queueAction("go").id;
       this.phase = "countdown";
@@ -694,12 +674,6 @@ export class CompetitionController {
     if (!this.hasCurrentCheatOffConfirmation(target.id)) throw new Error("MANUAL_GO_CHEAT_OFF_REQUIRED");
     if (this.actions.some((action) => action.status === "pending")) throw new Error("MANUAL_GO_COMMAND_PENDING");
     if (this.readyFlowBlockers().length > 0) throw new Error("MANUAL_GO_BLOCKED");
-    if (this.restartPending && !this.isAcknowledged(this.forceRestartActionId)) {
-      this.pendingManualGoStageId = target.id;
-      this.forceRestartActionId ??= this.queueActionForStage("force-next-restart", target, undefined, true).id;
-      this.bump();
-      return;
-    }
     this.goActionId = this.queueActionForStage("go", target, undefined, true).id;
     this.phase = "countdown";
     this.bump();
@@ -764,7 +738,6 @@ export class CompetitionController {
     this.readyActionIds.length = 0;
     this.readyAnnouncementActionId = undefined;
     this.cheatOffActionId = undefined;
-    this.forceRestartActionId = undefined;
     this.goActionId = undefined;
     this.queueAction("announce", `本轮将重赛：${input.reason.trim()}`);
     this.bump();
@@ -853,9 +826,7 @@ export class CompetitionController {
     this.startProtectionUntilMs = now + this.policy.protectionWindowMs;
     this.countdownValue = undefined;
     this.cheatWarningSent = false;
-    this.pendingManualGoStageId = undefined;
     this.restartPending = false;
-    this.forceRestartActionId = undefined;
     for (const participantId of this.participantIds) {
       if (this.cheat.get(participantId) && this.lastCheatOffAcknowledgedAtMs !== undefined && this.cheatEnabledAfterCurrentOff.has(participantId)) {
         this.acceptResult(this.attempts[this.attempts.length - 1]!, { playerId: participantId, status: "excluded", sourceId: randomUUID(), receivedAtMs: now, reason: "cheat-enabled" });
@@ -943,7 +914,6 @@ export class CompetitionController {
     this.phase = "restart-preparing";
     this.restartPending = true;
     this.nextStagePending = false;
-    this.pendingManualGoStageId = undefined;
     this.countdownValue = undefined;
     this.readyAtMs = undefined;
     this.waitDeadlineAtMs = undefined;
@@ -952,7 +922,6 @@ export class CompetitionController {
     this.readyActionIds.length = 0;
     this.readyAnnouncementActionId = undefined;
     this.cheatOffActionId = undefined;
-    this.forceRestartActionId = undefined;
     this.goActionId = undefined;
     const message = postGo
       ? `${name}：玩家 ${participantId} 在起跑保护期${eventText}，当前尝试及成绩已作废，第一条 Ready 改至 ${readyTime}。`
@@ -967,7 +936,7 @@ export class CompetitionController {
   private cancelPendingLaunchActions(stageId: string): void {
     for (const action of this.actions) {
       if (action.stageId !== stageId || action.status !== "pending"
-        || !["ready", "announce", "cheat-off", "go", "force-next-restart"].includes(action.kind)) continue;
+        || !["ready", "announce", "cheat-off", "go"].includes(action.kind)) continue;
       action.status = "cancelled";
       this.undeliveredActionIds.delete(action.id);
     }
@@ -1045,7 +1014,7 @@ export class CompetitionController {
     const blockers: AutomationBlocker[] = [];
     if (this.permissionDeniedEvidence) blockers.push({ code: "PERMISSION_DENIED", severity: "critical", autoRecoverable: false, suggestion: "ContestConsole 权限不足；请在服务器修复权限后重新启动工作运行" });
     if (this.actions.some((action) => action.status === "failed"
-      || action.status === "uncertain" && ["ready", "cheat-off", "go", "force-next-restart"].includes(action.kind))) {
+      || action.status === "uncertain" && ["ready", "cheat-off", "go"].includes(action.kind))) {
       blockers.push({ code: "COMMAND_UNCONFIRMED", severity: "critical", autoRecoverable: false, suggestion: "核对服务器现场与命令审计，禁止自动补发" });
     }
     const openIncident = this.incidents.find((incident) => incident.status === "open");

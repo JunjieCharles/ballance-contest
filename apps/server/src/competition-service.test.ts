@@ -405,7 +405,9 @@ describe("CompetitionService dynamic participants", () => {
 
     const restored = new CompetitionService(undefined, { database, dataRoot }).snapshot(record.id);
     expect(restored.runtime.commands).toContainEqual(expect.objectContaining({ id: "sent-command", status: "uncertain" }));
-    expect(restored.runtime.attentionItems).toContainEqual(expect.objectContaining({ title: "命令结果待核实", severity: "warning" }));
+    expect(restored.runtime.unconfirmedCommands).toContainEqual(expect.objectContaining({ id: "sent-command", status: "uncertain" }));
+    expect(restored.runtime.blockers).toContainEqual(expect.objectContaining({ code: "COMMAND_UNCONFIRMED", severity: "critical" }));
+    expect(restored.runtime.attentionItems).toContainEqual(expect.objectContaining({ title: "命令结果待核实", severity: "critical" }));
     expect(restored.runtime.automationEnabled).toBe(false);
   });
 
@@ -439,6 +441,7 @@ describe("CompetitionService dynamic participants", () => {
       idempotencyKey: "resume-after-connection"
     });
     expect(service.snapshot(record.id).runtime).toMatchObject({ phase: "preparing", automationEnabled: true });
+    service.close();
   });
 
   it("recovers a sent Go as acknowledged when the persisted authoritative attempt proves execution", () => {
@@ -609,6 +612,151 @@ describe("CompetitionService dynamic participants", () => {
       expect.objectContaining({ title: "流程命令已确认执行" }),
       expect.objectContaining({ title: "流程命令已由裁判执行重发" })
     ]));
+  });
+
+  it("persists per-command resolution for non-automation real commands without rewriting the originals", async () => {
+    dataRoot = mkdtempSync(join(tmpdir(), "ballance-real-command-resolution-"));
+    database = openDatabase(join(dataRoot, "console.sqlite"));
+    let service = new CompetitionService(undefined, { database, dataRoot });
+    const record = service.create({ name: "Resolve real commands", mode: "work", idempotencyKey: "resolve-real-commands" });
+    service.publish(record.id, 0, "publish-resolve-real-commands");
+    const manager = workRuntimeManager(service);
+    const runtimeHolder: { current?: WorkRuntime } = {};
+    const writes: string[] = [];
+    const transport: CommandTransport = {
+      write: async (command) => {
+        writes.push(command);
+        setTimeout(() => runtimeHolder.current?.commands.observeLine("success"), 0);
+      }
+    };
+    const runtime = manager.makeRuntime(record.id, service.snapshot(record.id).publishedConfig as CompetitionConfig, transport);
+    runtimeHolder.current = runtime;
+    manager.register(record.id, runtime);
+    const now = new Date().toISOString();
+    const originals = [
+      { id: "uncertain-raw-confirm", command: "status", status: "uncertain" as const },
+      { id: "uncertain-raw-resend", command: "version", status: "uncertain" as const },
+      { id: "failed-raw-dismiss", command: "not-a-command", status: "failed" as const }
+    ].map((item) => ({
+      ...item,
+      idempotencyKey: item.id,
+      action: { type: "raw" as const, command: item.command },
+      createdAt: now,
+      updatedAt: now
+    }));
+    for (const command of originals) {
+      database.sqlite.prepare("INSERT INTO command_audits(id,competition_id,idempotency_key,action_type,status,payload,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?)")
+        .run(command.id, record.id, command.idempotencyKey, "raw", command.status, JSON.stringify(command), now, now);
+    }
+
+    let snapshot = service.snapshot(record.id);
+    expect(snapshot.runtime.unconfirmedCommands).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: originals[0]?.id, status: "uncertain" }),
+      expect.objectContaining({ id: originals[1]?.id, status: "uncertain" }),
+      expect.objectContaining({ id: originals[2]?.id, status: "failed" })
+    ]));
+    expect(snapshot.runtime.blockers).toContainEqual(expect.objectContaining({ code: "COMMAND_UNCONFIRMED", severity: "critical" }));
+    expect(snapshot.runtime.availableActions).toContainEqual(expect.objectContaining({ action: "enable-automation", enabled: false }));
+
+    const confirmed = service.createConfirmation(record.id, {
+      kind: "command-resolution",
+      target: originals[0]!.id,
+      commandId: originals[0]!.id,
+      resolution: "confirm-executed"
+    });
+    await service.performAction(record.id, {
+      expectedStateVersion: snapshot.competition.stateVersion,
+      idempotencyKey: "confirm-real-command",
+      action: { type: "resolve-command", commandId: originals[0]?.id as string, resolution: "confirm-executed", confirmationToken: confirmed.token, impactHash: confirmed.impactHash }
+    });
+
+    snapshot = service.snapshot(record.id);
+    const resent = service.createConfirmation(record.id, {
+      kind: "command-resolution",
+      target: originals[1]!.id,
+      commandId: originals[1]!.id,
+      resolution: "resend"
+    });
+    const resendResult = await service.performAction(record.id, {
+      expectedStateVersion: snapshot.competition.stateVersion,
+      idempotencyKey: "resend-real-command",
+      action: { type: "resolve-command", commandId: originals[1]?.id as string, resolution: "resend", confirmationToken: resent.token, impactHash: resent.impactHash }
+    });
+    expect(resendResult).toMatchObject({ status: "acknowledged", command: "version" });
+    expect(writes).toEqual(["version"]);
+    snapshot = service.snapshot(record.id);
+    expect(() => service.createConfirmation(record.id, {
+      kind: "command-resolution",
+      target: originals[2]!.id,
+      commandId: originals[2]!.id,
+      resolution: "confirm-executed"
+    })).toThrow(/处置方式/);
+    const dismissed = service.createConfirmation(record.id, {
+      kind: "command-resolution",
+      target: originals[2]!.id,
+      commandId: originals[2]!.id,
+      resolution: "dismiss-failed"
+    });
+    await service.performAction(record.id, {
+      expectedStateVersion: snapshot.competition.stateVersion,
+      idempotencyKey: "dismiss-failed-real-command",
+      action: { type: "resolve-command", commandId: originals[2]!.id, resolution: "dismiss-failed", confirmationToken: dismissed.token, impactHash: dismissed.impactHash }
+    });
+    for (const original of originals) {
+      expect(database.sqlite.prepare("SELECT status FROM command_audits WHERE id=?").get(original.id)).toMatchObject({ status: original.status });
+    }
+
+    service.close();
+    service = new CompetitionService(undefined, { database, dataRoot });
+    expect(service.snapshot(record.id).runtime.unconfirmedCommands).toHaveLength(0);
+    expect(service.snapshot(record.id).runtime.blockers.some((blocker) => blocker.code === "COMMAND_UNCONFIRMED")).toBe(false);
+  });
+
+  it("rejects forcenextrestart at the real raw-command action boundary", async () => {
+    const service = new CompetitionService();
+    const record = service.create({ name: "Reject global Go", mode: "work", idempotencyKey: "reject-global-go" });
+    service.publish(record.id, 0, "publish-reject-global-go");
+    const manager = workRuntimeManager(service);
+    const writes: string[] = [];
+    const runtime = manager.makeRuntime(
+      record.id,
+      service.snapshot(record.id).config,
+      { write: async (command) => { writes.push(command); } }
+    );
+    manager.register(record.id, runtime);
+    const snapshot = service.snapshot(record.id);
+    const confirmation = service.createConfirmation(record.id, { kind: "high-risk", target: record.id });
+
+    await expect(service.performAction(record.id, {
+      expectedStateVersion: snapshot.competition.stateVersion,
+      idempotencyKey: "attempt-global-go",
+      action: {
+        type: "raw-command",
+        command: " forcenextrestart ",
+        confirmationToken: confirmation.token,
+        impactHash: confirmation.impactHash
+      }
+    })).rejects.toThrow(/服务器所有地图/);
+    expect(writes).toEqual([]);
+  });
+
+  it("keeps failed read-only list reconciliation non-blocking", async () => {
+    const service = new CompetitionService();
+    const record = service.create({ name: "Read-only list failure", mode: "work", idempotencyKey: "read-only-list-failure" });
+    service.publish(record.id, 0, "publish-read-only-list-failure");
+    const manager = workRuntimeManager(service);
+    const runtime = manager.makeRuntime(record.id, service.snapshot(record.id).config, {
+      write: async () => { throw new Error("transport unavailable"); }
+    });
+    manager.register(record.id, runtime);
+
+    expect(await runtime.commands.enqueue({ type: "list" }, "failed-read-only-list"))
+      .toMatchObject({ status: "failed" });
+    const snapshot = service.snapshot(record.id);
+    expect(snapshot.runtime.unconfirmedCommands).toEqual([]);
+    expect(snapshot.runtime.blockers.some((blocker) => blocker.code === "COMMAND_UNCONFIRMED")).toBe(false);
+    expect(snapshot.runtime.attentionItems).toContainEqual(expect.objectContaining({ category: "command", severity: "warning" }));
+    service.close();
   });
 
   it("writes a new audited command when a work-mode referee explicitly resends", async () => {

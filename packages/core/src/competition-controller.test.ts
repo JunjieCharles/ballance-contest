@@ -395,9 +395,6 @@ describe("CompetitionController", () => {
     expect(controller.snapshot()).toMatchObject({ phase: "restart-preparing", plannedReadyAtMs: 120_000 });
     clock.set(120_000);
     controller.tick();
-    const force = action(controller, "force-next-restart");
-    controller.acknowledgeAction(force.id, "acknowledged");
-    controller.tick();
     expect(controller.snapshot().phase).toBe("ready");
     controller.observeConnection("p2", false);
     snapshot = controller.snapshot();
@@ -406,7 +403,7 @@ describe("CompetitionController", () => {
     expect(snapshot.incidents.filter((incident) => incident.type === "protected-crash")).toHaveLength(1);
   });
 
-  it("voids a protected post-Go attempt and forces one restart before a manual re-launch", () => {
+  it("voids a protected post-Go attempt and uses a map-scoped manual re-launch", () => {
     const clock = new FakeClock();
     const controller = new CompetitionController(configuration(), clock);
     connectAll(controller);
@@ -436,11 +433,6 @@ describe("CompetitionController", () => {
     const cheatOff = action(controller, "cheat-off");
     controller.acknowledgeAction(cheatOff.id, "acknowledged");
     controller.requestManualGo();
-    const force = action(controller, "force-next-restart");
-    expect(force.manual).toBe(true);
-    expect(controller.snapshot().actions.filter((candidate) => candidate.kind === "go")).toHaveLength(1);
-    controller.acknowledgeAction(force.id, "acknowledged");
-    controller.tick();
     const go = action(controller, "go");
     expect(go.manual).toBe(true);
     controller.acknowledgeAction(go.id, "acknowledged");
@@ -478,7 +470,7 @@ describe("CompetitionController", () => {
     expect(controller.snapshot().blockers.map((blocker) => blocker.code)).toContain("COMMAND_UNCONFIRMED");
   });
 
-  it("restarts the current stage without requiring an incident and sends force-next-restart exactly once", () => {
+  it("restarts the current stage without requiring an incident or enabling a global Go", () => {
     const clock = new FakeClock();
     const controller = new CompetitionController(configuration(), clock);
     connectAll(controller);
@@ -497,9 +489,6 @@ describe("CompetitionController", () => {
     expect(() => controller.requestManualGo()).toThrow("MANUAL_GO_CHEAT_OFF_REQUIRED");
     clock.advance(60_000);
     controller.tick();
-    const force = action(controller, "force-next-restart");
-    controller.acknowledgeAction(force.id, "acknowledged");
-    controller.tick();
     controller.acknowledgeAction(action(controller, "ready").id, "acknowledged");
     for (let index = 0; index < 2; index += 1) {
       clock.advance(5_000); controller.tick(); controller.acknowledgeAction(action(controller, "ready").id, "acknowledged");
@@ -513,7 +502,6 @@ describe("CompetitionController", () => {
     controller.tick();
 
     const snapshot = controller.snapshot();
-    expect(snapshot.actions.filter((item) => item.kind === "force-next-restart")).toHaveLength(1);
     expect(snapshot.attempts).toHaveLength(2);
     expect(snapshot.attempts[0]).toMatchObject({ attemptNumber: 1, voided: true });
     expect(snapshot.attempts[1]).toMatchObject({ attemptNumber: 2, voided: false });

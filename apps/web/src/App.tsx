@@ -614,6 +614,17 @@ function ConsolePanel({ snapshot, canWrite, versionKey, startWork, enableAutomat
             requestPayload={{ actionId: action.id, resolution: "resend" }} disabled={!canWrite} requestConfirmation={requestConfirmation}
             onConfirm={(confirmation) => performAction({ type: "resolve-automation-command", actionId: action.id, resolution: "resend", confirmationToken: confirmation.token, impactHash: confirmation.impactHash })} />
         </div>)}</section>}
+      {runtime.unconfirmedCommands.length > 0 && <section className="unconfirmed-command-panel"><h3>未确认真实命令</h3>
+        <p className="muted">这些命令可能失败或已经执行但缺少可靠结果。请逐条核对；原审计记录永久保留。</p>
+        {runtime.unconfirmedCommands.map((command) => <div className="unconfirmed-command-row" key={command.id}>
+          <div><strong>{command.actionType}</strong><small>{command.command} · {command.status}</small></div>
+          <ConfirmButton key={`command-confirmed:${command.id}:${versionKey}`} label={command.status === "failed" ? "确认不再执行" : "确认已执行"} kind="command-resolution" target={command.id} versionKey={versionKey}
+            requestPayload={{ commandId: command.id, resolution: command.status === "failed" ? "dismiss-failed" : "confirm-executed" }} disabled={!canWrite} requestConfirmation={requestConfirmation}
+            onConfirm={(confirmation) => performAction({ type: "resolve-command", commandId: command.id, resolution: command.status === "failed" ? "dismiss-failed" : "confirm-executed", confirmationToken: confirmation.token, impactHash: confirmation.impactHash })} />
+          <ConfirmButton key={`command-resend:${command.id}:${versionKey}`} label="执行重发" kind="command-resolution" target={command.id} versionKey={versionKey} className="danger"
+            requestPayload={{ commandId: command.id, resolution: "resend" }} disabled={!canWrite} requestConfirmation={requestConfirmation}
+            onConfirm={(confirmation) => performAction({ type: "resolve-command", commandId: command.id, resolution: "resend", confirmationToken: confirmation.token, impactHash: confirmation.impactHash })} />
+        </div>)}</section>}
       {runtime.attentionItems.length === 0 && <p className="muted">暂无需要注意的流程动态。</p>}
       <div className="attention-list">{runtime.attentionItems.map((item) => <article className={`attention-card ${item.severity}`} key={item.id}>
         <div><strong>{item.title}</strong><time>{formatUtc8DateTime(item.occurredAt)}</time></div>

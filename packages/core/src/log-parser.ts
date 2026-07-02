@@ -53,7 +53,7 @@ export const parseLogLine = (input: string, context: ParseContext): ParsedLogLin
     const disconnect = /^(.*?) \(#(\d+)\) disconnected\.$/.exec(body);
     const fatalError = /^(.*?) was kicked by the server \(fatal error\) and crashed subsequently\.$/.exec(body);
     const listed = /^(.*?) \(#(\d+)\)( \[CHEAT\])?$/.exec(body);
-    const readyOrGo = /^\[(\d+), (.*?)\]: Level (\d{2})\*? - (Get ready|3|2|1|Go!)$/.exec(body);
+    const readyOrGo = /^\[(\d+), (.*?)\]: Level (\d{2})(\*)? - (Get ready|3|2|1|Go!)$/.exec(body);
     const customReadyOrGo = /^\[(\d+), (.*?)\]: "([^"]+)" - (Get ready|3|2|1|Go!)$/.exec(body);
     const officialHashReadyOrGo = /^\[(\d+), (.*?)\]: ([0-9a-fA-F]+)\.\. - (Get ready|3|2|1|Go!)$/.exec(body);
     const noticeOrAnnouncement = /^\[(Notice|Announcement)\] \((\d+), (.*?)\): (.*)$/.exec(body);
@@ -94,13 +94,13 @@ export const parseLogLine = (input: string, context: ParseContext): ParsedLogLin
       event = { ...metadata, type: "player-listed", playerName: listed[1] ?? "", connectionId: listed[2] ?? "", cheat: Boolean(listed[3]) };
     } else if (readyOrGo || customReadyOrGo || officialHashReadyOrGo) {
       const match = readyOrGo ?? customReadyOrGo ?? officialHashReadyOrGo as RegExpExecArray;
-      const value = match[4] ?? "";
+      const value = readyOrGo ? readyOrGo[5] ?? "" : match[4] ?? "";
       const common = {
         ...metadata,
         connectionId: match[1] ?? "",
         refereeName: match[2] ?? "",
         ...(readyOrGo
-          ? { mapKind: "official" as const, level: Number(match[3]) }
+          ? { mapKind: "official" as const, level: Number(match[3]), ...(readyOrGo[4] ? { forceNextRestart: true } : {}) }
           : customReadyOrGo ? quotedMapReference(match[3] ?? "") : { mapKind: "official" as const, mapHashPrefix: (match[3] ?? "").toLowerCase() })
       };
       event = value === "Go!" ? { ...common, type: "go" }

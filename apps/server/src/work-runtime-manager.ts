@@ -82,6 +82,7 @@ export interface WorkRuntimeHost {
   recordCommand(competitionId: string, record: CommandRecord): void;
   commandHistory(competitionId: string): CommandRecordView[];
   availableActionsFor(competitionId: string, snapshot?: AutomationSnapshot): ActionAvailability[];
+  unconfirmedCommandsFor(competitionId: string, snapshot?: AutomationSnapshot): RuntimeSnapshot["unconfirmedCommands"];
   attentionItemsFor(competitionId: string, snapshot?: AutomationSnapshot): AttentionItem[];
   journal: EventJournal;
   dataRoot: string;
@@ -168,7 +169,8 @@ export class WorkRuntimeManager {
     const snapshot = runtime.controller.snapshot();
     const origin = Date.now() - performance.now();
     return automationView("work", snapshot, this.host.commandHistory(runtime.competitionId), plannedStageStartAt(snapshot, origin), plannedReadyAt(snapshot, origin), undefined,
-      this.host.availableActionsFor(runtime.competitionId, snapshot), this.host.attentionItemsFor(runtime.competitionId, snapshot), stageDeadlineAt(snapshot, origin));
+      this.host.availableActionsFor(runtime.competitionId, snapshot), this.host.attentionItemsFor(runtime.competitionId, snapshot), stageDeadlineAt(snapshot, origin),
+      this.host.unconfirmedCommandsFor(runtime.competitionId, snapshot));
   }
 
   public get(competitionId: string): WorkRuntime | undefined { return this.runtimes.get(competitionId); }

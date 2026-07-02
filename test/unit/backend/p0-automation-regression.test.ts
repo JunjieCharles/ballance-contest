@@ -110,7 +110,7 @@ describe("P0 centralized automation and command regression", () => {
     expect(controller.recordResult({ stageId: "s1", playerId: "p2", status: "finished", sourceId: "p2-finish-after-cheat" })).toBe("accepted");
   });
 
-  it("BE-RESTART-001/002/003: binds restart confirmation to current state and sends one force-next-restart before the new Go", () => {
+  it("BE-RESTART-001/002/003: binds restart confirmation and keeps the new Go map-scoped", () => {
     const clock = new ManualClock();
     const controller = makeController(clock, { readyBufferMs: 0 }, ["p1", "p2"]);
     putEveryoneOnline(controller, ["p1", "p2"]);
@@ -127,7 +127,6 @@ describe("P0 centralized automation and command regression", () => {
     clock.advanceBy(5_000); settle(controller);
     clock.advanceBy(5_000); settle(controller);
     clock.advanceBy(10_000); settle(controller);
-    expect(controller.snapshot().actions.filter((action) => action.kind === "force-next-restart")).toHaveLength(1);
     expect(controller.snapshot().attempts[0]).toMatchObject({ voided: true });
     expect(controller.snapshot().phase).toBe("running");
     expect(controller.snapshot().attempts).toHaveLength(2);

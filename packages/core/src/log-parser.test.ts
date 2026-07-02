@@ -12,7 +12,7 @@ describe("parseLogLine", () => {
 
   it("parses the live starred Ready echo and server connection loss", () => {
     expect(parseLogLine("[07-02 20:32:49] [2355344013, *ContestConsole]: Level 01* - Get ready", context).event)
-      .toMatchObject({ type: "ready", level: 1, refereeName: "*ContestConsole" });
+      .toMatchObject({ type: "ready", level: 1, refereeName: "*ContestConsole", forceNextRestart: true });
     expect(parseLogLine("[07-02 20:32:50] Disconnected from server.", context).event)
       .toMatchObject({ type: "server-disconnected" });
   });

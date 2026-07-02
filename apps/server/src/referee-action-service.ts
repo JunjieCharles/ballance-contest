@@ -29,6 +29,12 @@ interface RefereeActionHost {
   workRuntimeManager: WorkRuntimeManager;
 }
 
+export const assertRawCommandAllowed = (command: string): void => {
+  if (/^forcenextrestart$/i.test(command.trim())) {
+    throw new ServiceError("CAPABILITY_UNSUPPORTED", "forcenextrestart 会让下一次 Go 作用于服务器所有地图，比赛控制台禁止发送", 409);
+  }
+};
+
 export class RefereeActionService {
   public constructor(private readonly host: RefereeActionHost) {}
 
@@ -198,7 +204,10 @@ export class RefereeActionService {
       case "cheat-off": return { type: "cheat-off" };
       case "manual-go": return { type: "go", map: stageCommandTarget(stage), mapName: stageDisplayName(stage), mode: stage.mode.toLowerCase() as "sr" | "hs" };
       case "kick": return { type: "kick", playerName: action.playerName, reason: "referee-kick" };
-      case "raw-command": return { type: "raw", command: action.command };
+      case "raw-command": {
+        assertRawCommandAllowed(action.command);
+        return { type: "raw", command: action.command };
+      }
       default: throw new ServiceError("CAPABILITY_UNSUPPORTED", `动作 ${action.type} 不需要或不支持 MockClient 命令`, 409);
     }
   }
@@ -212,7 +221,6 @@ export class RefereeActionService {
       case "ready": return { type: "ready", map: action.map, ...(action.mapName === undefined ? {} : { mapName: action.mapName }), mode: action.mode };
       case "cheat-off": return { type: "cheat-off" };
       case "go": return { type: "go", map: action.map, ...(action.mapName === undefined ? {} : { mapName: action.mapName }), mode: action.mode };
-      case "force-next-restart": return { type: "force-next-restart" };
     }
   }
 
@@ -227,6 +235,7 @@ export class RefereeActionService {
       case "participant-edit": return action.participantId;
       case "player-alias-upsert": return `${action.playerId} -> ${action.displayName}`;
       case "resolve-automation-command": return `${action.resolution}:${action.actionId}`;
+      case "resolve-command": return `${action.resolution}:${action.commandId}`;
       case "scoreboard-override": return `${action.playerId}:${action.stageId ?? "total"}`;
       default: return action.type;
     }

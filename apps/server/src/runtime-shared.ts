@@ -35,7 +35,7 @@ export const simulatedCommand = (type: string, text = "测试模式模拟命令"
 };
 
 export const isFlowCriticalAutomationAction = (action: AutomationAction): boolean =>
-  action.kind === "ready" || action.kind === "cheat-off" || action.kind === "go" || action.kind === "force-next-restart";
+  action.kind === "ready" || action.kind === "cheat-off" || action.kind === "go";
 
 export const isUnresolvedAutomationAction = (action: AutomationAction): action is AutomationAction & { status: "failed" | "uncertain" } =>
   action.status === "failed" || action.status === "uncertain" && isFlowCriticalAutomationAction(action);
@@ -68,7 +68,8 @@ export const automationView = (
   virtualNowMs?: number,
   availableActions: readonly ActionAvailability[] = [],
   attentionItems: readonly AttentionItem[] = [],
-  deadlineAt?: string
+  deadlineAt?: string,
+  unconfirmedCommands: RuntimeSnapshot["unconfirmedCommands"] = []
 ): RuntimeSnapshot => ({
   phase: snapshot?.phase ?? "draft",
   ...(snapshot?.pausedFromPhase === undefined ? {} : { pausedFromPhase: snapshot.pausedFromPhase }),
@@ -83,7 +84,9 @@ export const automationView = (
   ...(deadlineAt === undefined ? {} : { stageDeadlineAt: deadlineAt }),
   ...(virtualNowMs === undefined ? {} : { virtualNowMs }),
   ...(snapshot?.countdownValue === undefined ? {} : { countdownValue: snapshot.countdownValue }),
-  blockers: snapshot?.blockers ?? [],
+  blockers: unconfirmedCommands.length > 0 && !snapshot?.blockers.some((blocker) => blocker.code === "COMMAND_UNCONFIRMED")
+    ? [...(snapshot?.blockers ?? []), { code: "COMMAND_UNCONFIRMED", severity: "critical", autoRecoverable: false, suggestion: "逐条处置失败或结果不确定的真实命令" }]
+    : snapshot?.blockers ?? [],
   waitingParticipants: snapshot?.waitingParticipants ?? [],
   attempts: snapshot?.attempts ?? [],
   incidents: snapshot?.incidents ?? [],
@@ -94,7 +97,8 @@ export const automationView = (
   scoreEditPermissions: [],
   unconfirmedAutomationActions: snapshot?.actions
     .filter(isUnresolvedAutomationAction)
-    .map((action) => ({ id: action.id, kind: action.kind, stageId: action.stageId, status: action.status })) ?? []
+    .map((action) => ({ id: action.id, kind: action.kind, stageId: action.stageId, status: action.status })) ?? [],
+  unconfirmedCommands
 });
 
 export const plannedStageStartAt = (snapshot: AutomationSnapshot, epochOriginMs: number): string | undefined => {

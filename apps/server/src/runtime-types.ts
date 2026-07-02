@@ -33,5 +33,6 @@ export interface ServiceSnapshotPayload {
   testRuns?: PersistedTestRun[];
   scoreboardRevisions?: ScoreboardVersionView[];
   archives?: Array<{ version: number; directory: string; packagePath: string; manifestHash: string; createdAt: string }>;
+  resolvedCommandIds?: string[];
   work?: { started: boolean; mockClientVersion?: string; automation?: AutomationSnapshot; mapEchoPrefixes?: Record<string, string> };
 }

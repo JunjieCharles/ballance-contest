@@ -9,6 +9,7 @@ export interface EventMapReference {
   level?: number;
   mapHashPrefix?: string;
   mapDisplayName?: string;
+  forceNextRestart?: boolean;
 }
 
 export type DomainEvent =

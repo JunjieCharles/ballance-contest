@@ -1,8 +1,13 @@
 import { createServer } from "node:net";
 import { describe, expect, it } from "vitest";
 import { buildApp } from "./app.js";
+import { assertRawCommandAllowed } from "./referee-action-service.js";
 
 describe("local security and process ownership", () => {
+  it("rejects forcenextrestart even through the high-risk raw command path", () => {
+    expect(() => assertRawCommandAllowed(" forcenextrestart ")).toThrow(/服务器所有地图/);
+    expect(() => assertRawCommandAllowed("list")).not.toThrow();
+  });
   it("rejects cross-site writes even when a bearer token is present", async () => {
     const app = await buildApp({ bootstrapToken: "bootstrap", serveStatic: false });
     try {

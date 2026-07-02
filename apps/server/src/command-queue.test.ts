@@ -21,13 +21,6 @@ describe("CommandQueue", () => {
     expect(transport.writes).toEqual(["list", "countdown level 1 sr"]);
   });
 
-  it("acknowledges forcenextrestart after write without server echo", async () => {
-    const transport = new FakeTransport();
-    const queue = new CommandQueue(transport, 5);
-    expect((await queue.enqueue({ type: "force-next-restart" }, "critical")).status).toBe("acknowledged");
-    expect(transport.writes).toEqual(["forcenextrestart"]);
-  });
-
   it("observes a synchronous echo produced while stdin is still being written", async () => {
     const transport = new FakeTransport();
     const queue = new CommandQueue(transport, 5);
@@ -192,6 +185,14 @@ describe("CommandQueue", () => {
     const queue = new CommandQueue(transport);
     expect(() => queue.enqueue({ type: "raw", command: "hello\nstop" }, "unsafe")).toThrow("control characters");
     expect(() => queue.enqueue({ type: "notification", channel: "notice", text: "hello\rstop" }, "unsafe-notice")).toThrow("control characters");
+    expect(transport.writes).toEqual([]);
+  });
+
+  it("rejects forcenextrestart in the final stdin adapter", () => {
+    const transport = new FakeTransport();
+    const queue = new CommandQueue(transport);
+    expect(() => queue.enqueue({ type: "raw", command: " forcenextrestart " }, "unsafe-global-go"))
+      .toThrow(/every map/);
     expect(transport.writes).toEqual([]);
   });
 });

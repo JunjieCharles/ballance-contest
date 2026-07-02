@@ -11,11 +11,13 @@ export type CommandAction =
   | { type: "ready"; map: string; mapName?: string; mode: "sr" | "hs" }
   | { type: "cheat-off" }
   | { type: "go"; map: string; mapName?: string; mode: "sr" | "hs" }
-  | { type: "force-next-restart" }
   | { type: "listmap" }
   | { type: "scores"; map: string; mode: "sr" | "hs" }
   | { type: "kick"; playerName: string; reason: string }
   | { type: "raw"; command: string };
+
+export const requiresExplicitCommandResolution = (action: CommandAction): boolean =>
+  ["set-map", "set-official-map", "ready", "cheat-off", "go", "kick", "raw"].includes(action.type);
 
 export interface CommandRecord {
   id: string;
@@ -94,12 +96,6 @@ const encode = (action: CommandAction): { command: string; critical: boolean; ac
     case "ready": return { command: `countdown ${cleanText(action.map)} ${action.mode} 4`, critical: false, acknowledge: (line) => /Get ready$/.test(line) && mapEchoMatches(line, action.map, action.mapName) };
     case "cheat-off": return { command: "cheat off", critical: false, acknowledge: (line) => /cheat.*off/i.test(line) };
     case "go": return { command: `countdown ${cleanText(action.map)} ${action.mode}`, critical: true, acknowledge: (line) => / - Go!$/.test(line) && mapEchoMatches(line, action.map, action.mapName) };
-    case "force-next-restart": return {
-      command: "forcenextrestart",
-      critical: true,
-      acknowledgeAfterWriteMs: 500,
-      acknowledge: () => false
-    };
     case "listmap": {
       const seen = new Set<string>();
       return {
@@ -116,7 +112,11 @@ const encode = (action: CommandAction): { command: string; critical: boolean; ac
     }
     case "scores": return { command: `scores ${action.mode} ${cleanText(action.map)}`, critical: false, acknowledge: (line) => /place|score|ranking/i.test(line) };
     case "kick": return { command: `kick ${cleanText(action.playerName)} ${cleanText(action.reason)}`, critical: true, acknowledge: (line) => /kick|disconnect|success/i.test(line) };
-    case "raw": return { command: cleanText(action.command), critical: true, acknowledge: (line) => /success|error|warning|ready|go|disconnect/i.test(line) };
+    case "raw": {
+      const command = cleanText(action.command);
+      if (/^forcenextrestart$/i.test(command)) throw new Error("forcenextrestart is disabled because it makes the next Go apply to every map");
+      return { command, critical: true, acknowledge: (line) => /success|error|warning|ready|go|disconnect/i.test(line) };
+    }
   }
 };
 

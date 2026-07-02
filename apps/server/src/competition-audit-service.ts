@@ -2,7 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import type { AttentionItem, CommandRecordView, RawClientLogLine, RefereeActionId } from "@ballance/contracts";
 import type { AutomationAction, AutomationSnapshot } from "@ballance/core";
 import type { CommandRecord } from "./command-queue.js";
-import { isPermissionDeniedLine } from "./command-queue.js";
+import { isPermissionDeniedLine, requiresExplicitCommandResolution } from "./command-queue.js";
 import type { EventJournal } from "./event-journal.js";
 import { commandView } from "./runtime-shared.js";
 import type { OpenedDatabase } from "./storage/database.js";
@@ -13,6 +13,7 @@ const rows = <T>(database: OpenedDatabase | undefined, sql: string, ...params: u
 export class CompetitionAuditService {
   private readonly rawLogs = new Map<string, RawClientLogLine[]>();
   private readonly memoryAttentionItems = new Map<string, AttentionItem[]>();
+  private readonly memoryCommands = new Map<string, Map<string, CommandRecord>>();
 
   public constructor(
     private readonly database: OpenedDatabase | undefined,
@@ -147,11 +148,14 @@ export class CompetitionAuditService {
       this.database.sqlite.prepare("INSERT INTO command_audits(id,competition_id,idempotency_key,action_type,status,payload,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(competition_id,idempotency_key) DO UPDATE SET status=excluded.status,payload=excluded.payload,updated_at=excluded.updated_at")
         .run(record.id, competitionId, record.idempotencyKey, record.action.type, record.status, JSON.stringify(record), record.createdAt, record.updatedAt);
     }
+    const memory = this.memoryCommands.get(competitionId) ?? new Map<string, CommandRecord>();
+    memory.set(record.id, { ...record, action: { ...record.action } });
+    this.memoryCommands.set(competitionId, memory);
     if (record.action.type === "list" && record.status === "queued") this.onListSent(competitionId);
     if (record.status === "uncertain" || record.status === "failed" || record.status === "timed_out") {
       const permissionDenied = Boolean(record.responseLine && isPermissionDeniedLine(record.responseLine));
-      const blocksFlow = permissionDenied || record.status === "failed" || record.status === "uncertain"
-        || ["ready", "cheat-off", "go", "force-next-restart"].includes(record.action.type);
+      const blocksFlow = permissionDenied || requiresExplicitCommandResolution(record.action)
+        && (record.status === "failed" || record.status === "uncertain" || ["ready", "cheat-off", "go"].includes(record.action.type));
       this.appendAttention(competitionId, {
         id: `command:${record.id}:${record.status}`,
         category: "command",
@@ -172,10 +176,19 @@ export class CompetitionAuditService {
   }
 
   public commandHistory(competitionId: string): CommandRecordView[] {
-    return rows<{ payload: string }>(this.database, "SELECT payload FROM command_audits WHERE competition_id=? ORDER BY created_at DESC LIMIT 50", competitionId)
-      .map((item) => {
-        const stored = JSON.parse(item.payload) as CommandRecord | CommandRecordView;
-        return "action" in stored ? commandView(stored) : stored;
-      });
+    if (!this.database) return [...(this.memoryCommands.get(competitionId)?.values() ?? [])].reverse().slice(0, 50).map(commandView);
+    return rows<{ payload: string }>(this.database, "SELECT payload FROM command_audits WHERE competition_id=? ORDER BY created_at DESC LIMIT 50", competitionId).map((item) => {
+      const stored = JSON.parse(item.payload) as CommandRecord | CommandRecordView;
+      return "action" in stored ? commandView(stored) : stored;
+    });
+  }
+
+  public commandRecords(competitionId: string): CommandRecord[] {
+    if (!this.database) return [...(this.memoryCommands.get(competitionId)?.values() ?? [])]
+      .filter((record) => record.status === "failed" || record.status === "uncertain")
+      .map((record) => ({ ...record, action: { ...record.action } }));
+    return rows<{ payload: string }>(this.database, "SELECT payload FROM command_audits WHERE competition_id=? AND status IN ('failed','uncertain') ORDER BY created_at", competitionId)
+      .map((item) => JSON.parse(item.payload) as CommandRecord | CommandRecordView)
+      .filter((item): item is CommandRecord => "action" in item);
   }
 }
