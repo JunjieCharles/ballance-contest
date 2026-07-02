@@ -168,7 +168,7 @@ export const buildApp = async (options: BuildAppOptions): Promise<FastifyInstanc
     return { data: service.pauseAutomation(request.params.competitionId) };
   });
   app.post<{ Params: { competitionId: string }; Body: {
-    kind: "restart-stage" | "manual-action" | "manual-go" | "scoreboard-override" | "automation-command-resolution" | "command-resolution" | "high-risk";
+    kind: "restart-stage" | "manual-action" | "manual-go" | "scoreboard-override" | "automation-command-resolution" | "command-resolution" | "observation-gap-resolution" | "high-risk";
     target?: string;
     playerId?: string;
     stageId?: string;
@@ -177,7 +177,8 @@ export const buildApp = async (options: BuildAppOptions): Promise<FastifyInstanc
     rankPolicy?: "tie" | "shift";
     actionId?: string;
     commandId?: string;
-    resolution?: "confirm-executed" | "dismiss-failed" | "resend";
+    gapId?: string;
+    resolution?: "confirm-executed" | "dismiss-failed" | "resend" | "continue";
   } }>("/api/v1/competitions/:competitionId/confirmations", async (request) => {
     requireSession(request, true);
     return { data: service.createConfirmation(request.params.competitionId, request.body) };

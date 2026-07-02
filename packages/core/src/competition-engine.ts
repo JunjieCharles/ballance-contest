@@ -103,6 +103,57 @@ export class CompetitionEngine {
     this.nextScoreboardVersion = Math.max(this.nextScoreboardVersion, version);
   }
 
+  public restore(snapshot: EngineSnapshot): void {
+    this.seenSources.clear();
+    this.attempts.length = 0;
+    this.results.clear();
+    this.versions.length = 0;
+    this.anomalies.length = 0;
+    this.baselines.clear();
+    this.finishSequence = 0;
+    this.nextScoreboardVersion = 1;
+
+    this.attempts.push(...snapshot.attempts.map((attempt) => ({ ...attempt })));
+    this.versions.push(...snapshot.scoreboardVersions.map((version) => ({ ...version, entries: version.entries.map((entry) => ({ ...entry, placeCounts: [...entry.placeCounts], stages: { ...entry.stages } })) })));
+    this.anomalies.push(...snapshot.anomalies.map((anomaly) => ({ ...anomaly })));
+    for (const attempt of this.attempts) this.seenSources.add(attempt.goSourceId);
+    for (const version of this.versions) {
+      this.seenSources.add(version.triggerSourceId);
+      for (const entry of version.entries) this.playerNames.set(entry.playerId, entry.displayName);
+    }
+
+    const latestEntries = this.versions.at(-1)?.entries ?? snapshot.currentScoreboard;
+    for (const stage of this.stages.values()) {
+      const attempt = [...this.attempts].reverse().find((candidate) => candidate.stageId === stage.id && !candidate.voided);
+      if (!attempt) continue;
+      const stageResults = new Map<string, MutableStageResult>();
+      const ordered = latestEntries
+        .map((entry) => entry.stages[stage.id])
+        .filter((result): result is StageResult => result !== undefined)
+        .sort((left, right) => (left.place || Number.MAX_SAFE_INTEGER) - (right.place || Number.MAX_SAFE_INTEGER));
+      for (const result of ordered) {
+        this.finishSequence += 1;
+        stageResults.set(result.playerId, {
+          playerId: result.playerId,
+          status: result.status,
+          sourceId: result.sourceId,
+          finishSequence: this.finishSequence,
+          ...(result.score === undefined ? {} : { score: result.score }),
+          ...(result.elapsedMs === undefined ? {} : { elapsedMs: result.elapsedMs }),
+          ...(result.reason === undefined ? {} : { reason: result.reason }),
+          ...(result.finishSourceId === undefined ? {} : { finishSourceId: result.finishSourceId })
+        });
+        this.seenSources.add(result.sourceId);
+        if (result.finishSourceId) this.seenSources.add(result.finishSourceId);
+      }
+      if (stageResults.size > 0) {
+        this.results.set(attempt.id, stageResults);
+        this.baselines.set(stage.id, this.rankBeforeStage(stage));
+      }
+    }
+    this.nextScoreboardVersion = Math.max(1, ...this.versions.map((version) => version.version + 1));
+  }
+
   public apply(event: ScenarioEvent): void {
     if (this.seenSources.has(event.sourceId)) {
       this.anomalies.push({ sourceId: event.sourceId, code: "duplicate-event", detail: "Duplicate source event ignored" });

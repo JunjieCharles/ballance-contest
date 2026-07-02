@@ -7,6 +7,24 @@ import { CompetitionEngine } from "./competition-engine.js";
 const loadMain = (): ScenarioDefinition => assertScenarioDefinition(JSON.parse(readFileSync(resolve("test/fixtures/scenarios/three-stage-main/scenario.json"), "utf8")) as unknown);
 
 describe("CompetitionEngine", () => {
+  it("restores attempts and scoreboard versions before accepting new results", () => {
+    const definition = loadMain();
+    const original = new CompetitionEngine(definition);
+    original.apply({ atMs: 0, sourceId: "restore-go", type: "go", stageId: "s1", refereeConnectionId: definition.refereeConnectionId });
+    original.apply({ atMs: 10, sourceId: "restore-p1", type: "finish", stageId: "s1", playerId: "p1", score: 10, elapsedMs: 10 });
+    const persisted = original.snapshot();
+
+    const restored = new CompetitionEngine(definition);
+    restored.restore(persisted);
+    restored.apply({ atMs: 20, sourceId: "restore-p2", type: "finish", stageId: "s1", playerId: "p2", score: 9, elapsedMs: 20 });
+    const snapshot = restored.snapshot();
+    expect(snapshot.attempts).toEqual(persisted.attempts);
+    expect(snapshot.scoreboardVersions.slice(0, persisted.scoreboardVersions.length)).toEqual(persisted.scoreboardVersions);
+    expect(snapshot.scoreboardVersions.at(-1)?.version).toBe(2);
+    expect(snapshot.currentScoreboard.find((entry) => entry.playerId === "p1")?.stages.s1?.place).toBe(1);
+    expect(snapshot.currentScoreboard.find((entry) => entry.playerId === "p2")?.stages.s1?.place).toBe(2);
+  });
+
   it("adds an unknown player only when an effective result is accepted", () => {
     const base = loadMain();
     const stage = base.stages[0];

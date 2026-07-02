@@ -407,6 +407,7 @@ describe("CompetitionService dynamic participants", () => {
     expect(restored.runtime.commands).toContainEqual(expect.objectContaining({ id: "sent-command", status: "uncertain" }));
     expect(restored.runtime.unconfirmedCommands).toContainEqual(expect.objectContaining({ id: "sent-command", status: "uncertain" }));
     expect(restored.runtime.blockers).toContainEqual(expect.objectContaining({ code: "COMMAND_UNCONFIRMED", severity: "critical" }));
+    expect(restored.runtime.observationGaps).toEqual([]);
     expect(restored.runtime.attentionItems).toContainEqual(expect.objectContaining({ title: "命令结果待核实", severity: "critical" }));
     expect(restored.runtime.automationEnabled).toBe(false);
   });
@@ -468,6 +469,61 @@ describe("CompetitionService dynamic participants", () => {
     const restored = new CompetitionService(undefined, { database, dataRoot }).snapshot(record.id);
     expect(restored.runtime.commands).toContainEqual(expect.objectContaining({ id: "sent-go", status: "acknowledged" }));
     expect(restored.runtime.attentionItems).not.toContainEqual(expect.objectContaining({ title: "命令结果待核实" }));
+  });
+
+  it("restores a running work attempt and requires an auditable observation-gap decision", async () => {
+    dataRoot = mkdtempSync(join(tmpdir(), "ballance-work-runtime-recovery-"));
+    database = openDatabase(join(dataRoot, "console.sqlite"));
+    let service = new CompetitionService(undefined, { database, dataRoot });
+    const record = service.create({ name: "Recover running work", mode: "work", idempotencyKey: "recover-running-work" });
+    service.publish(record.id, 0, "publish-recover-running-work");
+    let manager = workRuntimeManager(service);
+    let runtime = manager.makeRuntime(record.id, service.snapshot(record.id).config, { write: async () => undefined });
+    manager.register(record.id, runtime);
+    manager.ingestLine(runtime, "[07-03 01:00:00] Runner (#41) logged in with cheat mode off.");
+    manager.ingestLine(runtime, "[07-03 01:00:01] [7, *ContestConsole]: Level 01 - Go!");
+    manager.ingestLine(runtime, "[07-03 01:00:02] (#41, Runner) finished Level 01 in 1st place (score: 100; real time: 00:00:01.000).");
+    expect(service.snapshot(record.id).runtime.phase).toBe("running");
+    expect(service.snapshot(record.id).currentScoreboard).toContainEqual(expect.objectContaining({ playerId: "Runner", points: 20 }));
+    service.close();
+
+    service = new CompetitionService(undefined, { database, dataRoot });
+    let snapshot = service.snapshot(record.id);
+    expect(snapshot.runtime.observationGaps).toContainEqual(expect.objectContaining({ code: "SERVICE_RESTART_GAP" }));
+    expect(snapshot.runtime.blockers).toContainEqual(expect.objectContaining({ code: "OBSERVATION_GAP", severity: "critical" }));
+    expect(snapshot.runtime.availableActions).toContainEqual(expect.objectContaining({ action: "enable-automation", enabled: false }));
+
+    manager = workRuntimeManager(service);
+    runtime = manager.makeRuntime(record.id, snapshot.config, { write: async () => undefined });
+    manager.register(record.id, runtime);
+    snapshot = service.snapshot(record.id);
+    expect(snapshot.runtime).toMatchObject({ phase: "paused", pausedFromPhase: "running" });
+    expect(snapshot.runtime.attempts).toContainEqual(expect.objectContaining({ stageId: "sr-1", intakeOpen: true }));
+    expect(snapshot.currentScoreboard).toContainEqual(expect.objectContaining({ playerId: "Runner", points: 20 }));
+
+    const gap = snapshot.runtime.observationGaps[0];
+    if (!gap) throw new Error("missing recovery observation gap");
+    const confirmation = service.createConfirmation(record.id, {
+      kind: "observation-gap-resolution",
+      target: gap.id,
+      gapId: gap.id,
+      resolution: "continue"
+    });
+    await service.performAction(record.id, {
+      expectedStateVersion: snapshot.competition.stateVersion,
+      idempotencyKey: "continue-after-gap",
+      action: { type: "resolve-observation-gap", gapId: gap.id, resolution: "continue", confirmationToken: confirmation.token, impactHash: confirmation.impactHash }
+    });
+    snapshot = service.snapshot(record.id);
+    expect(snapshot.runtime.observationGaps).toEqual([]);
+    expect(snapshot.runtime.blockers.some((blocker) => blocker.code === "OBSERVATION_GAP")).toBe(false);
+    await service.enableAutomation(record.id, {
+      expectedStateVersion: snapshot.competition.stateVersion,
+      idempotencyKey: "resume-after-observation-gap"
+    });
+    expect(service.snapshot(record.id).runtime).toMatchObject({ phase: "running", automationEnabled: true });
+    expect(service.snapshot(record.id).currentScoreboard).toContainEqual(expect.objectContaining({ playerId: "Runner", points: 20 }));
+    service.close();
   });
 
   it("reads legacy stages as official maps without rewriting immutable published snapshots", () => {

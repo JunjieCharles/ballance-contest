@@ -55,6 +55,7 @@
 | BE-CMD-002/003 | `test/unit/backend/p0-automation-regression.test.ts` | 假命令传输 | 关键 Go 无回显进入 `uncertain`，同幂等键不重发 |
 | BE-CMD-008 | `apps/server/src/competition-service.test.ts` | 临时 SQLite + 假命令传输 | 非流程真实命令逐条确认/放弃失败/重发；原审计不改，处置持久化且重启后不再阻断 |
 | BE-RECOVER-001/003 | `test/integration/p0-file-recovery-regression.test.ts` | 临时 SQLite + 恢复快照 | 恢复后 `sent` 命令变 `uncertain`，观察缺口保留且不自动继续 |
+| BE-RECOVER-004 | `apps/server/src/competition-service.test.ts`、`packages/core/src/competition-controller.test.ts`、`packages/core/src/competition-engine.test.ts` | 临时 SQLite + 状态机/引擎快照 | 比赛中重启后恢复原尝试、榜单、截止和时间原点；敏感阶段观察缺口阻断且可确认继续，历史命令不重放 |
 | BE-FILE-001/002/003/004 | `test/integration/p0-file-recovery-regression.test.ts` | `fixtures/logs/mockclient-edge-cases.log` + 临时增长日志 | 静态源只读、完整行解析、轮转换代、ANSI 与异常编码处理 |
 | NF-SOAK-001 | `test/nonfunctional/scale.test.ts` | 程序化 30×30×8h 场景 | 900 个逐事件榜单版本完整保留 |
 
@@ -203,6 +204,7 @@
 | BE-RECOVER-001 | P0 | BE 12.4 | 在 Ready、比赛中、尾部接收、事故各状态崩溃重启 | 同 Competition/Stage/Attempt/编号恢复；自动化暂停；sent 未确认不可幂等命令变 uncertain |
 | BE-RECOVER-002 | P0 | BE 12.4 | 重启后从旧偏移读到重复日志，并重启 MockClient | 固定 UUID/服务器/裁判；新进程从启动前文件末尾续读，不重放旧行；命令队列切换到新 stdin，日志分段不覆盖旧段 |
 | BE-RECOVER-003 | P0 | BE 12.4–12.5 | 断连期间产生排行榜成绩、DNF、Warning和顺序缺口，恢复后查询 | 可恢复成绩以“恢复查询”来源补回并去重；不可恢复项建立观察缺口，不猜测 |
+| BE-RECOVER-004 | P0 | BE 7.5、12.4 | 分别在 lobby/准备期、Ready/倒计时、running/tail-intake 关闭并重建服务，再恢复工作运行 | 原 Competition、阶段、尝试、榜单、计划和截止时间恢复且历史命令不重放；只有敏感阶段出现红色缺口；逐条确认继续后仍暂停，重赛则自动处置关联缺口；错过下一边界时由状态机进入下一阶段 |
 | BE-RECOVER-004 | P0 | BE 12.4–12.5 | 保存 Go UTC/截止后改变系统时钟并恢复 | 原剩余时限和窗口恢复；时钟跳变进入复核；不补发过期公告/Ready/Go |
 | BE-REPLAY-001 | P0 | BE 13.1 | 原速、倍速、逐事件、暂停、重置、跳转下一 Go | 控制准确；使用同一解析/状态/计分；重置后哈希一致；命令始终为空实现 |
 | BE-TEST-PLAYER-001 | P0 | BE 13.1–13.2 | 加载 20/30 人综合沙盒，分别由自动化和手动 Ready/Go 推进 | 20 人为 8/6/3/3，30 人为 12/8/6/4；场景无裁判流程事件；低手不伪造即时 DNF，窗口先到 Ready 时可无结果关闭；捣乱者被排除但真实完赛证据保留 |

@@ -46,6 +46,7 @@ export interface AutomationConfiguration {
   confirmationSecret?: string;
   wallClockOriginMs?: number;
   startProtectionUsedStageIds?: readonly string[] | undefined;
+  initialSnapshot?: AutomationSnapshot | undefined;
 }
 
 const formatDelay = (milliseconds: number): string => {
@@ -127,9 +128,16 @@ export interface AutomationSnapshot {
   pausedFromPhase?: Exclude<AutomationPhase, "paused">;
   stateVersion: number;
   automationEnabled: boolean;
+  clockNowMs?: number;
+  wallClockOriginMs?: number;
   currentStageId: string;
   plannedReadyAtMs?: number;
   plannedReadyStageId?: string;
+  readyAtMs?: number;
+  waitDeadlineAtMs?: number;
+  nextStagePending?: boolean;
+  restartPending?: boolean;
+  lastCheatOffAcknowledgedAtMs?: number;
   countdownValue?: 3 | 2 | 1;
   blockers: readonly AutomationBlocker[];
   waitingParticipants: readonly string[];
@@ -279,6 +287,75 @@ export class CompetitionController {
       this.online.set(participantId, false);
       this.cheat.set(participantId, false);
     }
+    if (configuration.initialSnapshot) this.restoreSnapshot(configuration.initialSnapshot);
+  }
+
+  private restoreSnapshot(snapshot: AutomationSnapshot): void {
+    const stageIndex = this.stages.findIndex((stage) => stage.id === snapshot.currentStageId);
+    if (stageIndex < 0) throw new Error("RESTORE_STAGE_NOT_FOUND");
+    this.stageIndex = stageIndex;
+    this.phase = snapshot.phase;
+    this.pausedFromPhase = snapshot.pausedFromPhase;
+    this.stateVersion = snapshot.stateVersion;
+    this.automationEnabled = snapshot.automationEnabled;
+    this.plannedReadyAtMs = snapshot.plannedReadyAtMs;
+    this.plannedReadyStageIndex = snapshot.plannedReadyStageId === undefined
+      ? undefined
+      : this.stages.findIndex((stage) => stage.id === snapshot.plannedReadyStageId);
+    if (this.plannedReadyStageIndex !== undefined && this.plannedReadyStageIndex < 0) throw new Error("RESTORE_READY_STAGE_NOT_FOUND");
+    this.countdownValue = snapshot.countdownValue;
+    this.readyAtMs = snapshot.readyAtMs;
+    this.waitDeadlineAtMs = snapshot.waitDeadlineAtMs;
+    this.startProtectionSensitiveStageId = snapshot.startProtectionSensitiveStageId;
+    this.startProtectionUntilMs = snapshot.startProtectionUntilMs;
+    this.startProtectionUsedStageIds.clear();
+    for (const stageId of snapshot.startProtectionUsedStageIds ?? []) this.startProtectionUsedStageIds.add(stageId);
+
+    const restoredParticipants = new Set<string>([
+      ...this.participantIds,
+      ...snapshot.waitingParticipants,
+      ...snapshot.attempts.flatMap((attempt) => attempt.results.map((result) => result.playerId)),
+      ...snapshot.incidents.flatMap((incident) => incident.participantIds)
+    ]);
+    for (const participantId of restoredParticipants) {
+      this.participantIds.add(participantId);
+      this.online.set(participantId, false);
+      this.cheat.set(participantId, false);
+    }
+    this.waiting.clear();
+    for (const participantId of snapshot.waitingParticipants) this.waiting.add(participantId);
+    this.attempts.push(...snapshot.attempts.map((attempt) => ({ ...attempt, results: attempt.results.map((result) => ({ ...result })) })));
+    this.incidents.push(...snapshot.incidents.map((incident) => ({ ...incident, participantIds: [...incident.participantIds] })));
+    this.rejectedResults.push(...snapshot.rejectedResults.map((result) => ({ ...result })));
+    this.actions.push(...snapshot.actions.map(cloneAction));
+
+    const effectivePhase = this.phase === "paused" ? this.pausedFromPhase : this.phase;
+    this.restartPending = snapshot.restartPending ?? effectivePhase === "restart-preparing";
+    this.nextStagePending = snapshot.nextStagePending ?? (this.plannedReadyStageIndex !== undefined && this.plannedReadyStageIndex !== this.stageIndex
+      || effectivePhase === "tail-intake");
+    if (snapshot.blockers.some((blocker) => blocker.code === "PERMISSION_DENIED")) this.permissionDeniedEvidence = "restored permission denial";
+
+    const relevantStageId = snapshot.plannedReadyStageId ?? snapshot.currentStageId;
+    const goIndexes: number[] = [];
+    for (let index = 0; index < this.actions.length; index += 1) {
+      const candidate = this.actions[index];
+      if (candidate?.stageId === relevantStageId && candidate.kind === "go") goIndexes.push(index);
+    }
+    const latestGoIndex = goIndexes.at(-1) ?? -1;
+    const previousGoIndex = goIndexes.at(-2) ?? -1;
+    const cycleStart = effectivePhase === "running" || effectivePhase === "tail-intake" ? previousGoIndex + 1 : latestGoIndex + 1;
+    const cycleActions = this.actions.slice(cycleStart).filter((action) => action.stageId === relevantStageId);
+    const latest = (kind: AutomationActionKind): AutomationAction | undefined =>
+      [...cycleActions].reverse().find((action) => action.kind === kind);
+    const readyActions = cycleActions.filter((action) => action.kind === "ready");
+    this.readyActionIds.push(...readyActions.map((action) => action.id));
+    this.readyActionId = readyActions.at(-1)?.id;
+    this.noticeActionId = latest("notice")?.id;
+    this.readyAnnouncementActionId = [...cycleActions].reverse().find((action) => action.kind === "announce" && action.message === "READY!")?.id;
+    this.cheatOffActionId = latest("cheat-off")?.id;
+    this.goActionId = latest("go")?.id;
+    this.readyAtMs ??= readyActions[0]?.createdAtMs;
+    this.lastCheatOffAcknowledgedAtMs = snapshot.lastCheatOffAcknowledgedAtMs ?? latest("cheat-off")?.acknowledgedAtMs;
   }
 
   private get stage(): AutomationStage {
@@ -295,6 +372,11 @@ export class CompetitionController {
 
   private get currentAttempt(): MutableAttempt | undefined {
     return [...this.attempts].reverse().find((attempt) => attempt.stageId === this.stage.id && !attempt.voided);
+  }
+
+  private isResultIntakePhase(): boolean {
+    const effectivePhase = this.phase === "paused" || this.phase === "incident" ? this.pausedFromPhase : this.phase;
+    return effectivePhase === "running" || effectivePhase === "tail-intake";
   }
 
   public registerParticipant(participantId: string): boolean {
@@ -336,10 +418,10 @@ export class CompetitionController {
     if (enabled && this.hasCurrentCheatOffConfirmation(this.stage.id)) this.cheatEnabledAfterCurrentOff.add(participantId);
     if (!enabled) this.cheatEnabledAfterCurrentOff.delete(participantId);
     const attempt = this.currentAttempt;
-    if (enabled && attempt?.intakeOpen && (this.phase === "running" || this.phase === "tail-intake") && !attempt.results.some((result) => result.playerId === participantId)) {
+    if (enabled && attempt?.intakeOpen && this.isResultIntakePhase() && !attempt.results.some((result) => result.playerId === participantId)) {
       this.acceptResult(attempt, { playerId: participantId, status: "excluded", sourceId, receivedAtMs: this.clock.now(), reason: "cheat-enabled" });
     }
-    if (enabled && this.phase !== "running" && this.phase !== "tail-intake" && !this.cheatWarningSent && this.hasCurrentCheatOffConfirmation(this.stage.id)) {
+    if (enabled && !this.isResultIntakePhase() && !this.cheatWarningSent && this.hasCurrentCheatOffConfirmation(this.stage.id)) {
       this.cheatWarningSent = true;
       this.queueAction("notice", "检测到有玩家开启了cheat，请在发令前及时关闭，发令后仍开启视作违规。");
     }
@@ -354,7 +436,7 @@ export class CompetitionController {
   public observeViolation(participantId: string, sourceId: string, reason: string): void {
     this.assertParticipant(participantId);
     const attempt = this.currentAttempt;
-    if (!attempt?.intakeOpen || (this.phase !== "running" && this.phase !== "tail-intake")) return;
+    if (!attempt?.intakeOpen || !this.isResultIntakePhase()) return;
     const existing = attempt.results.find((result) => result.playerId === participantId);
     if (existing?.status === "dnf" || existing?.status === "excluded") return;
     if (existing?.status === "finished") {
@@ -574,13 +656,13 @@ export class CompetitionController {
     const stageIndex = this.stages.findIndex((stage) => stage.id === stageId);
     if (stageIndex < 0) throw new Error("UNKNOWN_STAGE");
     const current = this.currentAttempt;
-    if (current?.stageId === stageId && current.intakeOpen && this.phase === "running") return;
+    if (current?.stageId === stageId && current.intakeOpen && this.isResultIntakePhase()) return;
     this.startAttemptForStage(stageId);
     this.bump();
   }
 
   public observeCountdown(value: 3 | 2 | 1): void {
-    if (this.currentAttempt?.intakeOpen && (this.phase === "running" || this.phase === "tail-intake")) return;
+    if (this.currentAttempt?.intakeOpen && this.isResultIntakePhase()) return;
     this.countdownValue = value;
     if (this.phase !== "countdown") this.phase = "countdown";
     this.bump();
@@ -759,9 +841,16 @@ export class CompetitionController {
       ...(this.pausedFromPhase === undefined ? {} : { pausedFromPhase: this.pausedFromPhase }),
       stateVersion: this.stateVersion,
       automationEnabled: this.automationEnabled,
+      clockNowMs: this.clock.now(),
+      wallClockOriginMs: this.wallClockOriginMs,
       currentStageId: this.stage.id,
       ...(this.plannedReadyAtMs === undefined ? {} : { plannedReadyAtMs: this.plannedReadyAtMs }),
       ...(this.plannedReadyStage === undefined ? {} : { plannedReadyStageId: this.plannedReadyStage.id }),
+      ...(this.readyAtMs === undefined ? {} : { readyAtMs: this.readyAtMs }),
+      ...(this.waitDeadlineAtMs === undefined ? {} : { waitDeadlineAtMs: this.waitDeadlineAtMs }),
+      nextStagePending: this.nextStagePending,
+      restartPending: this.restartPending,
+      ...(this.lastCheatOffAcknowledgedAtMs === undefined ? {} : { lastCheatOffAcknowledgedAtMs: this.lastCheatOffAcknowledgedAtMs }),
       ...(this.countdownValue === undefined ? {} : { countdownValue: this.countdownValue }),
       blockers: this.startBlockers(),
       waitingParticipants: [...this.waiting],

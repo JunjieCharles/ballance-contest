@@ -167,6 +167,9 @@ export class CompetitionService {
       commandHistory: (competitionId) => this.commandHistory(competitionId),
       availableActionsFor: (competitionId, snapshot) => this.availableActionsFor(competitionId, snapshot),
       unconfirmedCommandsFor: (competitionId, snapshot) => this.unconfirmedCommandsFor(competitionId, snapshot),
+      observationGapsFor: (competitionId) => this.observationGapsFor(competitionId),
+      prepareAutomationSnapshot: (competitionId, targetWallClockOriginMs) => this.prepareAutomationSnapshot(competitionId, targetWallClockOriginMs),
+      restoredEngineSnapshot: (competitionId, automation) => this.restoredEngineSnapshot(competitionId, automation),
       attentionItemsFor: (competitionId, snapshot) => this.attentionItemsFor(competitionId, snapshot),
       journal: this.journal,
       dataRoot: resolve(options.dataRoot ?? process.cwd())
@@ -186,6 +189,7 @@ export class CompetitionService {
     });
     this.loadCompetitions();
     this.recoverAllSentCommands();
+    this.recoverPersistedWorkGaps();
   }
 
   public list(): readonly CompetitionRecord[] {
@@ -286,15 +290,18 @@ export class CompetitionService {
     const testRun = activeRunId ? this.getTestRunSnapshot(id, activeRunId) : undefined;
     const workRuntime = this.workRuntimeManager.get(id);
     const persistedWorkAutomation = payload.work?.automation;
-    const workAutomation = workRuntime?.controller.snapshot() ?? (persistedWorkAutomation
+    const preparedPersistedWorkAutomation = persistedWorkAutomation
+      ? this.prepareAutomationSnapshot(id, Date.now() - performance.now())
+      : undefined;
+    const workAutomation = workRuntime?.controller.snapshot() ?? (preparedPersistedWorkAutomation
       ? competition.status === "finished" || competition.status === "archived"
-        ? persistedWorkAutomation
+        ? preparedPersistedWorkAutomation
         : {
-            ...persistedWorkAutomation,
+            ...preparedPersistedWorkAutomation,
             phase: "paused" as const,
             automationEnabled: false,
             blockers: [
-              ...persistedWorkAutomation.blockers.filter((blocker) => blocker.code !== "AUTOMATION_PAUSED"),
+              ...preparedPersistedWorkAutomation.blockers.filter((blocker) => blocker.code !== "AUTOMATION_PAUSED"),
               { code: "AUTOMATION_PAUSED" as const, severity: "critical" as const, autoRecoverable: false, suggestion: "服务已重启；请核对服务器现场和不确定命令后重新启动工作运行。" }
             ]
           }
@@ -311,13 +318,14 @@ export class CompetitionService {
           "work",
           workAutomation,
           this.commandHistory(id),
-          workAutomation ? plannedStageStartAt(workAutomation, Date.now() - performance.now()) : undefined,
-          workAutomation ? plannedReadyAt(workAutomation, Date.now() - performance.now()) : undefined,
+          workAutomation ? plannedStageStartAt(workAutomation, workAutomation.wallClockOriginMs ?? Date.now() - performance.now()) : undefined,
+          workAutomation ? plannedReadyAt(workAutomation, workAutomation.wallClockOriginMs ?? Date.now() - performance.now()) : undefined,
           undefined,
           this.availableActionsFor(id, workAutomation),
           this.attentionItemsFor(id, workAutomation),
-          workAutomation ? stageDeadlineAt(workAutomation, Date.now() - performance.now()) : undefined,
-          this.unconfirmedCommandsFor(id, workAutomation)
+          workAutomation ? stageDeadlineAt(workAutomation, workAutomation.wallClockOriginMs ?? Date.now() - performance.now()) : undefined,
+          this.unconfirmedCommandsFor(id, workAutomation),
+          this.observationGapsFor(id)
         );
     const runtime: RuntimeSnapshot = baseRuntime;
     return {
@@ -436,6 +444,10 @@ export class CompetitionService {
     if (unresolvedCommands.length > 0) {
       throw new ServiceError("ACTION_UNAVAILABLE", "请先逐条处置失败或结果不确定的真实命令，再恢复自动化", 409, { commandIds: unresolvedCommands.map((command) => command.id) });
     }
+    const observationGaps = this.observationGapsFor(competitionId);
+    if (observationGaps.length > 0) {
+      throw new ServiceError("ACTION_UNAVAILABLE", "请先逐条核对服务中断期间的观察缺口，再恢复自动化", 409, { gapIds: observationGaps.map((gap) => gap.id) });
+    }
     if (competition.mode === "test") {
       const runId = input.runId ?? this.getPayload(competitionId).activeRunId;
       if (!runId) throw new ServiceError("NOT_FOUND", "请先创建测试运行", 404);
@@ -462,7 +474,7 @@ export class CompetitionService {
     const snapshot = runtime.controller.snapshot();
     const origin = Date.now() - performance.now();
     const result = automationView("work", snapshot, this.commandHistory(competitionId), plannedStageStartAt(snapshot, origin), plannedReadyAt(snapshot, origin), undefined,
-      this.availableActionsFor(competitionId, snapshot), this.attentionItemsFor(competitionId, snapshot), stageDeadlineAt(snapshot, origin), this.unconfirmedCommandsFor(competitionId, snapshot));
+      this.availableActionsFor(competitionId, snapshot), this.attentionItemsFor(competitionId, snapshot), stageDeadlineAt(snapshot, origin), this.unconfirmedCommandsFor(competitionId, snapshot), this.observationGapsFor(competitionId));
     if (idempotencyKey) this.idempotency.set(idempotencyKey, result);
     return result;
   }
@@ -489,7 +501,7 @@ export class CompetitionService {
     const snapshot = runtime.controller.snapshot();
     const origin = Date.now() - performance.now();
     return automationView("work", snapshot, this.commandHistory(competitionId), plannedStageStartAt(snapshot, origin), plannedReadyAt(snapshot, origin), undefined,
-      this.availableActionsFor(competitionId, snapshot), this.attentionItemsFor(competitionId, snapshot), stageDeadlineAt(snapshot, origin), this.unconfirmedCommandsFor(competitionId, snapshot));
+      this.availableActionsFor(competitionId, snapshot), this.attentionItemsFor(competitionId, snapshot), stageDeadlineAt(snapshot, origin), this.unconfirmedCommandsFor(competitionId, snapshot), this.observationGapsFor(competitionId));
   }
 
   public createConfirmation(
@@ -504,7 +516,8 @@ export class CompetitionService {
       rankPolicy?: "tie" | "shift";
       actionId?: string;
       commandId?: string;
-      resolution?: "confirm-executed" | "dismiss-failed" | "resend";
+      gapId?: string;
+      resolution?: "confirm-executed" | "dismiss-failed" | "resend" | "continue";
     }
   ): ConfirmationSummary {
     const competition = this.get(competitionId);
@@ -520,8 +533,11 @@ export class CompetitionService {
     const unresolvedCommand = input.kind === "command-resolution" && input.commandId
       ? this.unresolvedCommandRecord(competitionId, input.commandId, runtimeSnapshot)
       : undefined;
+    const observationGap = input.kind === "observation-gap-resolution" && input.gapId
+      ? this.observationGapsFor(competitionId).find((gap) => gap.id === input.gapId)
+      : undefined;
     if (input.kind === "automation-command-resolution") {
-      if (!unresolvedAutomationAction || !input.resolution || input.resolution === "dismiss-failed" || target !== unresolvedAutomationAction.id) {
+      if (!unresolvedAutomationAction || !input.resolution || input.resolution === "dismiss-failed" || input.resolution === "continue" || target !== unresolvedAutomationAction.id) {
         throw new ServiceError("CONFIRMATION_UNAVAILABLE", "目标流程命令已变化或不再需要处置", 409);
       }
       impactHash = createHash("sha256").update(JSON.stringify({
@@ -540,7 +556,7 @@ export class CompetitionService {
       })).digest("hex");
     }
     if (input.kind === "command-resolution") {
-      if (!unresolvedCommand || !input.resolution || target !== unresolvedCommand.id) {
+      if (!unresolvedCommand || !input.resolution || input.resolution === "continue" || target !== unresolvedCommand.id) {
         throw new ServiceError("CONFIRMATION_UNAVAILABLE", "目标真实命令已变化或不再需要处置", 409);
       }
       if (unresolvedCommand.status === "failed" && input.resolution === "confirm-executed"
@@ -548,6 +564,12 @@ export class CompetitionService {
         throw new ServiceError("CONFIRMATION_UNAVAILABLE", "处置方式与真实命令状态不匹配", 409);
       }
       impactHash = this.commandResolutionImpactHash(competitionId, competition.stateVersion, target, input.resolution, unresolvedCommand);
+    }
+    if (input.kind === "observation-gap-resolution") {
+      if (!observationGap || input.resolution !== "continue" || target !== observationGap.id) {
+        throw new ServiceError("CONFIRMATION_UNAVAILABLE", "目标观察缺口已变化或不再需要处置", 409);
+      }
+      impactHash = this.observationGapImpactHash(competitionId, competition.stateVersion, observationGap);
     }
     if (input.kind === "restart-stage") {
       try {
@@ -632,6 +654,12 @@ export class CompetitionService {
                 : ["原 uncertain 记录永久保留", "只记录裁判现场核对结论", "不会发送任何新命令"],
             irreversible: input.resolution === "resend"
           }
+      : input.kind === "observation-gap-resolution"
+        ? {
+            title: "确认带缺口继续比赛",
+            consequences: ["记录裁判已核对该观察缺口，但不会补造未观察到的成绩或事件", "原缺口证据永久保留并标记已处置", "仍需单独点击恢复自动化；如当前尝试不可信，应改用重赛本关"],
+            irreversible: false
+          }
       : input.kind === "restart-stage"
         ? { title: "确认重赛本关", consequences: ["当前尝试将作废并立即退出有效榜单，但原始证据永久保留", "发送重赛通知并重新执行 Ready ×3、READY、关闭 cheat 和 3/2/1/Go", "只有新 Go 才创建新尝试"], irreversible: false }
         : input.kind === "scoreboard-override"
@@ -683,6 +711,32 @@ export class CompetitionService {
     if (old) return old as CommandRecordView;
     const competition = this.get(competitionId);
     if (competition.stateVersion !== input.expectedStateVersion) throw new ServiceError("STATE_CONFLICT", "状态版本已变化", 409, { latestStateVersion: competition.stateVersion });
+    if (input.action.type === "resolve-observation-gap") {
+      const resolutionAction = input.action;
+      const gap = this.observationGapsFor(competitionId).find((candidate) => candidate.id === resolutionAction.gapId);
+      if (!gap) throw new ServiceError("ACTION_UNAVAILABLE", "目标观察缺口已变化或已完成处置", 409);
+      const currentImpactHash = this.observationGapImpactHash(competitionId, competition.stateVersion, gap);
+      if (currentImpactHash !== resolutionAction.impactHash) throw new ServiceError("CONFIRMATION_STALE", "观察缺口或比赛状态已变化，请重新确认", 409);
+      this.consumeConfirmation(competitionId, "observation-gap-resolution", resolutionAction.confirmationToken, resolutionAction.impactHash, gap.id);
+      if (!this.options.database) throw new ServiceError("CAPABILITY_UNSUPPORTED", "当前运行没有持久化观察缺口", 409);
+      const resolvedAt = new Date().toISOString();
+      this.options.database.sqlite.prepare("UPDATE observation_gaps SET status='resolved',resolved_at=? WHERE id=? AND competition_id=? AND status='open'")
+        .run(resolvedAt, gap.id, competitionId);
+      const view = this.refereeActionService.localActionRecord("observation-gap-continued", `裁判确认带缺口继续：${gap.detail}`, false);
+      this.recordCommandView(competitionId, input.idempotencyKey, view);
+      this.appendAttention(competitionId, {
+        id: `observation-gap-resolved:${gap.id}`,
+        category: "incident",
+        severity: "warning",
+        title: "观察缺口已由裁判确认",
+        message: `${gap.detail}；未补造任何事件，自动化仍保持暂停。`,
+        occurredAt: resolvedAt
+      });
+      this.bumpCompetitionVersion(competitionId);
+      this.idempotency.set(key, view);
+      this.journal.append({ type: "observation-gap.resolved", competitionId, stateVersion: this.get(competitionId).stateVersion, data: { gapId: gap.id, resolution: resolutionAction.resolution } });
+      return view;
+    }
     if (input.action.type === "resolve-command") {
       const resolutionAction = input.action;
       const automationSnapshot = this.runtimeAutomationSnapshot(competitionId) ?? this.getPayload(competitionId).work?.automation;
@@ -812,6 +866,7 @@ export class CompetitionService {
     if (actionId) this.assertActionAvailable(competitionId, actionId, this.runtimeAutomationSnapshot(competitionId));
     const confirmation = this.consumeActionConfirmation(competitionId, input.action);
     const handledLocally = await this.refereeActionService.applyLocal(competitionId, input.action, confirmation);
+    if (input.action.type === "restart-stage") this.resolveObservationGapsByRestart(competitionId, input.action.attemptId);
     let view: CommandRecordView;
     if (handledLocally) {
       view = this.refereeActionService.localActionRecord(input.action.type, this.refereeActionService.describe(input.action), competition.mode === "test");
@@ -1010,6 +1065,145 @@ export class CompetitionService {
     }
   }
 
+  private recoverPersistedWorkGaps(): void {
+    if (!this.options.database) return;
+    for (const competition of this.competitions.values()) {
+      if (competition.mode !== "work" || competition.status !== "published") continue;
+      const automation = this.getPayload(competition.id).work?.automation;
+      if (!automation) continue;
+      const effectivePhase = automation.phase === "paused" ? automation.pausedFromPhase : automation.phase;
+      if (!effectivePhase || !["ready", "countdown", "running", "tail-intake"].includes(effectivePhase)) continue;
+      const existing = row<{ id: string }>(this.options.database, "SELECT id FROM observation_gaps WHERE competition_id=? AND code='SERVICE_RESTART_GAP' AND status='open'", competition.id);
+      if (existing) continue;
+      const detail = effectivePhase === "ready" || effectivePhase === "countdown"
+        ? `服务在 ${effectivePhase} 阶段中断，期间可能发生未观察到的权威 Go 或命令回显。`
+        : `服务在 ${effectivePhase} 阶段中断，期间可能遗漏完赛、DNF、Warning、cheat 或掉线事件。`;
+      const id = randomUUID();
+      const createdAt = new Date().toISOString();
+      this.options.database.sqlite.prepare("INSERT INTO observation_gaps(id,competition_id,code,detail,status,created_at) VALUES (?,?,?,?,?,?)")
+        .run(id, competition.id, "SERVICE_RESTART_GAP", detail, "open", createdAt);
+      this.appendAttention(competition.id, {
+        id: `observation-gap:${id}`,
+        category: "incident",
+        severity: "critical",
+        title: "服务中断产生观察缺口",
+        message: `${detail} 请核对现场后确认继续，或重赛本关。`,
+        occurredAt: createdAt
+      });
+    }
+  }
+
+  private observationGapsFor(competitionId: string): RuntimeSnapshot["observationGaps"] {
+    return rows<{ id: string; code: string; detail: string; created_at: string }>(
+      this.options.database,
+      "SELECT id,code,detail,created_at FROM observation_gaps WHERE competition_id=? AND status='open' ORDER BY created_at",
+      competitionId
+    ).map((gap) => ({ id: gap.id, code: gap.code, detail: gap.detail, createdAt: gap.created_at }));
+  }
+
+  private resolveObservationGapsByRestart(competitionId: string, attemptId: string): void {
+    if (!this.options.database) return;
+    const gaps = this.observationGapsFor(competitionId);
+    if (gaps.length === 0) return;
+    const resolvedAt = new Date().toISOString();
+    this.options.database.sqlite.prepare("UPDATE observation_gaps SET status='resolved',resolved_at=? WHERE competition_id=? AND status='open'")
+      .run(resolvedAt, competitionId);
+    this.appendAttention(competitionId, {
+      id: `observation-gaps-restart:${attemptId}:${randomUUID()}`,
+      category: "incident",
+      severity: "info",
+      title: "观察缺口已由重赛处置",
+      message: `${gaps.length} 项观察缺口已绑定到作废尝试；新权威 Go 将创建新尝试，原缺口证据永久保留。`,
+      occurredAt: resolvedAt
+    });
+    this.journal.append({ type: "observation-gap.resolved-by-restart", competitionId, data: { attemptId, gapIds: gaps.map((gap) => gap.id) } });
+  }
+
+  private inferSnapshotWallClockOrigin(competitionId: string, snapshot: AutomationSnapshot, fallback: number): number {
+    if (snapshot.wallClockOriginMs !== undefined) return snapshot.wallClockOriginMs;
+    if (!this.options.database) return fallback;
+    const commandByKey = new Map(rows<{ idempotency_key: string; payload: string }>(
+      this.options.database,
+      "SELECT idempotency_key,payload FROM command_audits WHERE competition_id=?",
+      competitionId
+    ).map((item) => [item.idempotency_key, JSON.parse(item.payload) as CommandRecord]));
+    const candidates = snapshot.actions.flatMap((action) => {
+      if (action.acknowledgedAtMs === undefined) return [];
+      const command = commandByKey.get(action.idempotencyKey);
+      const wallAt = command ? Date.parse(command.updatedAt) : Number.NaN;
+      return Number.isFinite(wallAt) ? [wallAt - action.acknowledgedAtMs] : [];
+    }).sort((left, right) => left - right);
+    return candidates.length > 0 ? candidates[Math.floor(candidates.length / 2)] as number : fallback;
+  }
+
+  private prepareAutomationSnapshot(competitionId: string, targetWallClockOriginMs: number): AutomationSnapshot | undefined {
+    const stored = this.getPayload(competitionId).work?.automation;
+    if (!stored) return undefined;
+    const sourceOrigin = this.inferSnapshotWallClockOrigin(competitionId, stored, targetWallClockOriginMs);
+    const delta = sourceOrigin - targetWallClockOriginMs;
+    const shift = (value: number | undefined): number | undefined => value === undefined ? undefined : value + delta;
+    return {
+      ...stored,
+      ...(shift(stored.clockNowMs) === undefined ? {} : { clockNowMs: shift(stored.clockNowMs) as number }),
+      wallClockOriginMs: targetWallClockOriginMs,
+      ...(shift(stored.plannedReadyAtMs) === undefined ? {} : { plannedReadyAtMs: shift(stored.plannedReadyAtMs) as number }),
+      ...(shift(stored.readyAtMs) === undefined ? {} : { readyAtMs: shift(stored.readyAtMs) as number }),
+      ...(shift(stored.waitDeadlineAtMs) === undefined ? {} : { waitDeadlineAtMs: shift(stored.waitDeadlineAtMs) as number }),
+      ...(shift(stored.lastCheatOffAcknowledgedAtMs) === undefined ? {} : { lastCheatOffAcknowledgedAtMs: shift(stored.lastCheatOffAcknowledgedAtMs) as number }),
+      ...(shift(stored.startProtectionUntilMs) === undefined ? {} : { startProtectionUntilMs: shift(stored.startProtectionUntilMs) as number }),
+      attempts: stored.attempts.map((attempt) => ({
+        ...attempt,
+        goAtMs: attempt.goAtMs + delta,
+        deadlineAtMs: attempt.deadlineAtMs + delta,
+        ...(attempt.intakeClosedAtMs === undefined ? {} : { intakeClosedAtMs: attempt.intakeClosedAtMs + delta }),
+        results: attempt.results.map((result) => ({ ...result, receivedAtMs: result.receivedAtMs + delta }))
+      })),
+      incidents: stored.incidents.map((incident) => ({ ...incident, createdAtMs: incident.createdAtMs + delta })),
+      rejectedResults: stored.rejectedResults.map((result) => ({ ...result, receivedAtMs: result.receivedAtMs + delta })),
+      actions: stored.actions.map((action) => ({
+        ...action,
+        createdAtMs: action.createdAtMs + delta,
+        ...(action.acknowledgedAtMs === undefined ? {} : { acknowledgedAtMs: action.acknowledgedAtMs + delta })
+      }))
+    };
+  }
+
+  private restoredEngineSnapshot(competitionId: string, automation: AutomationSnapshot): EngineSnapshot | undefined {
+    const payload = this.getPayload(competitionId);
+    const storedEngine = payload.work?.engine;
+    const persistedVersions = this.storedScoreboardVersions(competitionId)
+      .map((version) => this.scoreboardService.toVersion(version, Math.max(1, version.entries.length)));
+    if (storedEngine) {
+      const storedAutomation = payload.work?.automation;
+      const sourceOrigin = storedAutomation
+        ? this.inferSnapshotWallClockOrigin(competitionId, storedAutomation, automation.wallClockOriginMs ?? 0)
+        : automation.wallClockOriginMs ?? 0;
+      const delta = sourceOrigin - (automation.wallClockOriginMs ?? sourceOrigin);
+      return {
+        ...storedEngine,
+        attempts: storedEngine.attempts.map((attempt) => ({ ...attempt, goAtMs: attempt.goAtMs + delta, deadlineAtMs: attempt.deadlineAtMs + delta })),
+        scoreboardVersions: persistedVersions.length > 0 ? persistedVersions : storedEngine.scoreboardVersions.map((version) => ({ ...version })),
+        anomalies: storedEngine.anomalies.map((anomaly) => ({ ...anomaly })),
+        currentScoreboard: persistedVersions.at(-1)?.entries ?? storedEngine.currentScoreboard.map((entry) => ({ ...entry }))
+      };
+    }
+    return {
+      attempts: automation.attempts.map((attempt) => ({
+        id: attempt.id,
+        stageId: attempt.stageId,
+        attemptNumber: attempt.attemptNumber,
+        goSourceId: [...automation.actions].reverse().find((action) => action.kind === "go" && action.stageId === attempt.stageId && action.createdAtMs <= attempt.goAtMs)?.idempotencyKey ?? `restored-go:${attempt.id}`,
+        goAtMs: attempt.goAtMs,
+        deadlineAtMs: attempt.deadlineAtMs,
+        open: attempt.intakeOpen,
+        voided: attempt.voided
+      })),
+      scoreboardVersions: persistedVersions,
+      anomalies: [],
+      currentScoreboard: persistedVersions.at(-1)?.entries ?? []
+    };
+  }
+
   private toRecordView(record: CompetitionRecord): CompetitionRecordView {
     return {
       id: record.id,
@@ -1205,6 +1399,18 @@ export class CompetitionService {
         occurredAt: recovered.updatedAt
       });
     }
+    if (recoveredAutomation) {
+      const recoveredAtMs = recoveredAutomation.clockNowMs
+        ?? Math.max(0, ...recoveredAutomation.actions.map((action) => action.acknowledgedAtMs ?? action.createdAtMs));
+      recoveredAutomation = {
+        ...recoveredAutomation,
+        actions: recoveredAutomation.actions.map((action) => action.status !== "pending"
+          ? action
+          : ["ready", "cheat-off", "go"].includes(action.kind)
+            ? { ...action, status: "uncertain" as const }
+            : { ...action, status: "acknowledged" as const, acknowledgedAtMs: recoveredAtMs })
+      };
+    }
     if (recoveredAutomation && payload.work) this.savePayload(competitionId, { ...payload, work: { ...payload.work, automation: recoveredAutomation } });
   }
 
@@ -1282,10 +1488,11 @@ export class CompetitionService {
     const competition = this.get(competitionId);
     const refereeActionsUnlocked = competition.status !== "draft";
     const phase = snapshot?.phase ?? competition.status;
+    const hasObservationGaps = this.observationGapsFor(competitionId).length > 0;
     const blockers = snapshot?.blockers.filter((blocker) => blocker.code !== "AUTOMATION_PAUSED") ?? [];
-    const hasBlockingIssue = blockers.some((blocker) => blocker.severity === "critical" || blocker.code === "PARTICIPANT_OFFLINE");
-    const hasReadyFlowBlockingIssue = blockers.some((blocker) => blocker.code !== "PARTICIPANT_CHEAT" && (blocker.severity === "critical" || blocker.code === "PARTICIPANT_OFFLINE"));
-    const hasResumeBlockingIssue = blockers.some((blocker) => blocker.severity === "critical" && blocker.code !== "INCIDENT_OPEN");
+    const hasBlockingIssue = hasObservationGaps || blockers.some((blocker) => blocker.severity === "critical" || blocker.code === "PARTICIPANT_OFFLINE");
+    const hasReadyFlowBlockingIssue = hasObservationGaps || blockers.some((blocker) => blocker.code !== "PARTICIPANT_CHEAT" && (blocker.severity === "critical" || blocker.code === "PARTICIPANT_OFFLINE"));
+    const hasResumeBlockingIssue = hasObservationGaps || blockers.some((blocker) => blocker.severity === "critical" && blocker.code !== "INCIDENT_OPEN");
     const hasUnconfirmedAutomationActions = snapshot?.actions.some(isUnresolvedAutomationAction) ?? false;
     const hasUnconfirmedCommands = this.unconfirmedCommandsFor(competitionId, snapshot).length > 0;
     const hasOpenServerIncident = (snapshot?.incidents as readonly { type?: string; status?: string }[] | undefined)
@@ -1302,6 +1509,7 @@ export class CompetitionService {
     const hasRuntime = competition.mode === "work"
       ? this.workRuntimeManager.has(competitionId)
       : Boolean(this.getPayload(competitionId).activeRunId && snapshot);
+    const hasPersistedWorkRuntime = competition.mode === "work" && Boolean(this.getPayload(competitionId).work?.started);
     const descriptor = (
       action: RefereeActionId,
       label: string,
@@ -1310,7 +1518,7 @@ export class CompetitionService {
       disabledReason: string
     ): ActionAvailability => ({ action, label, effect, enabled, ...(enabled ? {} : { disabledReason }) });
     return [
-      descriptor("start-work", "启动工作运行", "启动真实 MockClient，并立即开始在线名单对账。", competition.mode === "work" && competition.status === "published" && !hasRuntime,
+      descriptor("start-work", hasPersistedWorkRuntime ? "恢复工作运行" : "启动工作运行", hasPersistedWorkRuntime ? "重启真实 MockClient，恢复持久化阶段、尝试、榜单和计划，并保持自动化暂停等待现场核对。" : "启动真实 MockClient，并立即开始在线名单对账。", competition.mode === "work" && competition.status === "published" && !hasRuntime,
         competition.mode !== "work" ? "测试比赛不启动真实 MockClient" : competition.status !== "published" ? "请先发布比赛配置" : "工作运行已经启动"),
       descriptor("restart-work", competition.mode === "work" ? "重启 MockClient" : "模拟恢复连接", "恢复服务器事件源；连接成功后保持原阶段暂停，等待裁判恢复自动化。",
         refereeActionsUnlocked && hasRuntime && hasOpenServerIncident,
@@ -1321,8 +1529,8 @@ export class CompetitionService {
         phase === "paused" || snapshot?.pausedFromPhase
           ? "从暂停前阶段继续；未确认命令必须先由裁判核对，且不会自动重发。"
           : "按轮间准备时长规划首轮 Ready，并由状态机推进后续流程。",
-        refereeActionsUnlocked && hasRuntime && !snapshot?.automationEnabled && !["review", "incident"].includes(phase) && !hasUnconfirmedAutomationActions && !hasUnconfirmedCommands && !hasResumeBlockingIssue,
-        !refereeActionsUnlocked ? "请先发布比赛配置" : !hasRuntime ? "请先启动运行" : snapshot?.automationEnabled ? "自动化已经启用" : phase === "incident" ? "请先恢复 MockClient/服务器连接" : hasUnconfirmedAutomationActions ? "请先逐条确认流程命令已执行或执行重发" : hasUnconfirmedCommands ? "请先逐条处置失败或结果不确定的真实命令" : hasResumeBlockingIssue ? "请先按红色阻断项完成复检或处置" : "比赛已进入复核"
+        refereeActionsUnlocked && hasRuntime && !snapshot?.automationEnabled && !["review", "incident"].includes(phase) && !hasUnconfirmedAutomationActions && !hasUnconfirmedCommands && !hasObservationGaps && !hasResumeBlockingIssue,
+        !refereeActionsUnlocked ? "请先发布比赛配置" : !hasRuntime ? "请先启动运行" : snapshot?.automationEnabled ? "自动化已经启用" : phase === "incident" ? "请先恢复 MockClient/服务器连接" : hasUnconfirmedAutomationActions ? "请先逐条确认流程命令已执行或执行重发" : hasUnconfirmedCommands ? "请先逐条处置失败或结果不确定的真实命令" : hasObservationGaps ? "请先逐条核对服务中断期间的观察缺口" : hasResumeBlockingIssue ? "请先按红色阻断项完成复检或处置" : "比赛已进入复核"
       ),
       descriptor("pause-automation", "暂停自动化", "停止自动推进；已经发出的真实命令不会自动撤回。", refereeActionsUnlocked && Boolean(snapshot?.automationEnabled),
         !refereeActionsUnlocked ? "请先发布比赛配置" : "自动化当前未启用"),
@@ -1473,6 +1681,20 @@ export class CompetitionService {
         command: command.command,
         status: command.status
       }
+    })).digest("hex");
+  }
+
+  private observationGapImpactHash(
+    competitionId: string,
+    stateVersion: number,
+    gap: RuntimeSnapshot["observationGaps"][number]
+  ): string {
+    return createHash("sha256").update(JSON.stringify({
+      competitionId,
+      stateVersion,
+      kind: "observation-gap-resolution",
+      resolution: "continue",
+      gap
     })).digest("hex");
   }
 

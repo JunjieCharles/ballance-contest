@@ -573,7 +573,7 @@ function ConsolePanel({ snapshot, canWrite, versionKey, startWork, enableAutomat
   return <section className="grid two">
     <div className="panel"><h2>裁判操作</h2>
       <div className="button-row action-row">
-        {snapshot.competition.mode === "work" && <ActionButton runtime={runtime} action="start-work" canWrite={canWrite} onClick={() => void startWork()}>启动 MockClient</ActionButton>}
+        {snapshot.competition.mode === "work" && <ActionButton runtime={runtime} action="start-work" canWrite={canWrite} onClick={() => void startWork()}>{availabilityFor(runtime, "start-work")?.label ?? "启动 MockClient"}</ActionButton>}
         <ActionButton runtime={runtime} action="restart-work" canWrite={canWrite} onClick={() => void performAction({ type: "restart-work" })}>{availabilityFor(runtime, "restart-work")?.label ?? "恢复连接"}</ActionButton>
         <ActionButton runtime={runtime} action="enable-automation" canWrite={canWrite} onClick={() => void enableAutomation()}>{availabilityFor(runtime, "enable-automation")?.label ?? "启动自动化"}</ActionButton>
         <ActionButton runtime={runtime} action="pause-automation" canWrite={canWrite} className="secondary" onClick={() => void pauseAutomation()}>暂停自动化</ActionButton>
@@ -603,7 +603,7 @@ function ConsolePanel({ snapshot, canWrite, versionKey, startWork, enableAutomat
       </div>
     </div>
     <div className="panel"><h2>流程动态与注意事项</h2>
-      {runtime.unconfirmedAutomationActions.length > 0 && <section className="unconfirmed-command-panel"><h3>未确认流程命令</h3>
+      {runtime.unconfirmedAutomationActions.length > 0 && <section className="unconfirmed-command-panel critical"><h3>未确认流程命令</h3>
         <p className="muted">请逐条选择“确认已执行”或“执行重发”。原命令审计永不覆盖。</p>
         {runtime.unconfirmedAutomationActions.map((action) => <div className="unconfirmed-command-row" key={action.id}>
           <div><strong>{action.kind}</strong><small>{action.stageId} · {action.status}</small></div>
@@ -614,7 +614,7 @@ function ConsolePanel({ snapshot, canWrite, versionKey, startWork, enableAutomat
             requestPayload={{ actionId: action.id, resolution: "resend" }} disabled={!canWrite} requestConfirmation={requestConfirmation}
             onConfirm={(confirmation) => performAction({ type: "resolve-automation-command", actionId: action.id, resolution: "resend", confirmationToken: confirmation.token, impactHash: confirmation.impactHash })} />
         </div>)}</section>}
-      {runtime.unconfirmedCommands.length > 0 && <section className="unconfirmed-command-panel"><h3>未确认真实命令</h3>
+      {runtime.unconfirmedCommands.length > 0 && <section className="unconfirmed-command-panel critical"><h3>未确认真实命令</h3>
         <p className="muted">这些命令可能失败或已经执行但缺少可靠结果。请逐条核对；原审计记录永久保留。</p>
         {runtime.unconfirmedCommands.map((command) => <div className="unconfirmed-command-row" key={command.id}>
           <div><strong>{command.actionType}</strong><small>{command.command} · {command.status}</small></div>
@@ -624,6 +624,14 @@ function ConsolePanel({ snapshot, canWrite, versionKey, startWork, enableAutomat
           <ConfirmButton key={`command-resend:${command.id}:${versionKey}`} label="执行重发" kind="command-resolution" target={command.id} versionKey={versionKey} className="danger"
             requestPayload={{ commandId: command.id, resolution: "resend" }} disabled={!canWrite} requestConfirmation={requestConfirmation}
             onConfirm={(confirmation) => performAction({ type: "resolve-command", commandId: command.id, resolution: "resend", confirmationToken: confirmation.token, impactHash: confirmation.impactHash })} />
+        </div>)}</section>}
+      {runtime.observationGaps.length > 0 && <section className="unconfirmed-command-panel critical"><h3>服务中断观察缺口</h3>
+        <p className="muted">这些事项无法从日志或排行榜可靠补回。核对现场后可确认带缺口继续；当前尝试不可信时请使用“重赛本关”。</p>
+        {runtime.observationGaps.map((gap) => <div className="unconfirmed-command-row" key={gap.id}>
+          <div><strong>{gap.code}</strong><small>{gap.detail}</small></div>
+          <ConfirmButton key={`gap-continue:${gap.id}:${versionKey}`} label="确认带缺口继续" kind="observation-gap-resolution" target={gap.id} versionKey={versionKey}
+            requestPayload={{ gapId: gap.id, resolution: "continue" }} disabled={!canWrite} requestConfirmation={requestConfirmation}
+            onConfirm={(confirmation) => performAction({ type: "resolve-observation-gap", gapId: gap.id, resolution: "continue", confirmationToken: confirmation.token, impactHash: confirmation.impactHash })} />
         </div>)}</section>}
       {runtime.attentionItems.length === 0 && <p className="muted">暂无需要注意的流程动态。</p>}
       <div className="attention-list">{runtime.attentionItems.map((item) => <article className={`attention-card ${item.severity}`} key={item.id}>

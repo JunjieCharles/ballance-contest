@@ -1,5 +1,5 @@
 import type { ScoreboardVersionView, ScenarioDefinition } from "@ballance/contracts";
-import type { AutomationAction, AutomationSnapshot } from "@ballance/core";
+import type { AutomationAction, AutomationSnapshot, EngineSnapshot } from "@ballance/core";
 
 export interface PersistedTestOperation {
   kind: "automation-start" | "advance-clock" | "fault";
@@ -34,5 +34,5 @@ export interface ServiceSnapshotPayload {
   scoreboardRevisions?: ScoreboardVersionView[];
   archives?: Array<{ version: number; directory: string; packagePath: string; manifestHash: string; createdAt: string }>;
   resolvedCommandIds?: string[];
-  work?: { started: boolean; mockClientVersion?: string; automation?: AutomationSnapshot; mapEchoPrefixes?: Record<string, string> };
+  work?: { started: boolean; mockClientVersion?: string; automation?: AutomationSnapshot; engine?: EngineSnapshot; mapEchoPrefixes?: Record<string, string> };
 }

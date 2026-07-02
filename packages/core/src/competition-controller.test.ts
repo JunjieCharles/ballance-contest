@@ -53,6 +53,30 @@ const enterRunning = (controller: CompetitionController, clock: FakeClock): void
 };
 
 describe("CompetitionController", () => {
+  it("restores a persisted running attempt without redelivering historical commands", () => {
+    const clock = new FakeClock();
+    const original = new CompetitionController(configuration({ wallClockOriginMs: 1_000_000 }), clock);
+    connectAll(original);
+    enterRunning(original, clock);
+    original.recordResult({ stageId: "s1", playerId: "p1", status: "finished", sourceId: "persisted-finish" });
+    const persisted = original.snapshot();
+
+    const restored = new CompetitionController(configuration({ wallClockOriginMs: 1_000_000, initialSnapshot: persisted }), clock);
+    expect(restored.snapshot()).toMatchObject({
+      phase: "running",
+      currentStageId: "s1",
+      attempts: [{ attemptNumber: 1, intakeOpen: true, results: [expect.objectContaining({ sourceId: "persisted-finish" })] }]
+    });
+    expect(restored.drainActions()).toEqual([]);
+    expect(restored.recordResult({ stageId: "s1", playerId: "p2", status: "finished", sourceId: "finish-after-restore" })).toBe("accepted");
+    restored.pause();
+    restored.observeCheat("p3", true, "cheat-during-recovery-block");
+    expect(restored.snapshot().attempts[0]?.results).toEqual(expect.arrayContaining([
+      expect.objectContaining({ sourceId: "finish-after-restore" }),
+      expect.objectContaining({ playerId: "p3", status: "excluded", reason: "cheat-enabled" })
+    ]));
+  });
+
   it("sends Notice, Ready at 0/5/10, READY at 15, cheat-off at 20 and Go no earlier than 30 seconds", () => {
     const clock = new FakeClock();
     const controller = new CompetitionController(configuration(), clock);

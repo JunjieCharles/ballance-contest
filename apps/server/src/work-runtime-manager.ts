@@ -26,6 +26,7 @@ import {
   type AutomationAction,
   type AutomationSnapshot,
   type DomainEvent,
+  type EngineSnapshot,
   type ScoreboardVersion
 } from "@ballance/core";
 import { WorkAutomationRuntime } from "./automation-runtime.js";
@@ -83,6 +84,9 @@ export interface WorkRuntimeHost {
   commandHistory(competitionId: string): CommandRecordView[];
   availableActionsFor(competitionId: string, snapshot?: AutomationSnapshot): ActionAvailability[];
   unconfirmedCommandsFor(competitionId: string, snapshot?: AutomationSnapshot): RuntimeSnapshot["unconfirmedCommands"];
+  observationGapsFor(competitionId: string): RuntimeSnapshot["observationGaps"];
+  prepareAutomationSnapshot(competitionId: string, targetWallClockOriginMs: number): AutomationSnapshot | undefined;
+  restoredEngineSnapshot(competitionId: string, automation: AutomationSnapshot): EngineSnapshot | undefined;
   attentionItemsFor(competitionId: string, snapshot?: AutomationSnapshot): AttentionItem[];
   journal: EventJournal;
   dataRoot: string;
@@ -170,7 +174,7 @@ export class WorkRuntimeManager {
     const origin = Date.now() - performance.now();
     return automationView("work", snapshot, this.host.commandHistory(runtime.competitionId), plannedStageStartAt(snapshot, origin), plannedReadyAt(snapshot, origin), undefined,
       this.host.availableActionsFor(runtime.competitionId, snapshot), this.host.attentionItemsFor(runtime.competitionId, snapshot), stageDeadlineAt(snapshot, origin),
-      this.host.unconfirmedCommandsFor(runtime.competitionId, snapshot));
+      this.host.unconfirmedCommandsFor(runtime.competitionId, snapshot), this.host.observationGapsFor(runtime.competitionId));
   }
 
   public get(competitionId: string): WorkRuntime | undefined { return this.runtimes.get(competitionId); }
@@ -179,6 +183,10 @@ export class WorkRuntimeManager {
 
   public makeRuntime(competitionId: string, config: CompetitionConfig, transport: CommandTransport, mockClientVersion?: string): WorkRuntime {
     const definition = this.configToScenarioDefinition(config);
+    const wallClockOriginMs = Date.now() - performance.now();
+    const initialSnapshot = this.host.getPayload(competitionId).work?.started
+      ? this.host.prepareAutomationSnapshot(competitionId, wallClockOriginMs)
+      : undefined;
     const controller = new CompetitionController({
       competitionId,
       participants: definition.players.map((player) => player.id),
@@ -195,21 +203,26 @@ export class WorkRuntimeManager {
         };
       }),
       policy: automationPolicyFor(config),
-      wallClockOriginMs: Date.now() - performance.now(),
+      wallClockOriginMs,
       ...(this.host.getPayload(competitionId).work?.automation?.startProtectionUsedStageIds === undefined
         ? {}
-        : { startProtectionUsedStageIds: this.host.getPayload(competitionId).work?.automation?.startProtectionUsedStageIds })
+        : { startProtectionUsedStageIds: this.host.getPayload(competitionId).work?.automation?.startProtectionUsedStageIds }),
+      ...(initialSnapshot === undefined ? {} : { initialSnapshot })
     }, new SystemMonotonicClock());
+    if (initialSnapshot && !["review", "lobby"].includes(initialSnapshot.phase)) controller.pause();
     const commands = new CommandQueue(
       transport,
       (action) => action.type === "go" ? 15_000 : 10_000,
       (record) => this.host.recordCommand(competitionId, record)
     );
+    const engine = new CompetitionEngine(definition);
+    const restoredEngine = initialSnapshot ? this.host.restoredEngineSnapshot(competitionId, initialSnapshot) : undefined;
+    if (restoredEngine) engine.restore(restoredEngine);
     const runtime: WorkRuntime = {
       competitionId,
       server: config.server,
       controller,
-      engine: new CompetitionEngine(definition),
+      engine,
       commands,
       runtime: new WorkAutomationRuntime(controller, commands),
       mapEchoPrefixes: new Map(Object.entries(this.host.getPayload(competitionId).work?.mapEchoPrefixes ?? {})),
@@ -306,6 +319,7 @@ export class WorkRuntimeManager {
         started: true,
         ...(runtime.mockClientVersion === undefined ? {} : { mockClientVersion: runtime.mockClientVersion }),
         automation: runtime.controller.snapshot(),
+        engine: runtime.engine.snapshot(),
         mapEchoPrefixes: Object.fromEntries(runtime.mapEchoPrefixes)
       }
     });

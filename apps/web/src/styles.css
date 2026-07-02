@@ -290,6 +290,8 @@ header > span:last-of-type { margin-left: auto; font-size: 13px; }
   background: #fff8e8;
 }
 .unconfirmed-command-panel h3 { margin-top: 0; }
+.unconfirmed-command-panel.critical { border-color: #b02d3c; background: #fff1f2; }
+.unconfirmed-command-panel.critical .unconfirmed-command-row { border-top-color: #edc4ca; }
 .unconfirmed-command-row {
   display: grid;
   grid-template-columns: minmax(150px, 1fr) minmax(150px, auto) minmax(150px, auto);

@@ -344,6 +344,12 @@ export interface RuntimeSnapshot {
     command: string;
     createdAt: string;
   }[];
+  observationGaps: readonly {
+    id: string;
+    code: string;
+    detail: string;
+    createdAt: string;
+  }[];
 }
 
 export type RefereeActionId =
@@ -444,7 +450,7 @@ export interface CompetitionSnapshot {
   archives: readonly { version: number; directory: string; packagePath: string; manifestHash: string; createdAt: string }[];
 }
 
-export type ConfirmationKind = "restart-stage" | "manual-action" | "manual-go" | "scoreboard-override" | "automation-command-resolution" | "command-resolution" | "high-risk";
+export type ConfirmationKind = "restart-stage" | "manual-action" | "manual-go" | "scoreboard-override" | "automation-command-resolution" | "command-resolution" | "observation-gap-resolution" | "high-risk";
 
 export interface ConfirmationSummary {
   token: string;
@@ -514,6 +520,13 @@ export type CompetitionAction =
       type: "resolve-command";
       commandId: string;
       resolution: "confirm-executed" | "dismiss-failed" | "resend";
+      confirmationToken: string;
+      impactHash: string;
+    }
+  | {
+      type: "resolve-observation-gap";
+      gapId: string;
+      resolution: "continue";
       confirmationToken: string;
       impactHash: string;
     }

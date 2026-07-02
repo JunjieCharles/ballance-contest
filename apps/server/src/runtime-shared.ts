@@ -69,7 +69,8 @@ export const automationView = (
   availableActions: readonly ActionAvailability[] = [],
   attentionItems: readonly AttentionItem[] = [],
   deadlineAt?: string,
-  unconfirmedCommands: RuntimeSnapshot["unconfirmedCommands"] = []
+  unconfirmedCommands: RuntimeSnapshot["unconfirmedCommands"] = [],
+  observationGaps: RuntimeSnapshot["observationGaps"] = []
 ): RuntimeSnapshot => ({
   phase: snapshot?.phase ?? "draft",
   ...(snapshot?.pausedFromPhase === undefined ? {} : { pausedFromPhase: snapshot.pausedFromPhase }),
@@ -84,9 +85,13 @@ export const automationView = (
   ...(deadlineAt === undefined ? {} : { stageDeadlineAt: deadlineAt }),
   ...(virtualNowMs === undefined ? {} : { virtualNowMs }),
   ...(snapshot?.countdownValue === undefined ? {} : { countdownValue: snapshot.countdownValue }),
-  blockers: unconfirmedCommands.length > 0 && !snapshot?.blockers.some((blocker) => blocker.code === "COMMAND_UNCONFIRMED")
-    ? [...(snapshot?.blockers ?? []), { code: "COMMAND_UNCONFIRMED", severity: "critical", autoRecoverable: false, suggestion: "逐条处置失败或结果不确定的真实命令" }]
-    : snapshot?.blockers ?? [],
+  blockers: [
+    ...(snapshot?.blockers ?? []),
+    ...(unconfirmedCommands.length > 0 && !snapshot?.blockers.some((blocker) => blocker.code === "COMMAND_UNCONFIRMED")
+      ? [{ code: "COMMAND_UNCONFIRMED", severity: "critical" as const, autoRecoverable: false, suggestion: "逐条处置失败或结果不确定的真实命令" }]
+      : []),
+    ...(observationGaps.length > 0 ? [{ code: "OBSERVATION_GAP", severity: "critical" as const, autoRecoverable: false, suggestion: "逐条核对观察缺口，选择确认继续或重赛本关" }] : [])
+  ],
   waitingParticipants: snapshot?.waitingParticipants ?? [],
   attempts: snapshot?.attempts ?? [],
   incidents: snapshot?.incidents ?? [],
@@ -98,7 +103,8 @@ export const automationView = (
   unconfirmedAutomationActions: snapshot?.actions
     .filter(isUnresolvedAutomationAction)
     .map((action) => ({ id: action.id, kind: action.kind, stageId: action.stageId, status: action.status })) ?? [],
-  unconfirmedCommands
+  unconfirmedCommands,
+  observationGaps
 });
 
 export const plannedStageStartAt = (snapshot: AutomationSnapshot, epochOriginMs: number): string | undefined => {
