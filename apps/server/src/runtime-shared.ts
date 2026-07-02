@@ -71,6 +71,7 @@ export const automationView = (
   automationEnabled: snapshot?.automationEnabled ?? false,
   ...(snapshot?.currentStageId === undefined ? {} : { currentStageId: snapshot.currentStageId }),
   ...(snapshot?.plannedReadyAtMs === undefined ? {} : { plannedReadyAtMs: snapshot.plannedReadyAtMs }),
+  ...(snapshot?.plannedReadyStageId === undefined ? {} : { plannedReadyStageId: snapshot.plannedReadyStageId }),
   ...(plannedReadyAtValue === undefined ? {} : { plannedReadyAt: plannedReadyAtValue }),
   ...(plannedStageStartAt === undefined ? {} : { plannedStageStartAt }),
   ...(deadlineAt === undefined ? {} : { stageDeadlineAt: deadlineAt }),
@@ -90,15 +91,35 @@ export const automationView = (
     .map((action) => ({ id: action.id, kind: action.kind, stageId: action.stageId, status: action.status })) ?? []
 });
 
-export const plannedStageStartAt = (snapshot: AutomationSnapshot, epochOriginMs: number, readyBufferMs: number): string | undefined => {
-  const stageActions = snapshot.actions.filter((action) => action.stageId === snapshot.currentStageId && action.status === "acknowledged");
-  const latestGo = [...stageActions].reverse().find((action) => action.kind === "go");
-  if (latestGo && (snapshot.phase === "running" || snapshot.phase === "tail-intake" || snapshot.phase === "review")) {
-    return new Date(epochOriginMs + latestGo.createdAtMs).toISOString();
-  }
-  const latestReady = [...stageActions].reverse().find((action) => action.kind === "ready");
-  const plannedAtMs = latestReady ? latestReady.createdAtMs + readyBufferMs
-    : snapshot.plannedReadyAtMs === undefined ? undefined : snapshot.plannedReadyAtMs + readyBufferMs;
+export const plannedStageStartAt = (snapshot: AutomationSnapshot, epochOriginMs: number): string | undefined => {
+  const attempt = [...snapshot.attempts].reverse().find((candidate) => candidate.stageId === snapshot.currentStageId && !candidate.voided);
+  if (attempt) return new Date(epochOriginMs + attempt.goAtMs).toISOString();
+  const stageActions = snapshot.actions.filter((action) => action.stageId === snapshot.currentStageId);
+  const lastGoIndex = stageActions.findLastIndex((action) => action.kind === "go");
+  const flowActions = stageActions.slice(lastGoIndex + 1).filter((action) => !action.manual);
+  const firstReady = flowActions.find((action) => action.kind === "ready");
+  const pendingGo = flowActions.findLast((action) => action.kind === "go");
+  const cheatOff = flowActions.findLast((action) => action.kind === "cheat-off");
+  const readyAnnouncement = flowActions.findLast((action) => action.kind === "announce" && action.message === "READY!");
+  const readyActions = flowActions.filter((action) => action.kind === "ready");
+  const acknowledgedOrCreatedAt = (action: typeof flowActions[number]): number => action.acknowledgedAtMs ?? action.createdAtMs;
+  const plannedFromFlow = pendingGo ? pendingGo.createdAtMs + 3_000
+    : cheatOff ? acknowledgedOrCreatedAt(cheatOff) + 13_000
+      : readyAnnouncement && firstReady
+        ? Math.max(firstReady.createdAtMs + 20_000, acknowledgedOrCreatedAt(readyAnnouncement) + 5_000) + 13_000
+        : firstReady && readyActions.length > 0
+          ? (() => {
+              const lastReady = readyActions.at(-1) as typeof readyActions[number];
+              const nextReadyAt = Math.max(firstReady.createdAtMs + readyActions.length * 5_000, acknowledgedOrCreatedAt(lastReady) + 5_000);
+              const readyStepsRemaining = Math.max(0, 2 - readyActions.length);
+              return nextReadyAt + readyStepsRemaining * 5_000 + 5_000 + 5_000 + 10_000 + 3_000;
+            })()
+          : undefined;
+  const plannedAtMs = plannedFromFlow ?? (
+    snapshot.plannedReadyStageId === snapshot.currentStageId && snapshot.plannedReadyAtMs !== undefined
+      ? snapshot.plannedReadyAtMs + 33_000
+      : undefined
+  );
   return plannedAtMs === undefined ? undefined : new Date(epochOriginMs + plannedAtMs).toISOString();
 };
 
@@ -106,7 +127,7 @@ export const plannedReadyAt = (snapshot: AutomationSnapshot, epochOriginMs: numb
   snapshot.plannedReadyAtMs === undefined ? undefined : new Date(epochOriginMs + snapshot.plannedReadyAtMs).toISOString();
 
 export const stageDeadlineAt = (snapshot: AutomationSnapshot, epochOriginMs: number): string | undefined => {
-  const attempt = [...snapshot.attempts].reverse().find((candidate) => candidate.stageId === snapshot.currentStageId && candidate.intakeOpen);
+  const attempt = [...snapshot.attempts].reverse().find((candidate) => candidate.stageId === snapshot.currentStageId && !candidate.voided);
   return attempt ? new Date(epochOriginMs + attempt.deadlineAtMs).toISOString() : undefined;
 };
 

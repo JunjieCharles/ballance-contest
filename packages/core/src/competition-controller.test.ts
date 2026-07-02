@@ -12,8 +12,8 @@ const configuration = (overrides: Partial<AutomationConfiguration> = {}): Automa
   competitionId: "competition-1",
   participants: ["p1", "p2", "p3", "p4", "p5"],
   stages: [
-    { id: "s1", map: "1", mode: "sr", timeLimitMs: 20_000, minimumScoringPlace: 3 },
-    { id: "s2", map: "2", mode: "hs", timeLimitMs: 20_000, minimumScoringPlace: 3 }
+    { id: "s1", map: "1", displayName: "第一关", mode: "sr", timeLimitMs: 20_000, minimumScoringPlace: 3 },
+    { id: "s2", map: "2", displayName: "第二关", mode: "hs", timeLimitMs: 20_000, minimumScoringPlace: 3 }
   ],
   policy: { announcementLeadMs: 0, readyBufferMs: 1_000, reconnectStableMs: 15_000, intermissionMs: 3_000, protectionWindowMs: 15_000 },
   confirmationSecret: "test-only-secret",
@@ -32,58 +32,81 @@ const action = (controller: CompetitionController, kind: AutomationAction["kind"
 
 const enterRunning = (controller: CompetitionController, clock: FakeClock): void => {
   controller.enable(clock.now());
-  controller.drainActions();
+  for (const item of controller.drainActions()) controller.acknowledgeAction(item.id, "acknowledged");
   controller.tick();
-  controller.acknowledgeAction(action(controller, "ready").id, "acknowledged");
+  for (const item of controller.drainActions()) controller.acknowledgeAction(item.id, "acknowledged");
   for (let index = 0; index < 2; index += 1) {
-    clock.advance(3_000);
+    clock.advance(5_000);
     controller.tick();
     controller.acknowledgeAction(action(controller, "ready").id, "acknowledged");
   }
+  clock.advance(5_000);
   controller.tick();
   controller.acknowledgeAction(action(controller, "announce").id, "acknowledged");
+  clock.advance(5_000);
   controller.tick();
   controller.acknowledgeAction(action(controller, "cheat-off").id, "acknowledged");
+  clock.advance(10_000);
   controller.tick();
   const go = action(controller, "go");
   controller.acknowledgeAction(go.id, "acknowledged");
 };
 
 describe("CompetitionController", () => {
-  it("sends Ready three times at 0/3/6 seconds before READY, cheat-off and Go", () => {
+  it("sends Notice, Ready at 0/5/10, READY at 15, cheat-off at 20 and Go no earlier than 30 seconds", () => {
     const clock = new FakeClock();
     const controller = new CompetitionController(configuration(), clock);
     connectAll(controller);
     controller.enable(0);
+    const bulletin = action(controller, "bulletin");
+    expect(bulletin.message).toBe("第一关 将在 08:00 发令");
+    controller.acknowledgeAction(bulletin.id, "acknowledged");
 
     controller.tick();
-    let current = action(controller, "ready");
+    const initialActions = controller.drainActions();
+    const notice = initialActions.find((item) => item.kind === "notice");
+    let current = initialActions.find((item) => item.kind === "ready");
+    expect(notice?.message).toBe("第一关 1 分钟后即将发令，请提前做好重启游戏等准备，避免影响发令流程。");
+    if (!notice || !current) throw new Error("Missing initial Notice or Ready");
+    controller.acknowledgeAction(notice.id, "acknowledged");
     expect(current.createdAtMs).toBe(0);
     controller.acknowledgeAction(current.id, "acknowledged");
-    clock.advance(3_000);
+    clock.advance(5_000);
     controller.tick();
     current = action(controller, "ready");
-    expect(current.createdAtMs).toBe(3_000);
+    expect(current.createdAtMs).toBe(5_000);
     controller.acknowledgeAction(current.id, "acknowledged");
-    clock.advance(3_000);
+    clock.advance(5_000);
     controller.tick();
     current = action(controller, "ready");
-    expect(current.createdAtMs).toBe(6_000);
+    expect(current.createdAtMs).toBe(10_000);
     controller.acknowledgeAction(current.id, "acknowledged");
+    clock.advance(4_999);
+    controller.tick();
+    expect(controller.drainActions()).toHaveLength(0);
+    clock.advance(1);
     controller.tick();
     const readyAnnouncement = action(controller, "announce");
+    expect(readyAnnouncement.createdAtMs).toBe(15_000);
     expect(readyAnnouncement.message).toBe("READY!");
     controller.acknowledgeAction(readyAnnouncement.id, "acknowledged");
+    clock.advance(5_000);
     controller.tick();
     const cheatOff = action(controller, "cheat-off");
+    expect(cheatOff.createdAtMs).toBe(20_000);
     controller.acknowledgeAction(cheatOff.id, "acknowledged");
+    clock.advance(9_999);
+    controller.tick();
+    expect(controller.drainActions()).toHaveLength(0);
+    clock.advance(1);
     controller.tick();
     const go = action(controller, "go");
+    expect(go.createdAtMs).toBe(30_000);
     controller.acknowledgeAction(go.id, "acknowledged");
 
-    expect(controller.snapshot()).toMatchObject({ phase: "running", attempts: [{ goAtMs: 6_000 }] });
+    expect(controller.snapshot()).toMatchObject({ phase: "running", attempts: [{ goAtMs: 30_000, deadlineAtMs: 50_000 }] });
     expect(controller.snapshot().actions.map((item) => item.kind)).toEqual([
-      "bulletin", "ready", "ready", "ready", "announce", "cheat-off", "go"
+      "bulletin", "notice", "ready", "ready", "ready", "announce", "cheat-off", "go"
     ]);
   });
 
@@ -100,6 +123,93 @@ describe("CompetitionController", () => {
     expect(controller.snapshot()).toMatchObject({ phase: "running", attempts: [{ intakeOpen: true, results: [{ playerId: "Silent_Snow" }] }] });
   });
 
+  it("shifts every scheduled boundary after a delayed acknowledgement while preserving minimum gaps", () => {
+    const clock = new FakeClock();
+    const controller = new CompetitionController(configuration(), clock);
+    connectAll(controller);
+    controller.enable(0);
+    for (const item of controller.drainActions()) controller.acknowledgeAction(item.id, "acknowledged");
+    controller.tick();
+    for (const item of controller.drainActions()) {
+      if (item.kind === "notice") controller.acknowledgeAction(item.id, "acknowledged");
+      else if (item.kind === "ready") {
+        clock.set(2_000);
+        controller.acknowledgeAction(item.id, "acknowledged");
+      }
+    }
+    clock.set(6_999); controller.tick();
+    expect(controller.drainActions()).toHaveLength(0);
+    clock.set(7_000); controller.tick();
+    let scheduled = action(controller, "ready");
+    clock.set(9_000); controller.acknowledgeAction(scheduled.id, "acknowledged");
+    clock.set(14_000); controller.tick();
+    scheduled = action(controller, "ready");
+    controller.acknowledgeAction(scheduled.id, "acknowledged");
+    clock.set(19_000); controller.tick();
+    scheduled = action(controller, "announce");
+    clock.set(22_000); controller.acknowledgeAction(scheduled.id, "acknowledged");
+    clock.set(27_000); controller.tick();
+    scheduled = action(controller, "cheat-off");
+    clock.set(30_000); controller.acknowledgeAction(scheduled.id, "acknowledged");
+    clock.set(39_999); controller.tick();
+    expect(controller.drainActions()).toHaveLength(0);
+    clock.set(40_000); controller.tick();
+    expect(action(controller, "go").createdAtMs).toBe(40_000);
+  });
+
+  it("keeps manual Ready and cheat-off outside the plan, then starts timing only on confirmed manual Go", () => {
+    const clock = new FakeClock();
+    const controller = new CompetitionController(configuration(), clock);
+    connectAll(controller);
+    controller.enable(120_000);
+    for (const item of controller.drainActions()) controller.acknowledgeAction(item.id, "acknowledged");
+    const before = controller.snapshot();
+
+    controller.manualReady();
+    const manualReady = action(controller, "ready");
+    expect(manualReady.manual).toBe(true);
+    expect(controller.snapshot()).toMatchObject({ phase: before.phase, plannedReadyAtMs: before.plannedReadyAtMs });
+    controller.acknowledgeAction(manualReady.id, "acknowledged");
+
+    controller.manualCheatOff();
+    const manualCheatOff = action(controller, "cheat-off");
+    expect(manualCheatOff.manual).toBe(true);
+    expect(controller.snapshot()).toMatchObject({ phase: before.phase, plannedReadyAtMs: before.plannedReadyAtMs });
+    controller.acknowledgeAction(manualCheatOff.id, "acknowledged");
+    controller.requestManualGo();
+    const manualGo = action(controller, "go");
+    expect(manualGo.manual).toBe(true);
+    expect(controller.snapshot()).toMatchObject({ phase: "countdown", attempts: [] });
+    clock.set(3_000);
+    controller.acknowledgeAction(manualGo.id, "acknowledged");
+    expect(controller.snapshot()).toMatchObject({ phase: "running", attempts: [{ goAtMs: 3_000, deadlineAtMs: 23_000 }] });
+  });
+
+  it("allows the Ready flow to close cheat later but keeps manual Go blocked while a player still shows cheat", () => {
+    const clock = new FakeClock();
+    const controller = new CompetitionController(configuration(), clock);
+    connectAll(controller);
+    controller.observeCheat("p1", true, "practice-cheat");
+    expect(() => controller.startReadyFlow()).not.toThrow();
+    for (const item of controller.drainActions()) controller.acknowledgeAction(item.id, "acknowledged");
+    controller.manualCheatOff();
+    const cheatOff = action(controller, "cheat-off");
+    controller.acknowledgeAction(cheatOff.id, "acknowledged");
+    expect(() => controller.requestManualGo()).toThrow("MANUAL_GO_BLOCKED");
+  });
+
+  it("formats Bulletin as UTC+8 HH:mm across midnight and republishes it after every schedule change", () => {
+    const clock = new FakeClock();
+    const controller = new CompetitionController(configuration({ wallClockOriginMs: Date.UTC(2026, 6, 1, 15, 59) }), clock);
+    connectAll(controller);
+    controller.enable(60_000);
+    expect(action(controller, "bulletin").message).toBe("第一关 将在 00:00 发令");
+    controller.reschedule(120_000);
+    expect(action(controller, "bulletin").message).toBe("第一关 将在 00:01 发令");
+    controller.delayReady(60_000);
+    expect(action(controller, "bulletin").message).toBe("第一关 将在 00:02 发令");
+  });
+
   it("runs the normal flow and closes tail intake atomically at the next actual Ready", () => {
     const clock = new FakeClock();
     const controller = new CompetitionController(configuration(), clock);
@@ -109,21 +219,39 @@ describe("CompetitionController", () => {
     for (const playerId of ["p1", "p2", "p3"]) {
       expect(controller.recordResult({ stageId: "s1", playerId, status: "finished", sourceId: `finish-${playerId}` })).toBe("accepted");
     }
-    expect(controller.snapshot()).toMatchObject({ phase: "tail-intake", plannedReadyAtMs: 9_000 });
-    expect(controller.snapshot().actions.at(-1)?.message).toBe("下一轮 Ready 计划在 3 秒后执行");
+    expect(controller.snapshot()).toMatchObject({ phase: "tail-intake", plannedReadyAtMs: 33_000, plannedReadyStageId: "s2" });
+    expect(controller.snapshot().actions.at(-1)?.message).toBe("第二关 将在 08:00 发令");
+    controller.manualReady();
+    const tailManualReady = action(controller, "ready");
+    expect(tailManualReady).toMatchObject({ stageId: "s2", manual: true });
+    expect(controller.snapshot()).toMatchObject({ phase: "tail-intake", currentStageId: "s1", plannedReadyAtMs: 33_000 });
+    controller.acknowledgeAction(tailManualReady.id, "acknowledged");
 
-    clock.set(8_999);
+    clock.set(32_999);
     expect(controller.recordResult({ stageId: "s1", playerId: "p4", status: "finished", sourceId: "finish-p4" })).toBe("accepted");
-    clock.set(9_000);
+    clock.set(33_000);
     controller.tick();
 
     const snapshot = controller.snapshot();
     expect(snapshot.phase).toBe("ready");
     expect(snapshot.currentStageId).toBe("s2");
-    expect(snapshot.attempts[0]).toMatchObject({ stageId: "s1", intakeOpen: false, intakeClosedAtMs: 9_000 });
+    expect(snapshot.attempts[0]).toMatchObject({ stageId: "s1", intakeOpen: false, intakeClosedAtMs: 33_000 });
     expect(snapshot.attempts[0]?.results.some((result) => result.playerId === "p5")).toBe(false);
     expect(controller.recordResult({ stageId: "s1", playerId: "p5", status: "finished", sourceId: "finish-p5" })).toBe("intake-closed");
     expect(controller.snapshot().rejectedResults.at(-1)?.reason).toBe("intake-closed");
+  });
+
+  it("keeps the original deadline when ending a stage early and replans only the next Ready", () => {
+    const clock = new FakeClock();
+    const controller = new CompetitionController(configuration(), clock);
+    connectAll(controller);
+    enterRunning(controller, clock);
+    const deadlineAtMs = controller.snapshot().attempts[0]?.deadlineAtMs;
+    controller.endStage("referee-ended-stage");
+    const snapshot = controller.snapshot();
+    expect(snapshot).toMatchObject({ phase: "tail-intake", plannedReadyAtMs: 33_000, plannedReadyStageId: "s2" });
+    expect(snapshot.attempts[0]).toMatchObject({ intakeOpen: false, deadlineAtMs });
+    expect(snapshot.actions.at(-1)).toMatchObject({ kind: "bulletin", stageId: "s2", message: "第二关 将在 08:00 发令" });
   });
 
   it("keeps result intake and the deadline active while automation is paused", () => {
@@ -136,7 +264,7 @@ describe("CompetitionController", () => {
     expect(controller.recordResult({ stageId: "s1", playerId: "p1", status: "finished", sourceId: "paused-finish" })).toBe("accepted");
     expect(controller.snapshot()).toMatchObject({ phase: "paused", pausedFromPhase: "running", automationEnabled: false });
 
-    clock.set(30_000);
+    clock.set(50_000);
     controller.tick();
     const snapshot = controller.snapshot();
     expect(snapshot.automationEnabled).toBe(false);
@@ -178,14 +306,14 @@ describe("CompetitionController", () => {
     for (const playerId of ["p1", "p2", "p3"]) controller.recordResult({ stageId: "s1", playerId, status: "finished", sourceId: playerId });
     controller.observeConnection("p5", false);
 
-    clock.set(9_000);
+    clock.set(33_000);
     controller.tick();
     expect(controller.snapshot()).toMatchObject({ phase: "tail-intake", attempts: [{ intakeOpen: true }] });
     expect(controller.recordResult({ stageId: "s1", playerId: "p4", status: "finished", sourceId: "p4" })).toBe("accepted");
 
-    clock.set(12_000);
+    clock.set(35_000);
     controller.tick();
-    expect(controller.snapshot().attempts[0]).toMatchObject({ intakeOpen: false, intakeClosedAtMs: 12_000 });
+    expect(controller.snapshot().attempts[0]).toMatchObject({ intakeOpen: false, intakeClosedAtMs: 35_000 });
     expect(controller.snapshot().attempts[0]?.results).toContainEqual(expect.objectContaining({ playerId: "p5", status: "dnf", reason: "time-limit" }));
   });
 
@@ -208,6 +336,9 @@ describe("CompetitionController", () => {
     expect(controller.snapshot().phase).toBe("pre-start-wait");
     clock.advance(1);
     controller.tick();
+    expect(controller.snapshot()).toMatchObject({ phase: "preparing", plannedReadyAtMs: clock.now() + 60_000 });
+    clock.advance(60_000);
+    controller.tick();
     expect(controller.snapshot().phase).toBe("ready");
     expect(controller.drainActions().filter((item) => item.kind === "ready")).toHaveLength(1);
   });
@@ -217,14 +348,15 @@ describe("CompetitionController", () => {
     const controller = new CompetitionController(configuration(), clock);
     connectAll(controller);
     controller.enable(0);
-    controller.drainActions();
+    for (const item of controller.drainActions()) controller.acknowledgeAction(item.id, "acknowledged");
     controller.tick();
-    controller.acknowledgeAction(action(controller, "ready").id, "acknowledged");
+    for (const item of controller.drainActions()) controller.acknowledgeAction(item.id, "acknowledged");
     for (let index = 0; index < 2; index += 1) {
-      clock.advance(3_000); controller.tick(); controller.acknowledgeAction(action(controller, "ready").id, "acknowledged");
+      clock.advance(5_000); controller.tick(); controller.acknowledgeAction(action(controller, "ready").id, "acknowledged");
     }
-    controller.tick(); controller.acknowledgeAction(action(controller, "announce").id, "acknowledged");
-    controller.tick(); controller.acknowledgeAction(action(controller, "cheat-off").id, "acknowledged");
+    clock.advance(5_000); controller.tick(); controller.acknowledgeAction(action(controller, "announce").id, "acknowledged");
+    clock.advance(5_000); controller.tick(); controller.acknowledgeAction(action(controller, "cheat-off").id, "acknowledged");
+    clock.advance(10_000);
     controller.tick();
     const go = action(controller, "go");
     controller.acknowledgeAction(go.id, "uncertain");
@@ -247,14 +379,17 @@ describe("CompetitionController", () => {
     controller.observeCheat("p3", false);
     const confirmation = controller.issueStageRestartConfirmation(attempt.id);
     controller.confirmStageRestart({ attemptId: attempt.id, impactHash: confirmation.impactHash, token: confirmation.token, reason: "裁判重赛本关" });
-    controller.drainActions();
+    for (const item of controller.drainActions()) controller.acknowledgeAction(item.id, "acknowledged");
+    expect(() => controller.requestManualGo()).toThrow("MANUAL_GO_CHEAT_OFF_REQUIRED");
+    clock.advance(60_000);
     controller.tick();
     controller.acknowledgeAction(action(controller, "ready").id, "acknowledged");
     for (let index = 0; index < 2; index += 1) {
-      clock.advance(3_000); controller.tick(); controller.acknowledgeAction(action(controller, "ready").id, "acknowledged");
+      clock.advance(5_000); controller.tick(); controller.acknowledgeAction(action(controller, "ready").id, "acknowledged");
     }
-    controller.tick(); controller.acknowledgeAction(action(controller, "announce").id, "acknowledged");
-    controller.tick(); controller.acknowledgeAction(action(controller, "cheat-off").id, "acknowledged");
+    clock.advance(5_000); controller.tick(); controller.acknowledgeAction(action(controller, "announce").id, "acknowledged");
+    clock.advance(5_000); controller.tick(); controller.acknowledgeAction(action(controller, "cheat-off").id, "acknowledged");
+    clock.advance(10_000);
     controller.tick();
     const force = action(controller, "force-next-restart");
     controller.acknowledgeAction(force.id, "acknowledged");

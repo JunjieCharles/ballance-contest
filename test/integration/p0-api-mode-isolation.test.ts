@@ -114,7 +114,7 @@ describe("P0 API mode isolation and test run regression", () => {
       method: "POST",
       url: `/api/v1/competitions/${competitionId}/test-runs/${runId}/automation/advance`,
       headers: auth(token),
-      payload: { milliseconds: 15_000 }
+      payload: { milliseconds: 30_000 }
     });
     expect(countdown.json()).toMatchObject({ data: { phase: "countdown", countdownValue: 3, attempts: [] } });
     const running = await app.inject({
@@ -126,7 +126,7 @@ describe("P0 API mode isolation and test run regression", () => {
     const runningSnapshot = running.json<{ data: { phase: string; attempts: Array<{ attemptNumber: number; results: unknown[] }>; actions: Array<{ message?: string }> } }>().data;
     expect(runningSnapshot).toMatchObject({ phase: "tail-intake", attempts: [expect.objectContaining({ attemptNumber: 1 })] });
     expect(runningSnapshot.attempts[0]?.results).toHaveLength(5);
-    expect(runningSnapshot.actions.some((action) => action.message?.includes("Ready"))).toBe(true);
+    expect(runningSnapshot.actions.some((action) => /将在 \d{2}:\d{2} 发令/.test(action.message ?? ""))).toBe(true);
     expect(runningSnapshot.actions.every((action) => !action.message?.includes("195000"))).toBe(true);
     const scheduledSnapshot = await app.inject({ method: "GET", url: `/api/v1/competitions/${competitionId}/snapshot`, headers: auth(token) });
     expect(scheduledSnapshot.json()).toMatchObject({ data: { runtime: { plannedReadyAt: expect.stringMatching(/Z$/) } } });
@@ -238,12 +238,13 @@ describe("P0 API mode isolation and test run regression", () => {
       payload: { expectedStateVersion: 1, idempotencyKey: "manual-ready", action: { type: "ready" } }
     });
     expect(ready.statusCode).toBe(200);
-    await app.inject({
+    const cheatOff = await app.inject({
       method: "POST",
-      url: `/api/v1/competitions/${manualCompetitionId}/test-runs/${manualRunId}/automation/advance`,
+      url: `/api/v1/competitions/${manualCompetitionId}/actions`,
       headers: auth(token),
-      payload: { milliseconds: 15_000 }
+      payload: { expectedStateVersion: 2, idempotencyKey: "manual-cheat-off", action: { type: "cheat-off" } }
     });
+    expect(cheatOff.statusCode).toBe(200);
     const goConfirmationResponse = await app.inject({ method: "POST", url: `/api/v1/competitions/${manualCompetitionId}/confirmations`, headers: auth(token), payload: { kind: "manual-go", target: manualCompetitionId } });
     const goConfirmation = goConfirmationResponse.json<{ data: { token: string; impactHash: string } }>().data;
     const manualGo = await app.inject({
@@ -251,7 +252,7 @@ describe("P0 API mode isolation and test run regression", () => {
       url: `/api/v1/competitions/${manualCompetitionId}/actions`,
       headers: auth(token),
       payload: {
-        expectedStateVersion: 2,
+        expectedStateVersion: 3,
         idempotencyKey: "manual-go",
         action: { type: "manual-go", confirmationToken: goConfirmation.token, impactHash: goConfirmation.impactHash }
       }

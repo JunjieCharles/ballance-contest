@@ -256,7 +256,7 @@ export class TestRuntimeManager {
           responseLine: "模拟回显成功",
           simulated: true
         }))
-      ], plannedStageStartAt(automation, epochOriginMs, this.host.getDraftConfig(competitionId).flow.readyBufferMs), plannedReadyAt(automation, epochOriginMs), runtime.automationClock.now(),
+      ], plannedStageStartAt(automation, epochOriginMs), plannedReadyAt(automation, epochOriginMs), runtime.automationClock.now(),
       this.host.availableActionsFor(competitionId, automation), this.host.attentionItemsFor(competitionId, automation), stageDeadlineAt(automation, epochOriginMs))
     };
   }
@@ -355,11 +355,13 @@ export class TestRuntimeManager {
       stages: definition.stages.map((stage) => ({
         id: stage.id,
         map: stage.mapKind === "custom" && stage.mapHash ? `${stage.mapHash.toLowerCase()} 0` : `level ${stage.level}`,
+        ...(stage.displayName === undefined ? {} : { displayName: stage.displayName }),
         mode: stage.mode.toLowerCase() as "sr" | "hs",
         timeLimitMs: stage.timeLimitMs,
         minimumScoringPlace: stage.minimumScoringPlace
       })),
-      policy: automationPolicyFor(config)
+      policy: automationPolicyFor(config),
+      wallClockOriginMs: Date.parse(createdAt)
     }, automationClock);
     const runtime: TestRuntime = {
       id, competitionId, definition,

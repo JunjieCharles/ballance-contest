@@ -295,13 +295,13 @@ test("restarts the current stage and unlocks its score review only after the nex
   await expect(confirmation).toContainText("当前尝试将作废并立即退出有效榜单");
   await expect(confirmation).toContainText("只有新 Go 才创建新尝试");
   await confirmation.getByRole("button", { name: "确认" }).click();
-  await expect(page.getByText("阶段", { exact: true }).locator("..")).toContainText("Ready");
+  await expect(page.getByText("阶段", { exact: true }).locator("..")).toContainText("重赛准备");
   await page.getByRole("button", { name: "成绩", exact: true }).click();
   expect((await page.locator(".scoreboard tbody tr td:nth-child(5) .cell-button").allTextContents()).some((value) => value.trim().startsWith("#"))).toBe(false);
 
   await accelerateActiveTestRun(page, name, 240_000);
   await expect.poll(async () => (await page.locator(".scoreboard tbody tr td:nth-child(5) .cell-button").allTextContents()).some((value) => value.trim().startsWith("#"))).toBe(true);
-  await accelerateActiveTestRun(page, name, 180_000);
+  await accelerateActiveTestRun(page, name, 240_000);
   const previousStageCell = page.locator(".scoreboard tbody tr").first().locator("td").nth(4).getByRole("button");
   await expect(previousStageCell).toBeEnabled();
 });
@@ -328,6 +328,11 @@ test("shows disabled reasons, shared scheduling controls and automatic review co
   await expect(page.getByText("当前没有可改期的 Ready 计划")).toBeVisible();
   await expect(page.getByRole("button", { name: "关卡时限改期" })).toBeDisabled();
   await expect(page.getByText("当前没有开放的成绩接收窗口").first()).toBeVisible();
+  await expect(page.getByRole("button", { name: "进入 Ready+发令流程" })).toBeEnabled();
+  await expect(page.getByRole("button", { name: "手动 Ready" })).toBeEnabled();
+  await expect(page.getByRole("button", { name: "关闭 cheat" })).toBeEnabled();
+  await expect(page.getByRole("button", { name: "手动发令" })).toBeDisabled();
+  await expect(page.getByText("目标关尚无关闭 cheat 成功回显")).toBeVisible();
 
   await page.getByRole("button", { name: "启动自动化" }).click();
   await accelerateActiveTestRun(page, name);

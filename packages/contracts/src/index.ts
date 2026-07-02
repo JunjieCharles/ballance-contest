@@ -312,6 +312,7 @@ export interface RuntimeSnapshot {
   automationEnabled: boolean;
   currentStageId?: string;
   plannedReadyAtMs?: number;
+  plannedReadyStageId?: string;
   plannedReadyAt?: string;
   plannedStageStartAt?: string;
   stageDeadlineAt?: string;
@@ -339,7 +340,7 @@ export interface RuntimeSnapshot {
 }
 
 export type RefereeActionId =
-  | "start-work" | "enable-automation" | "pause-automation" | "ready" | "cheat-off" | "manual-go"
+  | "start-work" | "enable-automation" | "pause-automation" | "start-ready-flow" | "ready" | "cheat-off" | "manual-go"
   | "delay-ready" | "extend-stage-deadline" | "reschedule" | "reschedule-stage-deadline" | "end-stage" | "restart-stage"
   | "kick" | "raw-command" | "finish" | "archive" | "delete";
 
@@ -480,6 +481,7 @@ export type NotificationChannel = "bulletin" | "notice" | "announce";
 
 export type CompetitionAction =
   | { type: "notification"; channel: NotificationChannel; text: string }
+  | { type: "start-ready-flow"; confirmationToken: string; impactHash: string }
   | { type: "ready" }
   | { type: "cheat-off" }
   | { type: "manual-go"; confirmationToken: string; impactHash: string }
@@ -513,22 +515,22 @@ export const minimumScoringPlaceFor = (points: readonly number[]): number => {
 };
 
 export const defaultFlowPolicy = (): FlowPolicy => ({
-  announcementLeadMs: 5 * 60_000,
+  announcementLeadMs: 60_000,
   delayLimitMs: 5 * 60_000,
   reconnectStableMs: 15_000,
-  readyBufferMs: 15_000,
+  readyBufferMs: 30_000,
   protectionWindowMs: 15_000,
   intermissionMs: 3 * 60_000,
   groupDisconnectThreshold: 2
 });
 
 export const defaultNotifications = (): NotificationTemplates => ({
-  bulletin: "{stage} {mode} 将于 {time} 开始，请选手准备。",
+  bulletin: "{stage} 将在 {time} 发令",
   ready: "READY!",
   delay: "等待 {player} 重连，剩余 {remaining}。",
   restart: "本轮因 {reason} 重赛，请等待裁判重新发令。",
   stageComplete: "{stage} 已进入成绩接收/结算。",
-  nextStage: "下一轮 {stage} Ready 计划于 {time}。",
+  nextStage: "{stage} 将在 {time} 发令",
   competitionComplete: "比赛结束，成绩进入复核。"
 });
 

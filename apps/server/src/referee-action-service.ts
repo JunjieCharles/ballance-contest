@@ -40,6 +40,14 @@ export class RefereeActionService {
     const competition = this.host.getCompetition(competitionId);
     const controller = (): CompetitionController => this.host.controllerFor(competitionId);
     switch (action.type) {
+      case "start-ready-flow": {
+        controller().startReadyFlow();
+        if (competition.mode === "test") {
+          const runId = this.host.getPayload(competitionId).activeRunId as string;
+          this.host.testRuntimeManager.settle(this.host.testRuntimeManager.getRuntime(competitionId, runId));
+        }
+        break;
+      }
       case "manual-go": {
         controller().requestManualGo();
         if (competition.mode === "test") {
@@ -50,6 +58,14 @@ export class RefereeActionService {
       }
       case "ready": {
         controller().manualReady();
+        if (competition.mode === "test") {
+          const runId = this.host.getPayload(competitionId).activeRunId as string;
+          this.host.testRuntimeManager.settle(this.host.testRuntimeManager.getRuntime(competitionId, runId));
+        }
+        break;
+      }
+      case "cheat-off": {
+        controller().manualCheatOff();
         if (competition.mode === "test") {
           const runId = this.host.getPayload(competitionId).activeRunId as string;
           this.host.testRuntimeManager.settle(this.host.testRuntimeManager.getRuntime(competitionId, runId));

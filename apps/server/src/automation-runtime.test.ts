@@ -37,16 +37,15 @@ describe("automation runtimes", () => {
     await runtime.dispatch();
     controller.tick();
     await runtime.dispatch();
-    clock.value = 3_000;
+    clock.value = 5_000;
     controller.tick();
     await runtime.dispatch();
-    clock.value = 6_000;
-    for (let index = 0; index < 4; index += 1) {
-      controller.tick();
-      await runtime.dispatch();
-    }
+    clock.value = 10_000; controller.tick(); await runtime.dispatch();
+    clock.value = 15_000; controller.tick(); await runtime.dispatch();
+    clock.value = 20_000; controller.tick(); await runtime.dispatch();
+    clock.value = 30_000; controller.tick(); await runtime.dispatch();
 
-    expect(sent.map((item) => item.type)).toEqual(["notification", "ready", "ready", "ready", "notification", "cheat-off", "go"]);
+    expect(sent.map((item) => item.type)).toEqual(["notification", "notification", "ready", "ready", "ready", "notification", "cheat-off", "go"]);
     expect(controller.snapshot()).toMatchObject({ phase: "running", attempts: [{ attemptNumber: 1 }] });
   });
 
@@ -56,14 +55,14 @@ describe("automation runtimes", () => {
     controller.enable(0);
     expect(runtime.dispatch().map((item) => item.kind)).toEqual(["bulletin"]);
     controller.tick();
+    expect(runtime.dispatch().map((item) => item.kind)).toEqual(["notice", "ready"]);
+    clock.value = 5_000; controller.tick();
     expect(runtime.dispatch().map((item) => item.kind)).toEqual(["ready"]);
-    clock.value = 3_000; controller.tick();
+    clock.value = 10_000; controller.tick();
     expect(runtime.dispatch().map((item) => item.kind)).toEqual(["ready"]);
-    clock.value = 6_000; controller.tick();
-    expect(runtime.dispatch().map((item) => item.kind)).toEqual(["ready"]);
-    controller.tick(); expect(runtime.dispatch().map((item) => item.kind)).toEqual(["announce"]);
-    controller.tick(); expect(runtime.dispatch().map((item) => item.kind)).toEqual(["cheat-off"]);
-    controller.tick(); expect(runtime.dispatch().map((item) => item.kind)).toEqual(["go"]);
+    clock.value = 15_000; controller.tick(); expect(runtime.dispatch().map((item) => item.kind)).toEqual(["announce"]);
+    clock.value = 20_000; controller.tick(); expect(runtime.dispatch().map((item) => item.kind)).toEqual(["cheat-off"]);
+    clock.value = 30_000; controller.tick(); expect(runtime.dispatch().map((item) => item.kind)).toEqual(["go"]);
     expect(controller.snapshot().attempts).toHaveLength(1);
   });
 });

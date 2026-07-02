@@ -33,14 +33,18 @@ const settle = (controller: CompetitionController, statusFor?: (action: Automati
   }
 };
 
-const startRunning = (controller: CompetitionController, clock: ManualClock, readyBufferMs: number): void => {
+const startRunning = (controller: CompetitionController, clock: ManualClock): void => {
   controller.enable(0);
   settle(controller);
-  clock.advanceBy(3_000);
+  clock.advanceBy(5_000);
   settle(controller);
-  clock.advanceBy(3_000);
+  clock.advanceBy(5_000);
   settle(controller);
-  clock.advanceBy(Math.max(0, readyBufferMs - 6_000));
+  clock.advanceBy(5_000);
+  settle(controller);
+  clock.advanceBy(5_000);
+  settle(controller);
+  clock.advanceBy(10_000);
   settle(controller);
 };
 
@@ -71,6 +75,9 @@ describe("P0 centralized automation and command regression", () => {
     controller.observeConnection("p2", true);
     clock.advanceBy(15_000);
     settle(controller);
+    expect(controller.snapshot()).toMatchObject({ phase: "preparing", waitingParticipants: [], attempts: [] });
+    clock.advanceBy(60_000);
+    settle(controller);
     expect(controller.snapshot()).toMatchObject({ phase: "ready", waitingParticipants: [], attempts: [] });
   });
 
@@ -78,7 +85,7 @@ describe("P0 centralized automation and command regression", () => {
     const clock = new ManualClock();
     const controller = makeController(clock, { readyBufferMs: 0 }, ["p1", "p2", "p3"], 3_000);
     putEveryoneOnline(controller);
-    startRunning(controller, clock, 0);
+    startRunning(controller, clock);
     expect(controller.snapshot().phase).toBe("running");
 
     expect(controller.recordResult({ stageId: "s1", playerId: "p1", status: "finished", sourceId: "s1-p1" })).toBe("accepted");
@@ -100,7 +107,7 @@ describe("P0 centralized automation and command regression", () => {
     putEveryoneOnline(controller, ["p1", "p2"]);
     controller.observeCheat("p2", true, "practice-cheat");
     controller.observeCheat("p2", false, "practice-cheat-off");
-    startRunning(controller, clock, 0);
+    startRunning(controller, clock);
     expect(controller.snapshot().phase).toBe("running");
 
     expect(controller.recordResult({ stageId: "s1", playerId: "p1", status: "finished", sourceId: "p1-finish" })).toBe("accepted");
@@ -119,15 +126,19 @@ describe("P0 centralized automation and command regression", () => {
     const clock = new ManualClock();
     const controller = makeController(clock, { readyBufferMs: 0 }, ["p1", "p2"]);
     putEveryoneOnline(controller, ["p1", "p2"]);
-    startRunning(controller, clock, 0);
+    startRunning(controller, clock);
     const attempt = controller.snapshot().attempts[0];
     if (!attempt) throw new Error("missing attempt");
     const confirmation = controller.issueStageRestartConfirmation(attempt.id);
     expect(() => controller.confirmStageRestart({ attemptId: attempt.id, impactHash: confirmation.impactHash, token: "bad-token", reason: "bad" })).toThrow("INVALID_CONFIRMATION_TOKEN");
     controller.confirmStageRestart({ attemptId: attempt.id, impactHash: confirmation.impactHash, token: confirmation.token, reason: "裁判重赛本关" });
     settle(controller);
-    clock.advanceBy(3_000); settle(controller);
-    clock.advanceBy(3_000); settle(controller);
+    clock.advanceBy(60_000); settle(controller);
+    clock.advanceBy(5_000); settle(controller);
+    clock.advanceBy(5_000); settle(controller);
+    clock.advanceBy(5_000); settle(controller);
+    clock.advanceBy(5_000); settle(controller);
+    clock.advanceBy(10_000); settle(controller);
     expect(controller.snapshot().actions.filter((action) => action.kind === "force-next-restart")).toHaveLength(1);
     expect(controller.snapshot().attempts[0]).toMatchObject({ voided: true });
     expect(controller.snapshot().phase).toBe("running");

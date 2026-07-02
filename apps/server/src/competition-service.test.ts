@@ -75,11 +75,12 @@ describe("CompetitionService dynamic participants", () => {
     workRuntimeManager(service).register(record.id, runtime as never);
     controller.enable(now);
     await workRuntimeManager(service).tickRealtime(runtime as never);
-    now = 3_000;
+    now = 5_000;
     await workRuntimeManager(service).tickRealtime(runtime as never);
-    now = 6_000;
-    for (let index = 0; index < 4; index += 1) await workRuntimeManager(service).tickRealtime(runtime as never);
-    now = 10_000;
+    now = 10_000; await workRuntimeManager(service).tickRealtime(runtime as never);
+    now = 15_000; await workRuntimeManager(service).tickRealtime(runtime as never);
+    now = 20_000; await workRuntimeManager(service).tickRealtime(runtime as never);
+    now = 30_000;
     await workRuntimeManager(service).tickRealtime(runtime as never);
     expect(controller.snapshot().phase).toBe("running");
     service.close();

@@ -99,7 +99,7 @@ export class WorkRuntimeManager {
     if (competition.mode !== "work") throw new ServiceError("CAPABILITY_UNSUPPORTED", "测试模式不支持真实 MockClient", 409);
     const config = this.host.getOperationalConfig(competitionId);
     const existing = this.runtimes.get(competitionId);
-    if (existing) return this.view(existing, config);
+    if (existing) return this.view(existing);
     this.host.assertActionAvailable(competitionId, "start-work");
     for (const [otherCompetitionId, running] of this.runtimes) {
       if (otherCompetitionId === competitionId) continue;
@@ -135,13 +135,13 @@ export class WorkRuntimeManager {
     this.startRealtime(runtime);
     this.saveSnapshot(runtime);
     this.host.journal.append({ type: "work.started", competitionId, data: { mockClientVersion } });
-    return this.view(runtime, config);
+    return this.view(runtime);
   }
 
-  public view(runtime: WorkRuntime, config = this.host.getOperationalConfig(runtime.competitionId)): RuntimeSnapshot {
+  public view(runtime: WorkRuntime): RuntimeSnapshot {
     const snapshot = runtime.controller.snapshot();
     const origin = Date.now() - performance.now();
-    return automationView("work", snapshot, this.host.commandHistory(runtime.competitionId), plannedStageStartAt(snapshot, origin, config.flow.readyBufferMs), plannedReadyAt(snapshot, origin), undefined,
+    return automationView("work", snapshot, this.host.commandHistory(runtime.competitionId), plannedStageStartAt(snapshot, origin), plannedReadyAt(snapshot, origin), undefined,
       this.host.availableActionsFor(runtime.competitionId, snapshot), this.host.attentionItemsFor(runtime.competitionId, snapshot), stageDeadlineAt(snapshot, origin));
   }
 
@@ -166,7 +166,8 @@ export class WorkRuntimeManager {
           minimumScoringPlace: stage.minimumScoringPlace
         };
       }),
-      policy: automationPolicyFor(config)
+      policy: automationPolicyFor(config),
+      wallClockOriginMs: Date.now() - performance.now()
     }, new SystemMonotonicClock());
     const commands = new CommandQueue(
       transport,
@@ -307,7 +308,7 @@ export class WorkRuntimeManager {
     if (parsed.event.type === "permission-denied") runtime.controller.observePermissionDenied(parsed.event.message);
     const before = runtime.controller.snapshot();
     const currentStage = config.stages.find((candidate) => candidate.id === before.currentStageId);
-    this.bindOfficialMapEcho(runtime, config, parsed.event, currentStage, before.phase);
+    this.bindOfficialMapEcho(runtime, config, parsed.event, before);
     const eventStage = this.resolveEventStage(runtime, config, parsed.event, before.currentStageId);
     if ((parsed.event.type === "finish" || parsed.event.type === "dnf")
       && (before.phase === "running" || before.phase === "tail-intake")
@@ -439,13 +440,15 @@ export class WorkRuntimeManager {
     this.host.saveScoreboards(runtime.competitionId, runtime.engine.snapshot().scoreboardVersions);
   }
 
-  private bindOfficialMapEcho(runtime: WorkRuntime, config: CompetitionConfig, event: DomainEvent, currentStage: StageConfig | undefined, phase: AutomationSnapshot["phase"]): void {
+  private bindOfficialMapEcho(runtime: WorkRuntime, config: CompetitionConfig, event: DomainEvent, snapshot: AutomationSnapshot): void {
     if ((event.type !== "ready" && event.type !== "countdown" && event.type !== "go")
-      || event.mapKind !== "official" || !event.mapHashPrefix || !currentStage
-      || stageMapKind(currentStage) !== "official"
+      || event.mapKind !== "official" || !event.mapHashPrefix
       || normalizeRefereeName(event.refereeName) !== CONTEST_REFEREE_NAME) return;
-    const phaseMatches = event.type === "ready" ? phase === "ready" : phase === "ready" || phase === "countdown" || phase === "running";
-    if (phaseMatches) runtime.mapEchoPrefixes.set(currentStage.id, event.mapHashPrefix.toLowerCase());
+    const actionKind = event.type === "ready" ? "ready" : "go";
+    const matchingAction = [...snapshot.actions].reverse().find((action) => action.kind === actionKind && action.status === "pending");
+    if (!matchingAction) return;
+    const targetStage = config.stages.find((stage) => stage.id === matchingAction.stageId);
+    if (targetStage && stageMapKind(targetStage) === "official") runtime.mapEchoPrefixes.set(targetStage.id, event.mapHashPrefix.toLowerCase());
   }
 
   private resolveEventStage(runtime: WorkRuntime, config: CompetitionConfig, event: DomainEvent, preferredStageId?: string): StageConfig | undefined {

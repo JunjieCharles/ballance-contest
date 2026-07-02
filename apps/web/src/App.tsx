@@ -579,7 +579,8 @@ function ConsolePanel({ snapshot, canWrite, versionKey, startWork, enableAutomat
       </select><input aria-label="通知文本" value={notification} onChange={(event) => setNotification(event.target.value)} /><button disabled={!canWrite || !notification.trim()} onClick={() => void performAction({ type: "notification", channel, text: notification })}>发送</button></div>
       <h3>流程控制</h3>
       <div className="button-row action-row">
-        {confirmedAction("Ready", "ready", "manual-action", snapshot.competition.id, () => ({ type: "ready" }))}
+        {confirmedAction("进入 Ready+发令流程", "start-ready-flow", "manual-action", snapshot.competition.id, (confirmation) => ({ type: "start-ready-flow", confirmationToken: confirmation.token, impactHash: confirmation.impactHash }))}
+        {confirmedAction("手动 Ready", "ready", "manual-action", snapshot.competition.id, () => ({ type: "ready" }))}
         <ActionButton runtime={runtime} action="cheat-off" canWrite={canWrite} onClick={() => void performAction({ type: "cheat-off" })}>关闭 cheat</ActionButton>
         {confirmedAction("手动发令", "manual-go", "manual-go", snapshot.competition.id, (confirmation) => ({ type: "manual-go", confirmationToken: confirmation.token, impactHash: confirmation.impactHash }))}
         {confirmedAction("提前结束本关", "end-stage", "manual-action", snapshot.competition.id, (confirmation) => ({ type: "end-stage", confirmationToken: confirmation.token, impactHash: confirmation.impactHash }), "danger")}
