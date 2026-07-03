@@ -663,7 +663,7 @@ export class TestRuntimeManager {
     if (runtime.automationClock.now() < dueAtMs) return;
     const prefix = this.testLogPrefix(runtime, dueAtMs);
     const stage = runtime.definition.stages.find((candidate) => candidate.id === pending.action.stageId);
-    const mapEcho = this.testStageEcho(stage);
+    const mapEcho = this.testStageEcho(stage, true);
     const referee = runtime.definition.refereeConnectionId;
     if (pending.emitted < 3) {
       const value = (3 - pending.emitted) as 3 | 2 | 1;
@@ -921,6 +921,7 @@ export class TestRuntimeManager {
     const connectionId = player?.connectionId ?? ("connectionId" in event ? event.connectionId : "0");
     const stage = "stageId" in event ? runtime.definition.stages.find((candidate) => candidate.id === event.stageId) : undefined;
     const mapEcho = this.testStageEcho(stage);
+    const modeMapEcho = this.testStageEcho(stage, true);
     const prefix = this.testLogPrefix(runtime, event.atMs);
     switch (event.type) {
       case "login": return `${prefix} ${playerName} (#${event.connectionId}) logged in with cheat mode off.`;
@@ -928,15 +929,15 @@ export class TestRuntimeManager {
       case "finish": {
         const place = (runtime.stageFinishOrdinals.get(event.stageId) ?? 0) + 1;
         runtime.stageFinishOrdinals.set(event.stageId, place);
-        return `${prefix} (#${connectionId}, ${playerName}) finished ${mapEcho} in ${this.ordinal(place)} place (score: ${event.score}${stage?.mapKind === "custom" ? " [0]" : ""}; real time: ${this.formatElapsed(event.elapsedMs)}).`;
+        return `${prefix} (#${connectionId}, ${playerName}) finished ${modeMapEcho} in ${this.ordinal(place)} place (score: ${event.score}${stage?.mapKind === "custom" ? " [0]" : ""}; real time: ${this.formatElapsed(event.elapsedMs)}).`;
       }
       case "dnf": return `${prefix} (#${connectionId}, ${playerName}) did not finish ${mapEcho} (furthest reach: sector 0).`;
       case "exclude": return `${prefix} [Warning] ${playerName} result excluded: ${event.reason}`;
       case "cheat": return `${prefix} (${connectionId}, ${playerName}) turned cheat ${event.enabled ? "on" : "off"}.`;
-      case "ready": return `${prefix} [${event.refereeConnectionId}, *ContestConsole]: ${mapEcho} - Get ready`;
+      case "ready": return `${prefix} [${event.refereeConnectionId}, *ContestConsole]: ${modeMapEcho} - Get ready`;
       case "go":
         runtime.stageFinishOrdinals.set(event.stageId, 0);
-        return `${prefix} [${event.refereeConnectionId}, *ContestConsole]: ${mapEcho} - Go!`;
+        return `${prefix} [${event.refereeConnectionId}, *ContestConsole]: ${modeMapEcho} - Go!`;
       case "warning": return `${prefix} [Warning] ${event.playerId ? `${playerName} ` : ""}${event.message}`;
       case "fault": return `${prefix} ${event.fault === "server-disconnect" ? "Disconnected from server." : `Fault: ${event.fault}${event.playerId ? ` (${playerName})` : ""}`}`;
     }
@@ -946,7 +947,7 @@ export class TestRuntimeManager {
     const atMs = action.createdAtMs;
     const prefix = this.testLogPrefix(runtime, atMs);
     const stage = runtime.definition.stages.find((candidate) => candidate.id === action.stageId);
-    const mapEcho = this.testStageEcho(stage);
+    const mapEcho = this.testStageEcho(stage, true);
     const referee = runtime.definition.refereeConnectionId;
     switch (action.kind) {
       case "ready": return [`${prefix} [${referee}, *ContestConsole]: ${mapEcho} - Get ready`];
@@ -958,9 +959,11 @@ export class TestRuntimeManager {
     }
   }
 
-  private testStageEcho(stage: ScenarioDefinition["stages"][number] | undefined): string {
-    if (stage?.mapKind === "custom" && stage.mapHash) return `"${stage.displayName?.trim() || `${stage.mapHash.slice(0, 20).toLowerCase()}..`}"`;
-    return `Level ${String(stage?.level ?? 0).padStart(2, "0")}`;
+  private testStageEcho(stage: ScenarioDefinition["stages"][number] | undefined, includeMode = false): string {
+    const map = stage?.mapKind === "custom" && stage.mapHash
+      ? `"${stage.displayName?.trim() || `${stage.mapHash.slice(0, 20).toLowerCase()}..`}"`
+      : `Level ${String(stage?.level ?? 0).padStart(2, "0")}`;
+    return includeMode && stage?.mode.toLowerCase() === "hs" ? `${map} <HS>` : map;
   }
 
   private testOccurredAt(runtime: TestRuntime, atMs: number): string {

@@ -42,7 +42,8 @@ export const parseLogLine = (input: string, context: ParseContext): ParsedLogLin
   if (body === "Connected to server OK") {
     event = { ...metadata, type: "connected" };
   } else if (body === "Disconnected from server."
-    || /^The host hath bidden us farewell\.\s+\(5003: Connection dropped\)$/.test(body)) {
+    || /^The host hath bidden us farewell\.\s+\(5003: Connection dropped\)$/.test(body)
+    || /^The host hath bidden us farewell\.\s+\(1101: Kicked by .+ \(.*\)\.\)$/.test(body)) {
     event = { ...metadata, type: "server-disconnected" };
   } else if (body === "Action failed: you don't have the permission to run this action.") {
     event = { ...metadata, type: "permission-denied", message: body };
@@ -54,15 +55,15 @@ export const parseLogLine = (input: string, context: ParseContext): ParsedLogLin
     const disconnect = /^(.*?) \(#(\d+)\) disconnected\.$/.exec(body);
     const fatalError = /^(.*?) was kicked by the server \(fatal error\) and crashed subsequently\.$/.exec(body);
     const listed = /^(.*?) \(#(\d+)\)( \[CHEAT\])?$/.exec(body);
-    const readyOrGo = /^\[(\d+), (.*?)\]: Level (\d{2})(\*)?(?: <(SR|HS)>)? - (Get ready|3|2|1|Go!)$/i.exec(body);
-    const customReadyOrGo = /^\[(\d+), (.*?)\]: "([^"]+)" - (Get ready|3|2|1|Go!)$/.exec(body);
-    const officialHashReadyOrGo = /^\[(\d+), (.*?)\]: ([0-9a-fA-F]+)\.\. - (Get ready|3|2|1|Go!)$/.exec(body);
+    const readyOrGo = /^\[(\d+), (.*?)\]: Level[\s_]+(\d{2})(\*)?(?: <(SR|HS)>)? - (Get ready|3|2|1|Go!)$/i.exec(body);
+    const customReadyOrGo = /^\[(\d+), (.*?)\]: "([^"]+)"(?: <(SR|HS)>)? - (Get ready|3|2|1|Go!)$/i.exec(body);
+    const officialHashReadyOrGo = /^\[(\d+), (.*?)\]: ([0-9a-fA-F]+)\.\.(?: <(SR|HS)>)? - (Get ready|3|2|1|Go!)$/i.exec(body);
     const noticeOrAnnouncement = /^\[(Notice|Announcement)\] \((\d+), (.*?)\): (.*)$/.exec(body);
     const bulletin = /^\[Bulletin\] (.*?): (.*)$/.exec(body);
-    const finish = /^(\[CHEAT\] )?\(#(\d+), (.*?)\) finished Level (\d{2}) in (\d+)(?:st|nd|rd|th) place \(score: (-?\d+); real time: (\d+):(\d+):(\d+)\.(\d+)\)\.$/.exec(body);
-    const customFinish = /^(\[CHEAT\] )?\(#(\d+), (.*?)\) finished "([^"]+)" in (\d+)(?:st|nd|rd|th) place \(score: (-?\d+)(?: \[-?\d+\])?; real time: (\d+):(\d+):(\d+)\.(\d+)\)\.$/.exec(body);
-    const officialHashFinish = /^(\[CHEAT\] )?\(#(\d+), (.*?)\) finished ([0-9a-fA-F]+)\.\. in (\d+)(?:st|nd|rd|th) place \(score: (-?\d+)(?: \[-?\d+\])?; real time: (\d+):(\d+):(\d+)\.(\d+)\)\.$/.exec(body);
-    const dnf = /^(\[CHEAT\] )?\(#(\d+), (.*?)\) did not finish Level (\d{2}) \(furthest reach: sector (-?\d+)\)\.$/.exec(body);
+    const finish = /^(\[CHEAT\] )?\(#(\d+), (.*?)\) finished Level[\s_]+(\d{2})(?: <(SR|HS)>)? in (\d+)(?:st|nd|rd|th) place \(score: (-?\d+)(?: \[-?\d+\])?; real time: (\d+):(\d+):(\d+)\.(\d+)\)\.$/i.exec(body);
+    const customFinish = /^(\[CHEAT\] )?\(#(\d+), (.*?)\) finished "([^"]+)"(?: <(SR|HS)>)? in (\d+)(?:st|nd|rd|th) place \(score: (-?\d+)(?: \[-?\d+\])?; real time: (\d+):(\d+):(\d+)\.(\d+)\)\.$/i.exec(body);
+    const officialHashFinish = /^(\[CHEAT\] )?\(#(\d+), (.*?)\) finished ([0-9a-fA-F]+)\.\.(?: <(SR|HS)>)? in (\d+)(?:st|nd|rd|th) place \(score: (-?\d+)(?: \[-?\d+\])?; real time: (\d+):(\d+):(\d+)\.(\d+)\)\.$/i.exec(body);
+    const dnf = /^(\[CHEAT\] )?\(#(\d+), (.*?)\) did not finish Level[\s_]+(\d{2}) \(furthest reach: sector (-?\d+)\)\.$/.exec(body);
     const customDnf = /^(\[CHEAT\] )?\(#(\d+), (.*?)\) did not finish "([^"]+)" \(furthest reach: sector (-?\d+)\)\.$/.exec(body);
     const officialHashDnf = /^(\[CHEAT\] )?\(#(\d+), (.*?)\) did not finish ([0-9a-fA-F]+)\.\. \(furthest reach: sector (-?\d+)\)\.$/.exec(body);
     const cheat = /^\(?#?(\d+), (.*?)\)? turned cheat (on|off)\.$/.exec(body);
@@ -95,7 +96,8 @@ export const parseLogLine = (input: string, context: ParseContext): ParsedLogLin
       event = { ...metadata, type: "player-listed", playerName: listed[1] ?? "", connectionId: listed[2] ?? "", cheat: Boolean(listed[3]) };
     } else if (readyOrGo || customReadyOrGo || officialHashReadyOrGo) {
       const match = readyOrGo ?? customReadyOrGo ?? officialHashReadyOrGo as RegExpExecArray;
-      const value = readyOrGo ? readyOrGo[6] ?? "" : match[4] ?? "";
+      const value = readyOrGo ? readyOrGo[6] ?? "" : match[5] ?? "";
+      const mode = (readyOrGo?.[5] ?? match[4] ?? "SR").toLowerCase() as "sr" | "hs";
       const common = {
         ...metadata,
         connectionId: match[1] ?? "",
@@ -105,9 +107,11 @@ export const parseLogLine = (input: string, context: ParseContext): ParsedLogLin
               mapKind: "official" as const,
               level: Number(match[3]),
               ...(readyOrGo[4] ? { forceNextRestart: true } : {}),
-              ...(readyOrGo[5] ? { mode: readyOrGo[5].toLowerCase() as "sr" | "hs" } : {})
+              mode
             }
-          : customReadyOrGo ? quotedMapReference(match[3] ?? "") : { mapKind: "official" as const, mapHashPrefix: (match[3] ?? "").toLowerCase() })
+          : customReadyOrGo
+            ? { ...quotedMapReference(match[3] ?? ""), mode }
+            : { mapKind: "official" as const, mapHashPrefix: (match[3] ?? "").toLowerCase(), mode })
       };
       event = value === "Go!" ? { ...common, type: "go" }
         : value === "Get ready" ? { ...common, type: "ready" }
@@ -125,6 +129,7 @@ export const parseLogLine = (input: string, context: ParseContext): ParsedLogLin
       event = { ...metadata, type: "notification", channel: "bulletin", refereeName: bulletin[1] ?? "", text: bulletin[2] ?? "" };
     } else if (finish || customFinish || officialHashFinish) {
       const match = finish ?? customFinish ?? officialHashFinish as RegExpExecArray;
+      const mode = match[5]?.toLowerCase() as "sr" | "hs" | undefined;
       event = {
         ...metadata,
         type: "finish",
@@ -132,11 +137,13 @@ export const parseLogLine = (input: string, context: ParseContext): ParsedLogLin
         connectionId: match[2] ?? "",
         playerName: match[3] ?? "",
         ...(finish
-          ? { mapKind: "official" as const, level: Number(match[4]) }
-          : customFinish ? quotedMapReference(match[4] ?? "") : { mapKind: "official" as const, mapHashPrefix: (match[4] ?? "").toLowerCase() }),
-        serverPlace: Number(match[5]),
-        score: Number(match[6]),
-        elapsedMs: elapsedToMs(match[7] ?? "0", match[8] ?? "0", match[9] ?? "0", match[10] ?? "0")
+          ? { mapKind: "official" as const, level: Number(match[4]), ...(mode ? { mode } : {}) }
+          : customFinish
+            ? { ...quotedMapReference(match[4] ?? ""), ...(mode ? { mode } : {}) }
+            : { mapKind: "official" as const, mapHashPrefix: (match[4] ?? "").toLowerCase(), ...(mode ? { mode } : {}) }),
+        serverPlace: Number(match[6]),
+        score: Number(match[7]),
+        elapsedMs: elapsedToMs(match[8] ?? "0", match[9] ?? "0", match[10] ?? "0", match[11] ?? "0")
       };
     } else if (dnf || customDnf || officialHashDnf) {
       const match = dnf ?? customDnf ?? officialHashDnf as RegExpExecArray;

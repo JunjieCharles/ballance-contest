@@ -18,6 +18,7 @@ const probeName = "ContestConsole";
 const lines = [];
 const records = [];
 let client;
+let refereeConnectionId;
 
 const waitForLine = (predicate, timeoutMs) => new Promise((resolveLine, reject) => {
   const deadline = Date.now() + timeoutMs;
@@ -45,6 +46,13 @@ try {
   });
   client.onLine((line) => {
     lines.push(line);
+    const modernIdentity = /(?:^|\] )(\d+):\s+\*ContestConsole\s+-?\d+ms/.exec(line)?.[1];
+    const legacyIdentity = /(?:^|\] )\*ContestConsole \(#(\d+)\)$/.exec(line)?.[1];
+    const observedIdentity = modernIdentity ?? legacyIdentity;
+    if (observedIdentity) {
+      refereeConnectionId = observedIdentity;
+      queue.setRefereeConnectionId(observedIdentity);
+    }
     queue.observeLine(line);
   });
   client.start();
@@ -56,7 +64,27 @@ try {
     return record;
   };
 
-  await run({ type: "list" }, "live-list");
+  const listStartIndex = lines.length;
+  const list = await run({ type: "list" }, "live-list");
+  await new Promise((resolveWait) => setTimeout(resolveWait, 750));
+  const listLines = lines.slice(listStartIndex);
+  const modernSummary = listLines.map((line) => /client\(s\) online:\s*(\d+) player\(s\),\s*(\d+) spectator\(s\)/.exec(line)).find(Boolean);
+  const legacyHeaderIndex = listLines.findIndex((line) => /(?:^|\] )(\d+) player\(s\) online:$/.test(line));
+  const legacyExpected = legacyHeaderIndex >= 0
+    ? Number(/(?:^|\] )(\d+) player\(s\) online:$/.exec(listLines[legacyHeaderIndex])?.[1])
+    : undefined;
+  const legacyRows = legacyHeaderIndex >= 0
+    ? listLines.slice(legacyHeaderIndex + 1).map((line) => /(?:^|\] )(.*?) \(#\d+\)(?: \[CHEAT\])?$/.exec(line)?.[1]).filter(Boolean)
+    : [];
+  if (!modernSummary && (legacyExpected === undefined || legacyRows.length < legacyExpected)) {
+    throw new Error(`Live list response could not be verified: ${listLines.join("\n") || list.responseLine || "missing"}`);
+  }
+  const playerCount = modernSummary ? Number(modernSummary[1]) : legacyRows.filter((name) => !name.trim().startsWith("*")).length;
+  const spectatorCount = modernSummary ? Number(modernSummary[2]) : legacyRows.length - playerCount;
+  if (playerCount > 0 && process.env.BALLANCE_ALLOW_OCCUPIED_LIVE_SERVER !== "1") {
+    throw new Error(`Refusing workflow probe because ${server} has ${playerCount} player(s) online`);
+  }
+  if (!refereeConnectionId) throw new Error("The live list did not identify the local *ContestConsole connection ID");
   await run({ type: "notification", channel: "bulletin", text: `${probeName} workflow probe` }, "live-bulletin");
   await run({ type: "notification", channel: "notice", text: `${probeName} notice probe` }, "live-notice");
   await run({ type: "notification", channel: "announce", text: `${probeName} announce probe` }, "live-announce");
@@ -65,15 +93,20 @@ try {
   }
   await run({ type: "cheat-off" }, "live-cheat-off");
   await run({ type: "go", map: "level 1", mode: "sr" }, "live-go");
+  await run({ type: "ready", map: "level 1", mode: "hs" }, "live-hs-ready");
+  await run({ type: "go", map: "level 1", mode: "hs" }, "live-hs-go");
   await run({ type: "set-map", mapHash: customMapHash, displayName: "Contest Console Probe Map" }, "live-custom-set-map");
   await run({ type: "ready", map: `${customMapHash} 0`, mapName: "Contest Console Probe Map", mode: "sr" }, "live-custom-ready");
   await run({ type: "go", map: `${customMapHash} 0`, mapName: "Contest Console Probe Map", mode: "sr" }, "live-custom-go");
+  await run({ type: "ready", map: `${customMapHash} 0`, mapName: "Contest Console Probe Map", mode: "hs" }, "live-custom-hs-ready");
+  await run({ type: "go", map: `${customMapHash} 0`, mapName: "Contest Console Probe Map", mode: "hs" }, "live-custom-hs-go");
   await run({ type: "kick", playerName: `*${probeName}`, reason: "workflow-probe-finished" }, "live-kick");
 
   const artifact = {
     checkedAt: new Date().toISOString(),
     server,
     refereeName: `*${probeName}`,
+    refereeConnectionId,
     mockClientVersion: readMockClientVersion(join(serverDirectory, "BallanceMMOMockClient.exe"), serverDirectory),
     commands: records.map((record) => ({
       actionType: record.action.type,
@@ -81,7 +114,7 @@ try {
       status: record.status,
       responseLine: record.responseLine
     })),
-    listSummary: lines.find((line) => /client\(s\) online:/.test(line))
+    listSummary: modernSummary ? modernSummary[0] : `${legacyRows.length} client(s): ${playerCount} player(s), ${spectatorCount} spectator(s)`
   };
   await mkdir(join(root, "test", "artifacts"), { recursive: true });
   await writeFile(artifactPath, `${JSON.stringify(artifact, null, 2)}\n`, "utf8");

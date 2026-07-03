@@ -17,6 +17,8 @@ describe("parseLogLine", () => {
       .toMatchObject({ type: "server-disconnected" });
     expect(parseLogLine("[07-03 09:53:51] The host hath bidden us farewell.  (5003: Connection dropped)", context).event)
       .toMatchObject({ type: "server-disconnected" });
+    expect(parseLogLine("[07-03 20:58:11] The host hath bidden us farewell.  (1101: Kicked by *ContestConsole (workflow-probe-finished).)", context).event)
+      .toMatchObject({ type: "server-disconnected" });
   });
 
   it("parses the live official HS marker on Ready, countdown and Go", () => {
@@ -26,6 +28,14 @@ describe("parseLogLine", () => {
       .toMatchObject({ type: "countdown", level: 1, mode: "hs", value: 3 });
     expect(parseLogLine("[07-03 20:12:23] [3642659740, *ContestConsole]: Level 01 <HS> - Go!", context).event)
       .toMatchObject({ type: "go", level: 1, mode: "hs" });
+    expect(parseLogLine("[07-03 20:58:04] [2060577714, *ContestConsole]: a364b408fffaab434480.. <HS> - Get ready", context).event)
+      .toMatchObject({ type: "ready", mapKind: "official", mapHashPrefix: "a364b408fffaab434480", mode: "hs" });
+    expect(parseLogLine("[07-03 20:58:07] [2060577714, *ContestConsole]: a364b408fffaab434480.. <HS> - Go!", context).event)
+      .toMatchObject({ type: "go", mapKind: "official", mapHashPrefix: "a364b408fffaab434480", mode: "hs" });
+    expect(parseLogLine("[07-03 20:58:08] [2060577714, *ContestConsole]: \"Contest Map\" <HS> - Get ready", context).event)
+      .toMatchObject({ type: "ready", mapKind: "custom", mapDisplayName: "Contest Map", mode: "hs" });
+    expect(parseLogLine("[07-03 20:58:09] [2060577714, *ContestConsole]: Level_01 <HS> - Go!", context).event)
+      .toMatchObject({ type: "go", mapKind: "official", level: 1, mode: "hs" });
   });
 
   it("parses finishes, DNF, login, disconnect and cheat", () => {
@@ -33,8 +43,16 @@ describe("parseLogLine", () => {
       .toMatchObject({ type: "player-list-start", count: 2 });
     expect(parseLogLine("[06-29 11:21:00] (#12, Player) finished Level 01 in 2nd place (score: 1234; real time: 00:01:02.345).", context).event)
       .toMatchObject({ type: "finish", connectionId: "12", playerName: "Player", level: 1, serverPlace: 2, score: 1234, elapsedMs: 62_345 });
+    expect(parseLogLine("[06-29 11:21:00] (#12, Player) finished Level 01 <HS> in 2nd place (score: 1234; real time: 00:01:02.345).", context).event)
+      .toMatchObject({ type: "finish", level: 1, mode: "hs", serverPlace: 2, score: 1234, elapsedMs: 62_345 });
+    expect(parseLogLine("[06-29 11:21:00] (#12, Player) finished \"Contest Map\" <HS> in 2nd place (score: 1234 [20]; real time: 00:01:02.345).", context).event)
+      .toMatchObject({ type: "finish", mapDisplayName: "Contest Map", mode: "hs", serverPlace: 2, score: 1234 });
+    expect(parseLogLine("[06-29 11:21:00] (#12, Player) finished Level_01 <HS> in 2nd place (score: 1234 [20]; real time: 00:01:02.345).", context).event)
+      .toMatchObject({ type: "finish", level: 1, mode: "hs", serverPlace: 2, score: 1234 });
     expect(parseLogLine("[06-29 11:21:01] (#12, Player) did not finish Level 01 (furthest reach: sector 4).", context).event)
       .toMatchObject({ type: "dnf", furthestSector: 4 });
+    expect(parseLogLine("[06-29 11:21:01] (#12, Player) did not finish Level_01 (furthest reach: sector 4).", context).event)
+      .toMatchObject({ type: "dnf", level: 1, furthestSector: 4 });
     expect(parseLogLine("[06-29 11:21:02] Player (#12) logged in with cheat mode off.", context).event)
       .toMatchObject({ type: "player-login", cheat: false });
     expect(parseLogLine("[06-29 11:21:02] Silent_Snow (#42) [CHEAT]", context).event)

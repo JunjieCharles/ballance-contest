@@ -69,8 +69,8 @@
 - 工作与测试数据必须在界面、导出路径和归档中保持可辨识和隔离。
 - 协议级安全约束必须在最末端适配器强制执行，不能依赖可编辑默认值；MockClient 登录名固定为 `*ContestConsole`，配置、旧数据或探针参数都不得覆盖。
 - 命令队列必须在写入 stdin 前建立回显观察，防止同步或极快回显落入观察空窗。恢复 `sent` 命令前应先核对已持久化的权威回显和尝试；已有充分执行证据的 Go 应恢复为 `acknowledged`，不能误报 `uncertain`。
-- 所有写命令都不得把 MockClient 的 `> command` stdin 本地回显或无关的 `success`、`disconnect`、玩家事件当成服务器成功证据。协议回显含裁判身份时必须核对固定 `*ContestConsole` 及当前连接 ID；Bulletin 等协议不携带连接 ID 时至少精确核对固定身份、动作类型和完整内容；Kick 只认目标玩家的精确断开结果；无法定义安全成功回显的高级原始命令保持 `uncertain`，由裁判逐条处置。只读查询和 `setmap` 等无成功身份回显的协议按各自的非阻断或权限观察策略处理，不得伪造身份确认。
-- 官图 Ready/Go 回显要覆盖实服 `Level 01* - Get ready` 星号形态及 HS 的 `Level 01 <HS> - Get ready/3/2/1/Go!` 模式标记；命令队列和状态入口都必须核对固定身份及本机 MockClient 当前连接 ID，普通玩家发出的同地图 Ready、倒数或 Go 只保留原始日志。Go 命令只能由权威 `Go!` 回显确认，`3/2/1` 只更新倒数显示，不得确认命令、创建尝试或触发“已起跑”Bulletin；`cheat off` 只认本机 `toggled cheat off globally!` 回显，不能由任意玩家的 `turned cheat off` 误确认。权威 Go、迟到倒数或重复 Go 证据不得重复创建尝试或发送起跑 Bulletin。
+- 所有写命令都不得把 MockClient 的 `> command` stdin 本地回显或无关的 `success`、`disconnect`、玩家事件当成服务器成功证据。协议回显含裁判身份时必须核对固定 `*ContestConsole` 及由本次 `list` 建立的当前连接 ID；当前 ID 未知或 MockClient 已替换时不得降级为只核对名称。Bulletin 等协议不携带连接 ID 时至少精确核对固定身份、动作类型和完整内容；Kick 只认目标玩家的精确断开结果，本机自 Kick 只认原因一致的 `1101` 结果；无法定义安全成功回显的高级原始命令保持 `uncertain`，由裁判逐条处置。只读查询和 `setmap` 等无成功身份回显的协议按各自的非阻断或权限观察策略处理，不得伪造身份确认。
+- Ready/Go 回显要覆盖实服 `Level 01* - Get ready` 星号形态及官图注册后的 `Level_01` 形态；HS 模式标记 `<HS>` 同时可能出现在官图名称、官图哈希和带引号自制图的 Ready、3/2/1、Go 与完赛行，必须参与模式归属，测试模式原始日志也要保持一致。服务端 DNF 行不带模式标记，不得伪造 `<HS>`。命令队列和状态入口都必须核对固定身份及本机 MockClient 当前连接 ID，普通玩家发出的同地图 Ready、倒数或 Go 只保留原始日志。Go 命令只能由权威 `Go!` 回显确认，`3/2/1` 只更新倒数显示，不得确认命令、创建尝试或触发“已起跑”Bulletin；`cheat off` 只认本机 `toggled cheat off globally!` 回显，不能由任意玩家的 `turned cheat off` 误确认。权威 Go、迟到倒数或重复 Go 证据不得重复创建尝试或发送起跑 Bulletin。
 - 发布配置后的工作 MockClient 首次连接成功时，按发布顺序一次性发送全部自制图名称映射 `setmap <完整MD5> 0 <地图名>`；同一 MockClient 运行中不得因 Ready、重赛或手动发令重复发送。
 - 命令反馈精确文本 `Action failed: you don't have the permission to run this action.` 时，必须立即标记失败、阻断自动化并明确报告 `ContestConsole` 权限不足。
 - 自动及人工改动第一条 Ready 计划时，普通 Bulletin 固定为 `关卡名 将在 HH:mm 发令`，`HH:mm` 按 UTC+8 计算但不显示日期或时区；下一 Ready 与 Bulletin 使用同一个第一条 Get ready 计划源。起跑保护更正 Bulletin 还要注明玩家，并与保护用后的 T-60 Notice 一样在业务消息中保存真实换行和完整后缀 `本关起跑保护已被使用，后续不再延时。`，不得在状态/界面中写成 `\\n` 字符；MockClient stdin 适配器须按上游通知协议把真实换行编码为单个 `\n` 转义，确保仍只写一条命令。第一条 Ready 前一分钟的 Notice 必须使用已约定的完整句子，不得改成“下一轮”或其他相对描述。
@@ -130,6 +130,9 @@
 - 白盒测试不得继续穿透已经移出的旧私有 Map；应直接通过新模块的窄公开端口构造运行时、注入日志和驱动时钟，并保留 API、恢复和浏览器旅程作为跨模块回归。
 - Vitest 并行 worker 数必须受控，避免 Windows/原生 SQLite 组合下因提交内存峰值导致 worker OOM；出现 `ERR_IPC_CHANNEL_CLOSED`、worker OOM 或未处理拒绝时整轮门禁按失败处理，不能只根据已打印的绿色断言判定通过。
 - 当前环境 `PATH` 找不到 `node`/`npm` 时，先从仓库 `.tools/node-v*-win-x64` 定位本地工具链并只为当前门禁命令补充 `PATH`；不得据此跳过门禁、修改全局环境或误用便携产物中的运行时。
+- 修改 `packages/contracts` 或 `packages/core` 后定向运行下游服务测试前，必须先重建对应 workspace；下游测试可能按包导出加载 `dist`，不能把旧构建造成的假失败或假通过当作当前源码结论。
+- 通过 `CompetitionService` 验证已发布工作模式日志摄入时必须使用独立临时 SQLite（或显式提供等价的已发布配置端口），并断言目标事件确实进入状态机；无数据库实例不会持久化发布配置，不能用“阶段恰好没变化”冒充日志链路回归。
+- 实服写命令探针必须先执行 `list`、建立本机 `*ContestConsole` 当前连接 ID，并在发现普通玩家在线时默认中止；只有裁判明确批准占用中的目标服才可覆盖保护。探针应覆盖实际协议分支并保存回显证据，不能用 stdin 本地回显代替现场确认。
 
 按改动风险选择门禁，发布候选版本应执行：
 

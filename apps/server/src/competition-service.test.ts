@@ -17,6 +17,16 @@ const testRuntimeManager = (service: CompetitionService): TestRuntimeManager =>
   (service as unknown as { testRuntimeManager: TestRuntimeManager }).testRuntimeManager;
 
 describe("CompetitionService dynamic participants", () => {
+  let dataRoot = "";
+  let database: OpenedDatabase | undefined;
+
+  afterEach(() => {
+    database?.close();
+    database = undefined;
+    if (dataRoot) rmSync(dataRoot, { recursive: true, force: true });
+    dataRoot = "";
+  });
+
   it("uses a fixed seed for varied but reproducible player behavior", () => {
     const first = seededBehaviorRandom(20_260_631, "sr-1", 1, "expert", "finish-time");
     expect(seededBehaviorRandom(20_260_631, "sr-1", 1, "expert", "finish-time")).toBe(first);
@@ -87,7 +97,9 @@ describe("CompetitionService dynamic participants", () => {
   });
 
   it("does not let a player's countdown move the referee flow out of Ready", () => {
-    const service = new CompetitionService();
+    dataRoot = mkdtempSync(join(tmpdir(), "ballance-foreign-countdown-"));
+    database = openDatabase(join(dataRoot, "console.sqlite"));
+    const service = new CompetitionService(undefined, { database, dataRoot });
     const record = service.create({ name: "Foreign countdown", mode: "work", idempotencyKey: "foreign-countdown" });
     service.updateDraft(record.id, {
       expectedStateVersion: 0,
@@ -106,21 +118,17 @@ describe("CompetitionService dynamic participants", () => {
     expect(runtime.controller.snapshot().phase).toBe("ready");
     expect(runtime.controller.snapshot().countdownValue).toBeUndefined();
 
+    manager.ingestLine(runtime, "[07-03 20:20:06] [9999999999, *ContestConsole]: Level 02 - 2");
+    expect(runtime.refereeConnectionId).toBeUndefined();
+    expect(runtime.controller.snapshot().phase).toBe("ready");
     manager.ingestLine(runtime, "[07-03 20:20:07] 2760557282: *ContestConsole    70ms");
+    expect(runtime.refereeConnectionId).toBe("2760557282");
     manager.ingestLine(runtime, "[07-03 20:20:17] [3210244510, liangzhichao]: Level 02 - 2");
 
     expect(runtime.controller.snapshot().phase).toBe("ready");
     expect(runtime.controller.snapshot().countdownValue).toBeUndefined();
     service.close();
   });
-  let dataRoot = "";
-  let database: OpenedDatabase | undefined;
-
-  afterEach(() => {
-    database?.close();
-    if (dataRoot) rmSync(dataRoot, { recursive: true, force: true });
-  });
-
   it("registers normal players from list output and keeps display aliases separate", async () => {
     dataRoot = mkdtempSync(join(tmpdir(), "ballance-dynamic-participants-"));
     database = openDatabase(join(dataRoot, "console.sqlite"));
@@ -134,9 +142,10 @@ describe("CompetitionService dynamic participants", () => {
     const runtime = manager.makeRuntime(record.id, published, transport);
     manager.register(record.id, runtime);
 
-    manager.ingestLine(runtime, "[06-30 12:00:00] 2 player(s) online:");
+    manager.ingestLine(runtime, "[06-30 12:00:00] 3 player(s) online:");
     manager.ingestLine(runtime, "[06-30 12:00:00] Silent_Snow (#42)");
     manager.ingestLine(runtime, "[06-30 12:00:00] *Observer (#99)");
+    manager.ingestLine(runtime, "[06-30 12:00:00] *ContestConsole (#7)");
     expect(service.snapshot(record.id).config.participants).toMatchObject([{
       id: "Silent_Snow",
       displayName: "Silent_Snow",
@@ -233,6 +242,7 @@ describe("CompetitionService dynamic participants", () => {
     const runtime = manager.makeRuntime(record.id, service.snapshot(record.id).publishedConfig as CompetitionConfig, { write: async () => undefined });
     manager.register(record.id, runtime);
 
+    manager.ingestLine(runtime, "[07-02 12:00:00] 7: *ContestConsole     0ms");
     manager.ingestLine(runtime, "[07-02 12:00:00] Player One (#42) logged in with cheat mode off.");
     manager.ingestLine(runtime, "[07-02 12:00:01] [7, *ContestConsole]: Level 01 - Go!");
     manager.ingestLine(runtime, "[07-02 12:00:02] (#42, Player One) finished Level 01 in 1st place (score: 100; real time: 00:00:01.000).");
@@ -288,11 +298,12 @@ describe("CompetitionService dynamic participants", () => {
     await runtime.customMapRegistration;
     expect(writes).toEqual([`setmap ${hash} 0 云端决赛图`, "listmap"]);
     const prefix = hash.slice(0, 20);
+    manager.ingestLine(runtime, "[07-01 19:25:40] 7: *ContestConsole     0ms");
     manager.ingestLine(runtime, "[07-01 19:25:40] Alpha (#11) logged in with cheat mode off.");
     manager.ingestLine(runtime, "[07-01 19:25:40] Beta (#12) logged in with cheat mode off.");
-    manager.ingestLine(runtime, `[07-01 19:25:43] [7, *ContestConsole]: "${prefix}.." - Get ready`);
-    manager.ingestLine(runtime, "[07-01 19:25:46] [7, *ContestConsole]: \"云端决赛图\" - Go!");
-    manager.ingestLine(runtime, "[07-01 19:26:19] (#11, Alpha) finished \"云端决赛图\" in 1st place (score: 120 [20]; real time: 00:00:02.045).");
+    manager.ingestLine(runtime, `[07-01 19:25:43] [7, *ContestConsole]: "${prefix}.." <HS> - Get ready`);
+    manager.ingestLine(runtime, "[07-01 19:25:46] [7, *ContestConsole]: \"云端决赛图\" <HS> - Go!");
+    manager.ingestLine(runtime, "[07-01 19:26:19] (#11, Alpha) finished \"云端决赛图\" <HS> in 1st place (score: 120 [20]; real time: 00:00:02.045).");
     manager.ingestLine(runtime, "[07-01 19:26:46] (#12, Beta) did not finish \"云端决赛图\" (furthest reach: sector 1).");
 
     const snapshot = service.snapshot(record.id);
@@ -317,6 +328,7 @@ describe("CompetitionService dynamic participants", () => {
     manager.register(record.id, runtime);
     runtime.controller.manualReady();
     const prefix = "a364b408fffaab434480";
+    manager.ingestLine(runtime, "[07-01 19:30:00] 7: *ContestConsole     0ms");
     manager.ingestLine(runtime, "[07-01 19:30:00] Alpha (#11) logged in with cheat mode off.");
     manager.ingestLine(runtime, `[07-01 19:30:01] [7, *ContestConsole]: ${prefix}.. - Get ready`);
     manager.ingestLine(runtime, `[07-01 19:30:16] [7, *ContestConsole]: ${prefix}.. - Go!`);
@@ -324,6 +336,36 @@ describe("CompetitionService dynamic participants", () => {
 
     expect(service.snapshot(record.id).currentScoreboard.find((entry) => entry.playerId === "Alpha")?.stages["sr-1"])
       .toMatchObject({ status: "finished", score: 100, points: 20 });
+  });
+
+  it("attributes the live official hash HS marker to an HS stage and result", () => {
+    dataRoot = mkdtempSync(join(tmpdir(), "ballance-official-hs-echo-"));
+    database = openDatabase(join(dataRoot, "console.sqlite"));
+    const service = new CompetitionService(undefined, { database, dataRoot });
+    const record = service.create({ name: "Official HS echo", mode: "work", idempotencyKey: "create-official-hs" });
+    service.updateDraft(record.id, {
+      expectedStateVersion: 0,
+      idempotencyKey: "configure-official-hs",
+      stages: [{
+        id: "hs-1", order: 1, label: "HS1", level: 1, mode: "HS", mapKind: "official",
+        timeLimitMs: 600_000, scoring: [20, 15], minimumScoringPlace: 2
+      }]
+    });
+    service.publish(record.id, 1, "publish-official-hs");
+    const manager = workRuntimeManager(service);
+    const runtime = manager.makeRuntime(record.id, service.snapshot(record.id).publishedConfig as CompetitionConfig, { write: async () => undefined });
+    manager.register(record.id, runtime);
+    runtime.controller.manualReady();
+    const prefix = "a364b408fffaab434480";
+    manager.ingestLine(runtime, "[07-03 21:01:31] 1427745711: *ContestConsole     0ms");
+    manager.ingestLine(runtime, "[07-03 21:01:31] Runner (#11) logged in with cheat mode off.");
+    manager.ingestLine(runtime, `[07-03 21:01:36] [1427745711, *ContestConsole]: ${prefix}.. <HS> - Get ready`);
+    manager.ingestLine(runtime, `[07-03 21:01:39] [1427745711, *ContestConsole]: ${prefix}.. <HS> - Go!`);
+    manager.ingestLine(runtime, `[07-03 21:01:43] (#11, Runner) finished ${prefix}.. <HS> in 1st place (score: 120 [20]; real time: 00:00:04.000).`);
+
+    expect(service.snapshot(record.id).runtime.attempts).toContainEqual(expect.objectContaining({ stageId: "hs-1", attemptNumber: 1 }));
+    expect(service.snapshot(record.id).currentScoreboard.find((entry) => entry.playerId === "Runner")?.stages["hs-1"])
+      .toMatchObject({ status: "finished", score: 120, points: 20 });
   });
 
   it("renders custom-map test logs with the same quoted registered-name sentences as the live server", () => {
@@ -336,7 +378,7 @@ describe("CompetitionService dynamic participants", () => {
       expectedStateVersion: 0,
       idempotencyKey: "custom-test-stage",
       stages: [{
-        id: "custom-sr", order: 1, label: "云端竞速图", level: 0, mode: "SR", mapKind: "custom", mapHash: hash,
+        id: "custom-hs", order: 1, label: "云端竞速图", level: 0, mode: "HS", mapKind: "custom", mapHash: hash,
         timeLimitMs: 600_000, scoring: [20, 15, 12], minimumScoringPlace: 3
       }]
     });
@@ -344,7 +386,7 @@ describe("CompetitionService dynamic participants", () => {
     const runId = service.createTestRunFromScenario(record.id, "normal-player-roster").runId;
     service.startTestAutomation(record.id, runId, 0);
     service.advanceTestAutomation(record.id, runId, 240_000);
-    const mapEcho = `"云端竞速图"`;
+    const mapEcho = `"云端竞速图" <HS>`;
     const lines = service.getRawClientLogs(record.id, 1_000).map((line) => line.rawLine);
     expect(lines.filter((line) => line.includes(`${mapEcho} - Get ready`)), lines.join("\n")).toHaveLength(3);
     expect(lines).toContainEqual(expect.stringContaining(`${mapEcho} - Go!`));
@@ -360,6 +402,7 @@ describe("CompetitionService dynamic participants", () => {
     const manager = workRuntimeManager(service);
     const runtime = manager.makeRuntime(record.id, service.snapshot(record.id).publishedConfig as CompetitionConfig, { write: async () => undefined });
     manager.register(record.id, runtime);
+    manager.ingestLine(runtime, "[07-01 12:00:00] 7: *ContestConsole     0ms");
     for (const [id, name] of [["11", "Cheater"], ["12", "Valid"], ["13", "Warned"]]) {
       manager.ingestLine(runtime, `[07-01 12:00:00] ${name} (#${id}) logged in with cheat mode off.`);
     }
@@ -390,6 +433,7 @@ describe("CompetitionService dynamic participants", () => {
     const runtime = manager.makeRuntime(record.id, service.snapshot(record.id).publishedConfig as CompetitionConfig, { write: async () => undefined });
     manager.register(record.id, runtime);
 
+    manager.ingestLine(runtime, "[07-02 20:00:00] 7: *ContestConsole     0ms");
     manager.ingestLine(runtime, "[07-02 20:00:00] OfflineCheater (#41) logged in with cheat mode off.");
     runtime.controller.manualCheatOff();
     const cheatOff = runtime.controller.drainActions().find((item) => item.kind === "cheat-off");
@@ -422,6 +466,7 @@ describe("CompetitionService dynamic participants", () => {
     const runtime = manager.makeRuntime(record.id, service.snapshot(record.id).publishedConfig as CompetitionConfig, { write: async () => undefined });
     manager.register(record.id, runtime);
 
+    manager.ingestLine(runtime, "[07-02 20:00:00] 7: *ContestConsole     0ms");
     manager.ingestLine(runtime, "[07-02 20:00:00] [7, *ContestConsole]: Level 01 - Go!");
     manager.ingestLine(runtime, "[07-02 20:00:01] LoginCheater (#41) logged in with cheat mode on.");
 
@@ -444,6 +489,7 @@ describe("CompetitionService dynamic participants", () => {
     const runtime = manager.makeRuntime(record.id, service.snapshot(record.id).publishedConfig as CompetitionConfig, { write: async () => undefined });
     manager.register(record.id, runtime);
 
+    manager.ingestLine(runtime, "[07-01 12:00:00] 7: *ContestConsole     0ms");
     for (const [id, name] of [["11", "Cheater"], ["12", "Valid"]]) {
       manager.ingestLine(runtime, `[07-01 12:00:00] ${name} (#${id}) logged in with cheat mode off.`);
     }
@@ -472,6 +518,7 @@ describe("CompetitionService dynamic participants", () => {
     const runtime = manager.makeRuntime(record.id, service.snapshot(record.id).publishedConfig as CompetitionConfig, { write: async () => undefined });
     manager.register(record.id, runtime);
 
+    manager.ingestLine(runtime, "[07-01 12:00:00] 7: *ContestConsole     0ms");
     manager.ingestLine(runtime, "[07-01 12:00:00] Practicing (#21) logged in with cheat mode off.");
     manager.ingestLine(runtime, "[07-01 12:00:01] [7, *ContestConsole]: Level 01 - Go!");
     manager.ingestLine(runtime, "[07-01 12:00:02] (#21, Practicing) finished Level 01 in 1st place (score: 100; real time: 00:00:01.000).");
@@ -579,6 +626,7 @@ describe("CompetitionService dynamic participants", () => {
     let manager = workRuntimeManager(service);
     let runtime = manager.makeRuntime(record.id, service.snapshot(record.id).config, { write: async () => undefined });
     manager.register(record.id, runtime);
+    manager.ingestLine(runtime, "[07-03 01:00:00] 7: *ContestConsole     0ms");
     manager.ingestLine(runtime, "[07-03 01:00:00] Runner (#41) logged in with cheat mode off.");
     manager.ingestLine(runtime, "[07-03 01:00:01] [7, *ContestConsole]: Level 01 - Go!");
     manager.ingestLine(runtime, "[07-03 01:00:02] (#41, Runner) finished Level 01 in 1st place (score: 100; real time: 00:00:01.000).");
@@ -1108,6 +1156,7 @@ describe("CompetitionService dynamic participants", () => {
     const runtime = manager.makeRuntime(record.id, service.snapshot(record.id).config, transport);
     runtimeHolder.current = runtime;
     manager.register(record.id, runtime);
+    runtime.commands.setRefereeConnectionId("7");
     runtime.controller.enable(0);
     for (const initial of runtime.controller.drainActions()) runtime.controller.acknowledgeAction(initial.id, "acknowledged");
     runtime.controller.tick();

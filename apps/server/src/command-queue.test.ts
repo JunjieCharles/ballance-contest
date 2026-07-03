@@ -12,6 +12,7 @@ describe("CommandQueue", () => {
   it("serializes commands, waits for matching echoes and returns idempotent results", async () => {
     const transport = new FakeTransport();
     const queue = new CommandQueue(transport, 100);
+    queue.setRefereeConnectionId("7");
     transport.onWrite = (command) => setTimeout(() => queue.observeLine(command === "list" ? "2 player(s) online:" : "[7, *ContestConsole]: Level 01 - Go!"), 0);
     const first = queue.enqueue({ type: "list" }, "same");
     const second = queue.enqueue({ type: "go", map: "level 1", mode: "sr" }, "go");
@@ -24,6 +25,7 @@ describe("CommandQueue", () => {
   it("observes a synchronous echo produced while stdin is still being written", async () => {
     const transport = new FakeTransport();
     const queue = new CommandQueue(transport, 5);
+    queue.setRefereeConnectionId("7");
     transport.onWrite = () => queue.observeLine("[7, *ContestConsole]: Level 01 - Go!");
     expect((await queue.enqueue({ type: "go", map: "level 1", mode: "sr" }, "sync-go")).status).toBe("acknowledged");
   });
@@ -79,6 +81,7 @@ describe("CommandQueue", () => {
   it("matches official map echo after setmap registration with Level_0N format", async () => {
     const transport = new FakeTransport();
     const queue = new CommandQueue(transport, 100);
+    queue.setRefereeConnectionId("7");
     transport.onWrite = () => setTimeout(() => queue.observeLine("[7, *ContestConsole]: Level_03 - Go!"), 0);
     expect((await queue.enqueue({ type: "go", map: "level 3", mode: "sr" }, "level3-with-underscore-go")).status).toBe("acknowledged");
   });
@@ -86,6 +89,7 @@ describe("CommandQueue", () => {
   it("accepts the live server's starred official Ready echo", async () => {
     const transport = new FakeTransport();
     const queue = new CommandQueue(transport, 100);
+    queue.setRefereeConnectionId("2355344013");
     transport.onWrite = () => setTimeout(() => queue.observeLine("[07-02 20:32:49] [2355344013, *ContestConsole]: Level 01* - Get ready"), 0);
     expect((await queue.enqueue({ type: "ready", map: "level 1", mode: "sr" }, "starred-ready")).status).toBe("acknowledged");
   });
@@ -93,6 +97,7 @@ describe("CommandQueue", () => {
   it("accepts official HS echoes only from ContestConsole and with the HS marker", async () => {
     const transport = new FakeTransport();
     const queue = new CommandQueue(transport, 100);
+    queue.setRefereeConnectionId("3642659740");
     transport.onWrite = (command) => {
       const value = command.endsWith(" 4") ? "Get ready" : "Go!";
       setTimeout(() => queue.observeLine(`[3210244510, Player]: Level 01 <HS> - ${value}`), 0);
@@ -137,6 +142,7 @@ describe("CommandQueue", () => {
   it("waits for authoritative Go instead of acknowledging at 3/2/1", async () => {
     const transport = new FakeTransport();
     const queue = new CommandQueue(transport, 100);
+    queue.setRefereeConnectionId("7");
     transport.onWrite = () => {
       for (const [delay, value] of [[0, "3"], [1, "2"], [2, "1"], [3, "Go!"]] as const) {
         setTimeout(() => queue.observeLine(`[7, *ContestConsole]: Level 01 - ${value}`), delay);
@@ -149,20 +155,33 @@ describe("CommandQueue", () => {
   it("acknowledges list from the current trailing summary format", async () => {
     const transport = new FakeTransport();
     const queue = new CommandQueue(transport, 100);
-    transport.onWrite = () => setTimeout(() => {
-      queue.observeLine("3598759654: *ContestConsole     0ms");
-      queue.observeLine("1 client(s) online: 0 player(s), 1 spectator(s).");
+    transport.onWrite = (command) => setTimeout(() => {
+      if (command === "list") {
+        queue.observeLine("3598759654: *ContestConsole     0ms");
+        queue.observeLine("1 client(s) online: 0 player(s), 1 spectator(s).");
+      } else {
+        queue.observeLine("[3598759654, *ContestConsole]: Level 01 - Go!");
+      }
     }, 0);
     expect((await queue.enqueue({ type: "list" }, "current-list")).status).toBe("acknowledged");
+    expect((await queue.enqueue({ type: "go", map: "level 1", mode: "sr" }, "go-after-list")).status).toBe("acknowledged");
+  });
+
+  it("does not accept an identity-bearing echo before the current local connection ID is known", async () => {
+    const transport = new FakeTransport();
+    const queue = new CommandQueue(transport, 20);
+    transport.onWrite = () => setTimeout(() => queue.observeLine("[7, *ContestConsole]: Level 01 - Go!"), 0);
+    expect((await queue.enqueue({ type: "go", map: "level 1", mode: "sr" }, "go-without-current-id")).status).toBe("uncertain");
   });
 
   it("encodes custom maps with hidden level zero and requires their quoted hash prefix", async () => {
     const transport = new FakeTransport();
     const queue = new CommandQueue(transport, 100);
+    queue.setRefereeConnectionId("7");
     const hash = "e90b2f535c8bf881e9cb83129fba241d";
     transport.onWrite = (command) => setTimeout(() => {
-      queue.observeLine(`[7, *ContestConsole]: "ffffffffffffffffffff.." - ${command.endsWith(" 4") ? "Get ready" : "Go!"}`);
-      queue.observeLine(`[7, *ContestConsole]: "${hash.slice(0, 20)}.." - ${command.endsWith(" 4") ? "Get ready" : "Go!"}`);
+      queue.observeLine(`[7, *ContestConsole]: "ffffffffffffffffffff.." <HS> - ${command.endsWith(" 4") ? "Get ready" : "Go!"}`);
+      queue.observeLine(`[7, *ContestConsole]: "${hash.slice(0, 20)}.." <HS> - ${command.endsWith(" 4") ? "Get ready" : "Go!"}`);
     }, 0);
     expect((await queue.enqueue({ type: "ready", map: `${hash} 0`, mode: "hs" }, "custom-ready")).status).toBe("acknowledged");
     expect((await queue.enqueue({ type: "go", map: `${hash} 0`, mode: "hs" }, "custom-go")).status).toBe("acknowledged");
@@ -175,8 +194,9 @@ describe("CommandQueue", () => {
   it("accepts the published custom map name echoed after setmap registration", async () => {
     const transport = new FakeTransport();
     const queue = new CommandQueue(transport, 100);
+    queue.setRefereeConnectionId("7");
     const hash = "e90b2f535c8bf881e9cb83129fba241d";
-    transport.onWrite = () => setTimeout(() => queue.observeLine("[7, *ContestConsole]: \"Contest Map With Spaces\" - Get ready"), 0);
+    transport.onWrite = () => setTimeout(() => queue.observeLine("[7, *ContestConsole]: \"Contest Map With Spaces\" <HS> - Get ready"), 0);
     expect((await queue.enqueue({ type: "ready", map: `${hash} 0`, mapName: "Contest Map With Spaces", mode: "hs" }, "named-custom-ready")).status)
       .toBe("acknowledged");
   });
@@ -184,6 +204,7 @@ describe("CommandQueue", () => {
   it("accepts the live server's unquoted official-map hash echo", async () => {
     const transport = new FakeTransport();
     const queue = new CommandQueue(transport, 100);
+    queue.setRefereeConnectionId("7");
     transport.onWrite = () => setTimeout(() => queue.observeLine("[7, *ContestConsole]: a364b408fffaab434480.. - Go!"), 0);
     expect((await queue.enqueue({ type: "go", map: "level 1", mode: "sr" }, "official-hash-go")).status).toBe("acknowledged");
   });
@@ -248,6 +269,20 @@ describe("CommandQueue", () => {
       responseLine: "Target Player (#42) disconnected."
     });
     expect((await queue.enqueue({ type: "raw", command: "some-mutating-command" }, "raw-unverifiable")).status).toBe("uncertain");
+  });
+
+  it("acknowledges kicking ContestConsole only from the exact 1101 server result", async () => {
+    const transport = new FakeTransport();
+    const queue = new CommandQueue(transport, 100);
+    transport.onWrite = (command) => {
+      setTimeout(() => queue.observeLine(`> ${command}`), 0);
+      setTimeout(() => queue.observeLine("The host hath bidden us farewell.  (5003: Connection dropped)"), 1);
+      setTimeout(() => queue.observeLine("The host hath bidden us farewell.  (1101: Kicked by *ContestConsole (workflow-probe-finished).)"), 2);
+    };
+    expect((await queue.enqueue({ type: "kick", playerName: "*ContestConsole", reason: "workflow-probe-finished" }, "kick-self"))).toMatchObject({
+      status: "acknowledged",
+      responseLine: "The host hath bidden us farewell.  (1101: Kicked by *ContestConsole (workflow-probe-finished).)"
+    });
   });
 
   it("rejects control characters before writing", async () => {

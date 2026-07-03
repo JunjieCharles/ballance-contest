@@ -47,7 +47,7 @@ const refereeEchoConnectionId = (line: string): string | undefined =>
 
 const isContestRefereeEcho = (line: string, expectedConnectionId?: string): boolean => {
   const connectionId = refereeEchoConnectionId(line);
-  return connectionId !== undefined && (expectedConnectionId === undefined || connectionId === expectedConnectionId);
+  return expectedConnectionId !== undefined && connectionId === expectedConnectionId;
 };
 
 const mapEchoMatches = (line: string, map: string, mapName: string | undefined, mode: "sr" | "hs"): boolean => {
@@ -65,8 +65,10 @@ const mapEchoMatches = (line: string, map: string, mapName: string | undefined, 
     return mode === "hs" ? echoMode === "hs" : echoMode !== "hs";
   }
   const custom = /^([0-9a-f]{32})\s+0$/.exec(target);
-  const customEcho = /:\s*"([^"]+)"\s+-/i.exec(line)?.[1];
-  if (!custom || !customEcho) return false;
+  const customMatch = /:\s*"([^"]+)"(?:\s+<(SR|HS)>)?\s+-/i.exec(line);
+  const customEcho = customMatch?.[1];
+  const customMode = customMatch?.[2]?.toLowerCase() ?? "sr";
+  if (!custom || !customEcho || customMode !== mode) return false;
   const prefix = /^([0-9a-f]+)\.\.$/i.exec(customEcho)?.[1];
   return prefix ? Boolean(custom[1]?.startsWith(prefix.toLowerCase())) : Boolean(mapName && customEcho === mapName);
 };
@@ -113,7 +115,7 @@ const encode = (
           if (action.channel === "bulletin") return line.endsWith(`[${label}] *ContestConsole: ${text}`);
           const match = new RegExp(`\\[${label}\\] \\(\\d+, \\*ContestConsole\\): (.*)$`).exec(line);
           const expected = refereeConnectionId();
-          return match?.[1] === text && (expected === undefined || match[0].includes(`(${expected}, *ContestConsole)`));
+          return expected !== undefined && match?.[1] === text && match[0].includes(`(${expected}, *ContestConsole)`);
         }
       };
     }
@@ -128,7 +130,7 @@ const encode = (
       acknowledge: (line) => {
         const connectionId = /\(#?(\d+),\s*\*ContestConsole\) toggled cheat off globally!$/.exec(line)?.[1];
         const expected = refereeConnectionId();
-        return connectionId !== undefined && (expected === undefined || connectionId === expected);
+        return expected !== undefined && connectionId === expected;
       }
     };
     case "go": return {
@@ -153,11 +155,13 @@ const encode = (
     case "scores": return { command: `scores ${action.mode} ${cleanText(action.map)}`, critical: false, acknowledge: (line) => /place|score|ranking/i.test(line) };
     case "kick": {
       const playerName = cleanText(action.playerName);
+      const reason = cleanText(action.reason);
       const disconnected = new RegExp(`${escapePattern(playerName)} \\(#[0-9]+\\) disconnected\\.$`);
+      const selfKicked = `The host hath bidden us farewell.  (1101: Kicked by *ContestConsole (${reason}).)`;
       return {
-        command: `kick ${playerName} ${cleanText(action.reason)}`,
+        command: `kick ${playerName} ${reason}`,
         critical: true,
-        acknowledge: (line) => disconnected.test(line) || playerName === "*ContestConsole" && /Disconnected from server\.$/.test(line)
+        acknowledge: (line) => disconnected.test(line) || playerName === "*ContestConsole" && line.endsWith(selfKicked)
       };
     }
     case "raw": {
@@ -237,6 +241,9 @@ export class CommandQueue {
   }
 
   public observeLine(line: string): void {
+    const modernIdentity = /(?:^|\] )(\d+):\s+\*ContestConsole\s+-?\d+ms/.exec(line)?.[1];
+    const legacyIdentity = /(?:^|\] )\*ContestConsole \(#(\d+)\)$/.exec(line)?.[1];
+    if (modernIdentity || legacyIdentity) this.refereeConnectionId = modernIdentity ?? legacyIdentity;
     const pending = this.pending;
     if (!pending) return;
     if (isPermissionDeniedLine(line)) {

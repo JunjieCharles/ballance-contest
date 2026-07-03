@@ -723,7 +723,8 @@ export class WorkRuntimeManager {
       || event.mapKind !== "official" || !event.mapHashPrefix
       || !this.isLocalRefereeEvent(runtime, event)) return;
     const actionKind = event.type === "ready" ? "ready" : "go";
-    const matchingAction = [...snapshot.actions].reverse().find((action) => action.kind === actionKind && action.status === "pending");
+    const matchingAction = [...snapshot.actions].reverse().find((action) => action.kind === actionKind && action.status === "pending"
+      && (event.mode === undefined || action.mode === event.mode));
     if (!matchingAction) return;
     const targetStage = config.stages.find((stage) => stage.id === matchingAction.stageId);
     if (targetStage && stageMapKind(targetStage) === "official") runtime.mapEchoPrefixes.set(targetStage.id, event.mapHashPrefix.toLowerCase());
@@ -738,7 +739,7 @@ export class WorkRuntimeManager {
     }
     if (event.mapKind === "custom" && event.mapDisplayName) {
       const candidates = config.stages.filter((candidate) =>
-        stageMapKind(candidate) === "custom" && stageDisplayName(candidate) === event.mapDisplayName);
+        stageMapKind(candidate) === "custom" && stageDisplayName(candidate) === event.mapDisplayName && modeMatches(candidate));
       return candidates.find((candidate) => candidate.id === preferredStageId) ?? (candidates.length === 1 ? candidates[0] : undefined);
     }
     const prefix = event.mapHashPrefix?.toLowerCase();
@@ -746,10 +747,10 @@ export class WorkRuntimeManager {
     if (event.mapKind === "custom") {
       const hashes = [...new Set(config.stages.filter((candidate) => stageMapKind(candidate) === "custom" && candidate.mapHash?.toLowerCase().startsWith(prefix)).map((candidate) => candidate.mapHash?.toLowerCase() ?? ""))];
       if (hashes.length !== 1) return undefined;
-      const candidates = config.stages.filter((candidate) => candidate.mapHash?.toLowerCase() === hashes[0]);
+      const candidates = config.stages.filter((candidate) => candidate.mapHash?.toLowerCase() === hashes[0] && modeMatches(candidate));
       return candidates.find((candidate) => candidate.id === preferredStageId) ?? (candidates.length === 1 ? candidates[0] : undefined);
     }
-    const candidates = config.stages.filter((candidate) => runtime.mapEchoPrefixes.get(candidate.id) === prefix);
+    const candidates = config.stages.filter((candidate) => runtime.mapEchoPrefixes.get(candidate.id) === prefix && modeMatches(candidate));
     return candidates.find((candidate) => candidate.id === preferredStageId) ?? (candidates.length === 1 ? candidates[0] : undefined);
   }
 
@@ -790,16 +791,7 @@ export class WorkRuntimeManager {
   }
 
   private observeRefereeConnection(runtime: WorkRuntime, event: DomainEvent): void {
-    if (event.type === "player-listed") {
-      if (normalizeRefereeName(event.playerName) === CONTEST_REFEREE_NAME) {
-        runtime.refereeConnectionId = event.connectionId;
-        runtime.commands.setRefereeConnectionId(event.connectionId);
-      }
-      return;
-    }
-    if ((event.type === "ready" || event.type === "countdown" || event.type === "go" || event.type === "notification")
-      && event.connectionId && normalizeRefereeName(event.refereeName) === CONTEST_REFEREE_NAME
-      && runtime.refereeConnectionId === undefined) {
+    if (event.type === "player-listed" && normalizeRefereeName(event.playerName) === CONTEST_REFEREE_NAME) {
       runtime.refereeConnectionId = event.connectionId;
       runtime.commands.setRefereeConnectionId(event.connectionId);
     }
