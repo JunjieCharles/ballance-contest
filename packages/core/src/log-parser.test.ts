@@ -19,6 +19,15 @@ describe("parseLogLine", () => {
       .toMatchObject({ type: "server-disconnected" });
   });
 
+  it("parses the live official HS marker on Ready, countdown and Go", () => {
+    expect(parseLogLine("[07-03 20:12:04] [3642659740, *ContestConsole]: Level 01 <HS> - Get ready", context).event)
+      .toMatchObject({ type: "ready", level: 1, mode: "hs", refereeName: "*ContestConsole" });
+    expect(parseLogLine("[07-03 20:12:20] [3642659740, *ContestConsole]: Level 01 <HS> - 3", context).event)
+      .toMatchObject({ type: "countdown", level: 1, mode: "hs", value: 3 });
+    expect(parseLogLine("[07-03 20:12:23] [3642659740, *ContestConsole]: Level 01 <HS> - Go!", context).event)
+      .toMatchObject({ type: "go", level: 1, mode: "hs" });
+  });
+
   it("parses finishes, DNF, login, disconnect and cheat", () => {
     expect(parseLogLine("[06-29 11:21:00] 2 player(s) online:", context).event)
       .toMatchObject({ type: "player-list-start", count: 2 });

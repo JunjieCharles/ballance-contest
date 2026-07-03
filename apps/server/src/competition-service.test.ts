@@ -85,6 +85,34 @@ describe("CompetitionService dynamic participants", () => {
     expect(controller.snapshot().phase).toBe("running");
     service.close();
   });
+
+  it("does not let a player's countdown move the referee flow out of Ready", () => {
+    const service = new CompetitionService();
+    const record = service.create({ name: "Foreign countdown", mode: "work", idempotencyKey: "foreign-countdown" });
+    service.updateDraft(record.id, {
+      expectedStateVersion: 0,
+      idempotencyKey: "configure-foreign-countdown",
+      stages: [{
+        id: "sr-2", order: 1, label: "SR2", level: 2, mode: "SR", mapKind: "official",
+        timeLimitMs: 600_000, scoring: [5, 3, 1], minimumScoringPlace: 3
+      }]
+    });
+    service.publish(record.id, 1, "publish-foreign-countdown");
+    const manager = workRuntimeManager(service);
+    const runtime = manager.makeRuntime(record.id, service.snapshot(record.id).config, { write: async () => undefined });
+    manager.register(record.id, runtime);
+    runtime.controller.enable(0);
+    runtime.controller.tick();
+    expect(runtime.controller.snapshot().phase).toBe("ready");
+    expect(runtime.controller.snapshot().countdownValue).toBeUndefined();
+
+    manager.ingestLine(runtime, "[07-03 20:20:07] 2760557282: *ContestConsole    70ms");
+    manager.ingestLine(runtime, "[07-03 20:20:17] [3210244510, liangzhichao]: Level 02 - 2");
+
+    expect(runtime.controller.snapshot().phase).toBe("ready");
+    expect(runtime.controller.snapshot().countdownValue).toBeUndefined();
+    service.close();
+  });
   let dataRoot = "";
   let database: OpenedDatabase | undefined;
 
@@ -917,7 +945,7 @@ describe("CompetitionService dynamic participants", () => {
     const transport: CommandTransport = {
       write: async (command) => {
         writes.push(command);
-        setTimeout(() => runtimeHolder.current?.commands.observeLine("success"), 0);
+        setTimeout(() => runtimeHolder.current?.commands.observeLine("Action failed: you don't have the permission to run this action."), 0);
       }
     };
     const runtime = manager.makeRuntime(record.id, service.snapshot(record.id).publishedConfig as CompetitionConfig, transport);
@@ -973,8 +1001,22 @@ describe("CompetitionService dynamic participants", () => {
       idempotencyKey: "resend-real-command",
       action: { type: "resolve-command", commandId: originals[1]?.id as string, resolution: "resend", confirmationToken: resent.token, impactHash: resent.impactHash }
     });
-    expect(resendResult).toMatchObject({ status: "acknowledged", command: "version" });
+    expect(resendResult).toMatchObject({ status: "failed", command: "version" });
     expect(writes).toEqual(["version"]);
+    snapshot = service.snapshot(record.id);
+    const failedResend = snapshot.runtime.unconfirmedCommands.find((command) => command.command === "version" && command.id !== originals[1]?.id);
+    expect(failedResend).toMatchObject({ status: "failed" });
+    const dismissResend = service.createConfirmation(record.id, {
+      kind: "command-resolution",
+      target: failedResend!.id,
+      commandId: failedResend!.id,
+      resolution: "dismiss-failed"
+    });
+    await service.performAction(record.id, {
+      expectedStateVersion: snapshot.competition.stateVersion,
+      idempotencyKey: "dismiss-failed-resend",
+      action: { type: "resolve-command", commandId: failedResend!.id, resolution: "dismiss-failed", confirmationToken: dismissResend.token, impactHash: dismissResend.impactHash }
+    });
     snapshot = service.snapshot(record.id);
     expect(() => service.createConfirmation(record.id, {
       kind: "command-resolution",

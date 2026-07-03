@@ -40,13 +40,29 @@ const cleanNotificationText = (text: string): string => {
   return text.trim().replaceAll("\\", "\\\\").replaceAll("\n", "\\n");
 };
 
-const mapEchoMatches = (line: string, map: string, mapName?: string): boolean => {
+const escapePattern = (text: string): string => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+const refereeEchoConnectionId = (line: string): string | undefined =>
+  /\[(\d+),\s*\*ContestConsole\]:/.exec(line)?.[1];
+
+const isContestRefereeEcho = (line: string, expectedConnectionId?: string): boolean => {
+  const connectionId = refereeEchoConnectionId(line);
+  return connectionId !== undefined && (expectedConnectionId === undefined || connectionId === expectedConnectionId);
+};
+
+const mapEchoMatches = (line: string, map: string, mapName: string | undefined, mode: "sr" | "hs"): boolean => {
   const target = map.trim().toLowerCase();
   const official = /^level\s+(\d+)$/.exec(target);
   if (official) {
-    const levelEcho = /Level[\s_]+(\d+)\*?\s+-/i.exec(line);
-    if (levelEcho) return Number(levelEcho[1]) === Number(official[1]);
-    return /:\s*[0-9a-f]+\.\.\s+-/i.test(line);
+    const levelEcho = /Level[\s_]+(\d+)\*?(?:\s+<(SR|HS)>)?\s+-/i.exec(line);
+    if (levelEcho) {
+      const echoMode = levelEcho[2]?.toLowerCase();
+      return Number(levelEcho[1]) === Number(official[1]) && (mode === "hs" ? echoMode === "hs" : echoMode !== "hs");
+    }
+    const hashEcho = /:\s*[0-9a-f]+\.\.(?:\s+<(SR|HS)>)?\s+-/i.exec(line);
+    if (!hashEcho) return false;
+    const echoMode = hashEcho[1]?.toLowerCase();
+    return mode === "hs" ? echoMode === "hs" : echoMode !== "hs";
   }
   const custom = /^([0-9a-f]{32})\s+0$/.exec(target);
   const customEcho = /:\s*"([^"]+)"\s+-/i.exec(line)?.[1];
@@ -59,7 +75,10 @@ const PERMISSION_DENIED_TEXT = "Action failed: you don't have the permission to 
 
 export const isPermissionDeniedLine = (line: string): boolean => line.includes(PERMISSION_DENIED_TEXT);
 
-const encode = (action: CommandAction): { command: string; critical: boolean; acknowledgeAfterWriteMs?: number; acknowledge: (line: string) => boolean; onSettle?: () => string } => {
+const encode = (
+  action: CommandAction,
+  refereeConnectionId: () => string | undefined = () => undefined
+): { command: string; critical: boolean; acknowledgeAfterWriteMs?: number; acknowledge: (line: string) => boolean; onSettle?: () => string } => {
   switch (action.type) {
     case "list": return {
       command: "list",
@@ -90,12 +109,33 @@ const encode = (action: CommandAction): { command: string; critical: boolean; ac
       return {
         command: `${action.channel} ${text}`,
         critical: false,
-        acknowledge: (line) => line.includes(`> ${action.channel} ${text}`) || line.includes(`[${label}] *ContestConsole: ${text}`)
+        acknowledge: (line) => {
+          if (action.channel === "bulletin") return line.endsWith(`[${label}] *ContestConsole: ${text}`);
+          const match = new RegExp(`\\[${label}\\] \\(\\d+, \\*ContestConsole\\): (.*)$`).exec(line);
+          const expected = refereeConnectionId();
+          return match?.[1] === text && (expected === undefined || match[0].includes(`(${expected}, *ContestConsole)`));
+        }
       };
     }
-    case "ready": return { command: `countdown ${cleanText(action.map)} ${action.mode} 4`, critical: false, acknowledge: (line) => /Get ready$/.test(line) && mapEchoMatches(line, action.map, action.mapName) };
-    case "cheat-off": return { command: "cheat off", critical: false, acknowledge: (line) => /cheat.*off/i.test(line) };
-    case "go": return { command: `countdown ${cleanText(action.map)} ${action.mode}`, critical: true, acknowledge: (line) => / - Go!$/.test(line) && mapEchoMatches(line, action.map, action.mapName) };
+    case "ready": return {
+      command: `countdown ${cleanText(action.map)} ${action.mode} 4`,
+      critical: false,
+      acknowledge: (line) => isContestRefereeEcho(line, refereeConnectionId()) && /Get ready$/.test(line) && mapEchoMatches(line, action.map, action.mapName, action.mode)
+    };
+    case "cheat-off": return {
+      command: "cheat off",
+      critical: false,
+      acknowledge: (line) => {
+        const connectionId = /\(#?(\d+),\s*\*ContestConsole\) toggled cheat off globally!$/.exec(line)?.[1];
+        const expected = refereeConnectionId();
+        return connectionId !== undefined && (expected === undefined || connectionId === expected);
+      }
+    };
+    case "go": return {
+      command: `countdown ${cleanText(action.map)} ${action.mode}`,
+      critical: true,
+      acknowledge: (line) => isContestRefereeEcho(line, refereeConnectionId()) && / - Go!$/.test(line) && mapEchoMatches(line, action.map, action.mapName, action.mode)
+    };
     case "listmap": {
       const seen = new Set<string>();
       return {
@@ -111,11 +151,19 @@ const encode = (action: CommandAction): { command: string; critical: boolean; ac
       };
     }
     case "scores": return { command: `scores ${action.mode} ${cleanText(action.map)}`, critical: false, acknowledge: (line) => /place|score|ranking/i.test(line) };
-    case "kick": return { command: `kick ${cleanText(action.playerName)} ${cleanText(action.reason)}`, critical: true, acknowledge: (line) => /kick|disconnect|success/i.test(line) };
+    case "kick": {
+      const playerName = cleanText(action.playerName);
+      const disconnected = new RegExp(`${escapePattern(playerName)} \\(#[0-9]+\\) disconnected\\.$`);
+      return {
+        command: `kick ${playerName} ${cleanText(action.reason)}`,
+        critical: true,
+        acknowledge: (line) => disconnected.test(line) || playerName === "*ContestConsole" && /Disconnected from server\.$/.test(line)
+      };
+    }
     case "raw": {
       const command = cleanText(action.command);
       if (/^forcenextrestart$/i.test(command)) throw new Error("forcenextrestart is disabled because it makes the next Go apply to every map");
-      return { command, critical: true, acknowledge: (line) => /success|error|warning|ready|go|disconnect/i.test(line) };
+      return { command, critical: true, acknowledge: () => false };
     }
   }
 };
@@ -125,6 +173,7 @@ export class CommandQueue {
   private tail: Promise<void> = Promise.resolve();
   private pending: { encoded: ReturnType<typeof encode>; record: CommandRecord; resolve: (record: CommandRecord) => void } | undefined;
   private transport: CommandTransport;
+  private refereeConnectionId: string | undefined;
 
   public constructor(
     transport: CommandTransport,
@@ -132,12 +181,17 @@ export class CommandQueue {
     private readonly onChange?: (record: CommandRecord) => void
   ) { this.transport = transport; }
 
-  public replaceTransport(transport: CommandTransport): void { this.transport = transport; }
+  public replaceTransport(transport: CommandTransport): void {
+    this.transport = transport;
+    this.refereeConnectionId = undefined;
+  }
+
+  public setRefereeConnectionId(connectionId: string | undefined): void { this.refereeConnectionId = connectionId; }
 
   public enqueue(action: CommandAction, idempotencyKey: string): Promise<CommandRecord> {
     const old = this.records.get(idempotencyKey);
     if (old) return Promise.resolve(old);
-    const encoded = encode(action);
+    const encoded = encode(action, () => this.refereeConnectionId);
     const now = new Date().toISOString();
     const record: CommandRecord = { id: randomUUID(), idempotencyKey, action, command: encoded.command, status: "queued", createdAt: now, updatedAt: now };
     this.records.set(idempotencyKey, record);

@@ -59,6 +59,7 @@ export interface WorkRuntime {
   listTimer?: ReturnType<typeof setInterval>;
   automationTimer?: ReturnType<typeof setInterval>;
   automationDispatching?: boolean;
+  refereeConnectionId?: string;
   listReconciliation?: { expected?: number; seen: number; onlinePlayerIds: Set<string> };
   mapEchoPrefixes: Map<string, string>;
   customMapRegistration?: Promise<void>;
@@ -175,6 +176,7 @@ export class WorkRuntimeManager {
     const client = this.createManagedClient(config, executable, logPath);
     runtime.client = client;
     runtime.commands.replaceTransport(client);
+    delete runtime.refereeConnectionId;
     runtime.customMapsRegistered = false;
     delete runtime.customMapRegistration;
     this.bindManagedClient(runtime, client);
@@ -483,6 +485,8 @@ export class WorkRuntimeManager {
     this.host.appendRawLog(runtime.competitionId, "mock-client", line);
     const parsed = parseLogLine(line, { year: Number(config.date.slice(0, 4)), utcOffsetMinutes: utcOffsetMinutes(config.timezone) });
     if (parsed.event.type === "connected") {
+      delete runtime.refereeConnectionId;
+      runtime.commands.setRefereeConnectionId(undefined);
       runtime.controller.observeServerConnected();
       if (runtime.connectionRecoveryState) {
         this.clearConnectionRecoveryTimer(runtime);
@@ -501,6 +505,7 @@ export class WorkRuntimeManager {
     if (parsed.event.type === "server-disconnected") this.handleUnexpectedDisconnect(runtime, "MockClient 与比赛服务器断开连接");
     if (parsed.event.type === "permission-denied") runtime.controller.observePermissionDenied(parsed.event.message);
     if (parsed.event.type === "fatal-error") this.handleFatalError(runtime, parsed.event);
+    this.observeRefereeConnection(runtime, parsed.event);
     const before = runtime.controller.snapshot();
     const currentStage = config.stages.find((candidate) => candidate.id === before.currentStageId);
     this.bindOfficialMapEcho(runtime, config, parsed.event, before);
@@ -514,10 +519,12 @@ export class WorkRuntimeManager {
     }
     if (parsed.event.type === "player-list-start") this.beginListReconciliation(runtime, parsed.event.count);
     if (parsed.event.type === "player-list-summary") this.completeListReconciliation(runtime, parsed.event.clients, parsed.event.players, parsed.event.spectators);
-    if (parsed.event.type === "countdown" && eventStage?.id === currentStage?.id) runtime.controller.observeCountdown(parsed.event.value);
+    if (parsed.event.type === "countdown" && this.isLocalRefereeEvent(runtime, parsed.event) && eventStage?.id === currentStage?.id) {
+      runtime.controller.observeCountdown(parsed.event.value);
+    }
     if (parsed.event.type === "warning") this.handleWarning(runtime, config, parsed.event);
     if (parsed.event.type === "unknown" && typeof (parsed.event as { text?: string }).text === "string" && /toggled cheat off globally/i.test((parsed.event as { text?: string }).text ?? "")) runtime.controller.resetAllCheat();
-    const event = this.domainToScenarioEvent(runtime.competitionId, config, parsed.event, eventStage);
+    const event = this.domainToScenarioEvent(runtime, config, parsed.event, eventStage);
     if (event) {
       if ("playerId" in event) {
         runtime.controller.registerParticipant(event.playerId);
@@ -714,7 +721,7 @@ export class WorkRuntimeManager {
   private bindOfficialMapEcho(runtime: WorkRuntime, config: CompetitionConfig, event: DomainEvent, snapshot: AutomationSnapshot): void {
     if ((event.type !== "ready" && event.type !== "countdown" && event.type !== "go")
       || event.mapKind !== "official" || !event.mapHashPrefix
-      || normalizeRefereeName(event.refereeName) !== CONTEST_REFEREE_NAME) return;
+      || !this.isLocalRefereeEvent(runtime, event)) return;
     const actionKind = event.type === "ready" ? "ready" : "go";
     const matchingAction = [...snapshot.actions].reverse().find((action) => action.kind === actionKind && action.status === "pending");
     if (!matchingAction) return;
@@ -724,8 +731,9 @@ export class WorkRuntimeManager {
 
   private resolveEventStage(runtime: WorkRuntime, config: CompetitionConfig, event: DomainEvent, preferredStageId?: string): StageConfig | undefined {
     if (event.type !== "ready" && event.type !== "countdown" && event.type !== "go" && event.type !== "finish" && event.type !== "dnf") return undefined;
+    const modeMatches = (candidate: StageConfig): boolean => event.mode === undefined || candidate.mode.toLowerCase() === event.mode;
     if (event.mapKind === "official" && event.level !== undefined) {
-      const candidates = config.stages.filter((candidate) => stageMapKind(candidate) === "official" && candidate.level === event.level);
+      const candidates = config.stages.filter((candidate) => stageMapKind(candidate) === "official" && candidate.level === event.level && modeMatches(candidate));
       return candidates.find((candidate) => candidate.id === preferredStageId) ?? (candidates.length === 1 ? candidates[0] : undefined);
     }
     if (event.mapKind === "custom" && event.mapDisplayName) {
@@ -745,7 +753,8 @@ export class WorkRuntimeManager {
     return candidates.find((candidate) => candidate.id === preferredStageId) ?? (candidates.length === 1 ? candidates[0] : undefined);
   }
 
-  private domainToScenarioEvent(competitionId: string, config: CompetitionConfig, event: DomainEvent, stage?: StageConfig): ScenarioEvent | undefined {
+  private domainToScenarioEvent(runtime: WorkRuntime, config: CompetitionConfig, event: DomainEvent, stage?: StageConfig): ScenarioEvent | undefined {
+    const competitionId = runtime.competitionId;
     switch (event.type) {
       case "player-login":
       case "player-listed": {
@@ -757,7 +766,7 @@ export class WorkRuntimeManager {
         return participant ? { atMs: Date.parse(event.occurredAt), sourceId: event.sourceId, type: "disconnect", playerId: participant.id, connectionId: event.connectionId } : undefined;
       }
       case "go":
-        if (!stage || normalizeRefereeName(event.refereeName) !== CONTEST_REFEREE_NAME) return undefined;
+        if (!stage || !this.isLocalRefereeEvent(runtime, event)) return undefined;
         return { atMs: Date.parse(event.occurredAt), sourceId: event.sourceId, type: "go", stageId: stage.id, refereeConnectionId: "work-referee" };
       case "finish": {
         if (!stage) return undefined;
@@ -778,6 +787,31 @@ export class WorkRuntimeManager {
       }
       default: return undefined;
     }
+  }
+
+  private observeRefereeConnection(runtime: WorkRuntime, event: DomainEvent): void {
+    if (event.type === "player-listed") {
+      if (normalizeRefereeName(event.playerName) === CONTEST_REFEREE_NAME) {
+        runtime.refereeConnectionId = event.connectionId;
+        runtime.commands.setRefereeConnectionId(event.connectionId);
+      }
+      return;
+    }
+    if ((event.type === "ready" || event.type === "countdown" || event.type === "go" || event.type === "notification")
+      && event.connectionId && normalizeRefereeName(event.refereeName) === CONTEST_REFEREE_NAME
+      && runtime.refereeConnectionId === undefined) {
+      runtime.refereeConnectionId = event.connectionId;
+      runtime.commands.setRefereeConnectionId(event.connectionId);
+    }
+  }
+
+  private isLocalRefereeEvent(
+    runtime: WorkRuntime,
+    event: Extract<DomainEvent, { type: "ready" | "countdown" | "go" }>
+  ): boolean {
+    return normalizeRefereeName(event.refereeName) === CONTEST_REFEREE_NAME
+      && runtime.refereeConnectionId !== undefined
+      && event.connectionId === runtime.refereeConnectionId;
   }
 
   private recordListParticipant(runtime: WorkRuntime, rawName: string): void {

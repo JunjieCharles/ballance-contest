@@ -12,7 +12,7 @@ describe("CommandQueue", () => {
   it("serializes commands, waits for matching echoes and returns idempotent results", async () => {
     const transport = new FakeTransport();
     const queue = new CommandQueue(transport, 100);
-    transport.onWrite = (command) => setTimeout(() => queue.observeLine(command === "list" ? "2 player(s) online:" : "Level 01 - Go!"), 0);
+    transport.onWrite = (command) => setTimeout(() => queue.observeLine(command === "list" ? "2 player(s) online:" : "[7, *ContestConsole]: Level 01 - Go!"), 0);
     const first = queue.enqueue({ type: "list" }, "same");
     const second = queue.enqueue({ type: "go", map: "level 1", mode: "sr" }, "go");
     expect((await first).status).toBe("acknowledged");
@@ -90,6 +90,50 @@ describe("CommandQueue", () => {
     expect((await queue.enqueue({ type: "ready", map: "level 1", mode: "sr" }, "starred-ready")).status).toBe("acknowledged");
   });
 
+  it("accepts official HS echoes only from ContestConsole and with the HS marker", async () => {
+    const transport = new FakeTransport();
+    const queue = new CommandQueue(transport, 100);
+    transport.onWrite = (command) => {
+      const value = command.endsWith(" 4") ? "Get ready" : "Go!";
+      setTimeout(() => queue.observeLine(`[3210244510, Player]: Level 01 <HS> - ${value}`), 0);
+      setTimeout(() => queue.observeLine(`[3642659740, *ContestConsole]: Level 01 - ${value}`), 1);
+      setTimeout(() => queue.observeLine(`[3642659740, *ContestConsole]: Level 01 <HS> - ${value}`), 2);
+    };
+    expect((await queue.enqueue({ type: "ready", map: "level 1", mode: "hs" }, "hs-ready")).responseLine)
+      .toContain("*ContestConsole]: Level 01 <HS> - Get ready");
+    expect((await queue.enqueue({ type: "go", map: "level 1", mode: "hs" }, "hs-go")).responseLine)
+      .toContain("*ContestConsole]: Level 01 <HS> - Go!");
+  });
+
+  it("does not let another player's Ready or Go acknowledge referee commands", async () => {
+    const transport = new FakeTransport();
+    const queue = new CommandQueue(transport, 100);
+    queue.setRefereeConnectionId("2760557282");
+    transport.onWrite = (command) => {
+      const value = command.endsWith(" 4") ? "Get ready" : "Go!";
+      setTimeout(() => queue.observeLine(`[3210244510, liangzhichao]: Level 02 - ${value}`), 0);
+      setTimeout(() => queue.observeLine(`[9999999999, *ContestConsole]: Level 02 - ${value}`), 1);
+      setTimeout(() => queue.observeLine(`[2760557282, *ContestConsole]: Level 02 - ${value}`), 2);
+    };
+    expect((await queue.enqueue({ type: "ready", map: "level 2", mode: "sr" }, "referee-ready")).responseLine)
+      .toContain("*ContestConsole");
+    expect((await queue.enqueue({ type: "go", map: "level 2", mode: "sr" }, "referee-go")).responseLine)
+      .toContain("*ContestConsole");
+  });
+
+  it("confirms cheat off only from the global ContestConsole echo", async () => {
+    const transport = new FakeTransport();
+    const queue = new CommandQueue(transport, 100);
+    queue.setRefereeConnectionId("2760557282");
+    transport.onWrite = () => {
+      setTimeout(() => queue.observeLine("(1026234650, Aleph) turned cheat off."), 0);
+      setTimeout(() => queue.observeLine("(#9999999999, *ContestConsole) toggled cheat off globally!"), 1);
+      setTimeout(() => queue.observeLine("(#2760557282, *ContestConsole) toggled cheat off globally!"), 2);
+    };
+    expect((await queue.enqueue({ type: "cheat-off" }, "global-cheat-off")).responseLine)
+      .toBe("(#2760557282, *ContestConsole) toggled cheat off globally!");
+  });
+
   it("waits for authoritative Go instead of acknowledging at 3/2/1", async () => {
     const transport = new FakeTransport();
     const queue = new CommandQueue(transport, 100);
@@ -161,7 +205,17 @@ describe("CommandQueue", () => {
   it("encodes bulletin, notice and announce as distinct MockClient commands", async () => {
     const transport = new FakeTransport();
     const queue = new CommandQueue(transport, 100);
-    transport.onWrite = (command) => setTimeout(() => queue.observeLine(`[07-02 20:00:00] > ${command}`), 0);
+    queue.setRefereeConnectionId("7");
+    transport.onWrite = (command) => {
+      const [channel, ...content] = command.split(" ");
+      const text = content.join(" ");
+      const label = channel === "announce" ? "Announcement" : channel === "notice" ? "Notice" : "Bulletin";
+      setTimeout(() => queue.observeLine(`[07-02 20:00:00] > ${command}`), 0);
+      if (channel !== "bulletin") setTimeout(() => queue.observeLine(`[07-02 20:00:00] [${label}] (999, *ContestConsole): ${text}`), 1);
+      setTimeout(() => queue.observeLine(channel === "bulletin"
+        ? `[07-02 20:00:00] [${label}] *ContestConsole: ${text}`
+        : `[07-02 20:00:00] [${label}] (7, *ContestConsole): ${text}`), 2);
+    };
     await queue.enqueue({ type: "notification", channel: "bulletin", text: "SR1 20:10" }, "bulletin");
     await queue.enqueue({ type: "notification", channel: "notice", text: "wait Player" }, "notice");
     await queue.enqueue({ type: "notification", channel: "announce", text: "READY!" }, "announce");
@@ -171,13 +225,29 @@ describe("CommandQueue", () => {
   it("keeps a business newline but protocol-escapes it into one MockClient command", async () => {
     const transport = new FakeTransport();
     const queue = new CommandQueue(transport, 100);
-    transport.onWrite = () => setTimeout(() => queue.observeLine("[Notice] *ContestConsole: SR1 即将发令。\\n本关起跑保护已被使用，后续不再延时。"), 0);
+    queue.setRefereeConnectionId("7");
+    transport.onWrite = () => setTimeout(() => queue.observeLine("[Notice] (7, *ContestConsole): SR1 即将发令。\\n本关起跑保护已被使用，后续不再延时。"), 0);
     await queue.enqueue({
       type: "notification",
       channel: "notice",
       text: "SR1 即将发令。\n本关起跑保护已被使用，后续不再延时。"
     }, "protected-notice");
     expect(transport.writes).toEqual(["notice SR1 即将发令。\\n本关起跑保护已被使用，后续不再延时。"]);
+  });
+
+  it("does not acknowledge kick or raw commands from local echo and unrelated output", async () => {
+    const transport = new FakeTransport();
+    const queue = new CommandQueue(transport, 20);
+    transport.onWrite = (command) => {
+      setTimeout(() => queue.observeLine(`> ${command}`), 0);
+      setTimeout(() => queue.observeLine("unrelated success and disconnect"), 1);
+      if (command.startsWith("kick ")) setTimeout(() => queue.observeLine("Target Player (#42) disconnected."), 2);
+    };
+    expect((await queue.enqueue({ type: "kick", playerName: "Target Player", reason: "probe" }, "kick-target"))).toMatchObject({
+      status: "acknowledged",
+      responseLine: "Target Player (#42) disconnected."
+    });
+    expect((await queue.enqueue({ type: "raw", command: "some-mutating-command" }, "raw-unverifiable")).status).toBe("uncertain");
   });
 
   it("rejects control characters before writing", async () => {

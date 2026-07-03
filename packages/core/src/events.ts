@@ -7,6 +7,7 @@ export interface EventMetadata {
 export interface EventMapReference {
   mapKind: "official" | "custom";
   level?: number;
+  mode?: "sr" | "hs";
   mapHashPrefix?: string;
   mapDisplayName?: string;
   forceNextRestart?: boolean;

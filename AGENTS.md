@@ -69,7 +69,8 @@
 - 工作与测试数据必须在界面、导出路径和归档中保持可辨识和隔离。
 - 协议级安全约束必须在最末端适配器强制执行，不能依赖可编辑默认值；MockClient 登录名固定为 `*ContestConsole`，配置、旧数据或探针参数都不得覆盖。
 - 命令队列必须在写入 stdin 前建立回显观察，防止同步或极快回显落入观察空窗。恢复 `sent` 命令前应先核对已持久化的权威回显和尝试；已有充分执行证据的 Go 应恢复为 `acknowledged`，不能误报 `uncertain`。
-- 官图 Ready/Go 回显要覆盖实服 `Level 01* - Get ready` 一类星号形态；Go 命令只能由权威 `Go!` 回显确认，`3/2/1` 只更新倒数显示，不得确认命令、创建尝试或触发“已起跑”Bulletin。权威 Go、迟到倒数或重复 Go 证据不得重复创建尝试或发送起跑 Bulletin。
+- 所有写命令都不得把 MockClient 的 `> command` stdin 本地回显或无关的 `success`、`disconnect`、玩家事件当成服务器成功证据。协议回显含裁判身份时必须核对固定 `*ContestConsole` 及当前连接 ID；Bulletin 等协议不携带连接 ID 时至少精确核对固定身份、动作类型和完整内容；Kick 只认目标玩家的精确断开结果；无法定义安全成功回显的高级原始命令保持 `uncertain`，由裁判逐条处置。只读查询和 `setmap` 等无成功身份回显的协议按各自的非阻断或权限观察策略处理，不得伪造身份确认。
+- 官图 Ready/Go 回显要覆盖实服 `Level 01* - Get ready` 星号形态及 HS 的 `Level 01 <HS> - Get ready/3/2/1/Go!` 模式标记；命令队列和状态入口都必须核对固定身份及本机 MockClient 当前连接 ID，普通玩家发出的同地图 Ready、倒数或 Go 只保留原始日志。Go 命令只能由权威 `Go!` 回显确认，`3/2/1` 只更新倒数显示，不得确认命令、创建尝试或触发“已起跑”Bulletin；`cheat off` 只认本机 `toggled cheat off globally!` 回显，不能由任意玩家的 `turned cheat off` 误确认。权威 Go、迟到倒数或重复 Go 证据不得重复创建尝试或发送起跑 Bulletin。
 - 发布配置后的工作 MockClient 首次连接成功时，按发布顺序一次性发送全部自制图名称映射 `setmap <完整MD5> 0 <地图名>`；同一 MockClient 运行中不得因 Ready、重赛或手动发令重复发送。
 - 命令反馈精确文本 `Action failed: you don't have the permission to run this action.` 时，必须立即标记失败、阻断自动化并明确报告 `ContestConsole` 权限不足。
 - 自动及人工改动第一条 Ready 计划时，普通 Bulletin 固定为 `关卡名 将在 HH:mm 发令`，`HH:mm` 按 UTC+8 计算但不显示日期或时区；下一 Ready 与 Bulletin 使用同一个第一条 Get ready 计划源。起跑保护更正 Bulletin 还要注明玩家，并与保护用后的 T-60 Notice 一样在业务消息中保存真实换行和完整后缀 `本关起跑保护已被使用，后续不再延时。`，不得在状态/界面中写成 `\\n` 字符；MockClient stdin 适配器须按上游通知协议把真实换行编码为单个 `\n` 转义，确保仍只写一条命令。第一条 Ready 前一分钟的 Notice 必须使用已约定的完整句子，不得改成“下一轮”或其他相对描述。
