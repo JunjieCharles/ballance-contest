@@ -90,8 +90,7 @@ const builtinBehaviorScenarios = (): ScenarioDefinition[] => [
     ...Array.from({ length: 3 }, () => "struggler" as const),
     ...Array.from({ length: 3 }, () => "disruptor" as const)
   ], [
-    { id: "small-reconnect", fault: "participant-disconnect", trigger: "running", stageOrder: 1, offsetMs: 35_000, playerId: "independent-player-sandbox-p2", recoverAfterMs: 8_000 },
-    { id: "small-warning", fault: "warning", trigger: "running", stageOrder: 1, offsetMs: 50_000, playerId: "independent-player-sandbox-p19", message: "just pressed the Reset hotkey" }
+    { id: "small-reconnect", fault: "participant-disconnect", trigger: "running", stageOrder: 1, offsetMs: 35_000, playerId: "independent-player-sandbox-p2", recoverAfterMs: 8_000 }
   ]),
   builtinBehaviorScenario("large-player-sandbox", "30 人大型综合沙盒", 20_260_701, [
     ...Array.from({ length: 12 }, () => "normal" as const),
@@ -99,8 +98,7 @@ const builtinBehaviorScenarios = (): ScenarioDefinition[] => [
     ...Array.from({ length: 6 }, () => "struggler" as const),
     ...Array.from({ length: 4 }, () => "disruptor" as const)
   ], [
-    { id: "large-reconnect", fault: "participant-disconnect", trigger: "running", stageOrder: 1, offsetMs: 30_000, playerId: "large-player-sandbox-p3", recoverAfterMs: 10_000 },
-    { id: "large-warning", fault: "warning", trigger: "running", stageOrder: 2, offsetMs: 45_000, playerId: "large-player-sandbox-p27", message: "just restarted while uncontrollable" }
+    { id: "large-reconnect", fault: "participant-disconnect", trigger: "running", stageOrder: 1, offsetMs: 30_000, playerId: "large-player-sandbox-p3", recoverAfterMs: 10_000 }
   ]),
   builtinBehaviorScenario("normal-player-roster", "普通玩家场景", 10_001, Array.from({ length: 15 }, () => "normal")),
   builtinBehaviorScenario("expert-player-roster", "高手竞速场景", 20_003, [

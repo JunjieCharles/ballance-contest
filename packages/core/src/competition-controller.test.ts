@@ -473,6 +473,26 @@ describe("CompetitionController", () => {
     expect(snapshot.incidents.filter((incident) => incident.type === "protected-crash")).toHaveLength(1);
   });
 
+  it("does not consume start protection when a terminal player disconnects or crashes", () => {
+    const clock = new FakeClock();
+    const controller = new CompetitionController(configuration(), clock);
+    connectAll(controller);
+    enterRunning(controller, clock);
+    controller.recordResult({ stageId: "s1", playerId: "p1", status: "dnf", sourceId: "dnf-before-disconnect" });
+    controller.observeViolation("p2", "exclude-before-disconnect", "warning");
+
+    clock.advance(5_000);
+    controller.observeConnection("p1", false);
+    controller.observeCrash("p2", "fatal error after exclusion");
+    controller.observeConnection("p2", false);
+
+    expect(controller.snapshot()).toMatchObject({
+      phase: "running",
+      startProtectionUsedStageIds: [],
+      incidents: []
+    });
+  });
+
   it("does not create an attempt when the Go command is uncertain", () => {
     const clock = new FakeClock();
     const controller = new CompetitionController(configuration(), clock);

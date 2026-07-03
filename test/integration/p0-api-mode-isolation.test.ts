@@ -158,12 +158,12 @@ describe("P0 API mode isolation and test run regression", () => {
       id: "independent-player-sandbox",
       randomSeed: 20_260_631,
       players: 20,
-      faults: 2,
+      faults: 1,
       playerProfiles: expect.arrayContaining(["expert", "normal", "struggler", "disruptor"])
     }), expect.objectContaining({
       id: "large-player-sandbox",
       players: 30,
-      faults: 2
+      faults: 1
     }), expect.objectContaining({
       id: "protected-crash-fault",
       players: 15,

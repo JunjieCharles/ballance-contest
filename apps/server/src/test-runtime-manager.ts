@@ -527,8 +527,19 @@ export class TestRuntimeManager {
       if (plan.kind === "timeout" || plan.dueAtMs > runtime.automationClock.now()) continue;
       const sourceId = `agent:${runtime.id}:${attempt.id}:${player.id}`;
       if (plan.kind === "disrupt") {
-        this.applyTestEvent(runtime, { atMs: plan.dueAtMs, sourceId: `${sourceId}:cheat`, type: "cheat", playerId: player.id, enabled: true }, false, true, false);
-        this.applyTestEvent(runtime, { atMs: plan.dueAtMs, sourceId: `${sourceId}:cheat-off`, type: "cheat", playerId: player.id, enabled: false }, false, true, false);
+        const warning = seededBehaviorRandom(runtime.definition.randomSeed ?? 1, stageId, attempt.attemptNumber, player.id, "disrupt-kind") < 0.5;
+        if (warning) {
+          this.applyTestEvent(runtime, {
+            atMs: plan.dueAtMs,
+            sourceId: `${sourceId}:warning`,
+            type: "warning",
+            playerId: player.id,
+            message: "just pressed the Reset hotkey"
+          }, false, true, false);
+        } else {
+          this.applyTestEvent(runtime, { atMs: plan.dueAtMs, sourceId: `${sourceId}:cheat`, type: "cheat", playerId: player.id, enabled: true }, false, true, false);
+          this.applyTestEvent(runtime, { atMs: plan.dueAtMs, sourceId: `${sourceId}:cheat-off`, type: "cheat", playerId: player.id, enabled: false }, false, true, false);
+        }
         this.applyTestEvent(runtime, {
           atMs: plan.dueAtMs,
           sourceId,
@@ -833,6 +844,16 @@ export class TestRuntimeManager {
           const sourceId = `${event.sourceId}:excluded`;
           runtime.automation.observeViolation(event.playerId, sourceId, event.message);
           runtime.engine.apply({ atMs: runtime.automationClock.now(), sourceId, type: "exclude", stageId, playerId: event.playerId, reason: event.message });
+          this.host.appendAttention(runtime.competitionId, {
+            id: `excluded:${sourceId}`,
+            category: "result",
+            severity: "warning",
+            title: "违规成绩已排除",
+            message: `${event.playerId} 触发 Warning；后续完赛日志仍保留，但不参与计分。`,
+            occurredAt: this.testOccurredAt(runtime, runtime.automationClock.now()),
+            stageId,
+            participantIds: [event.playerId]
+          });
         }
         break;
       }

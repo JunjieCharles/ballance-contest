@@ -400,7 +400,7 @@ export class CompetitionController {
     if (online) this.stableSince.set(participantId, this.clock.now());
     else this.stableSince.delete(participantId);
 
-    if (!online && this.isStartProtectionSensitive()) {
+    if (!online && this.isStartProtectionSensitive() && !this.hasProtectionIneligibleResult(participantId)) {
       if (!this.startProtectionUsedStageIds.has(this.stage.id)) {
         this.triggerStartProtection(participantId, `起跑敏感期掉线：${participantId}`);
       }
@@ -452,7 +452,7 @@ export class CompetitionController {
 
   public observeCrash(participantId: string, evidence: string): void {
     this.assertParticipant(participantId);
-    if (!this.isStartProtectionSensitive()) return;
+    if (!this.isStartProtectionSensitive() || this.hasProtectionIneligibleResult(participantId)) return;
     if (!this.startProtectionUsedStageIds.has(this.stage.id)) this.triggerStartProtection(participantId, evidence);
     this.bump();
   }
@@ -970,6 +970,11 @@ export class CompetitionController {
   private isStartProtectionSensitive(): boolean {
     if (this.startProtectionSensitiveStageId !== this.stage.id) return false;
     return this.startProtectionUntilMs === undefined || this.clock.now() <= this.startProtectionUntilMs;
+  }
+
+  private hasProtectionIneligibleResult(participantId: string): boolean {
+    return this.currentAttempt?.results.some((result) =>
+      result.playerId === participantId && (result.status === "dnf" || result.status === "excluded")) ?? false;
   }
 
   private triggerStartProtection(participantId: string, evidence: string): void {

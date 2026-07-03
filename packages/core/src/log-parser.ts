@@ -41,7 +41,8 @@ export const parseLogLine = (input: string, context: ParseContext): ParsedLogLin
 
   if (body === "Connected to server OK") {
     event = { ...metadata, type: "connected" };
-  } else if (body === "Disconnected from server.") {
+  } else if (body === "Disconnected from server."
+    || /^The host hath bidden us farewell\.\s+\(5003: Connection dropped\)$/.test(body)) {
     event = { ...metadata, type: "server-disconnected" };
   } else if (body === "Action failed: you don't have the permission to run this action.") {
     event = { ...metadata, type: "permission-denied", message: body };

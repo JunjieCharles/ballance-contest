@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { CompetitionConfig, ScenarioDefinition, ScenarioEvent } from "@ballance/contracts";
 import { CompetitionController } from "@ballance/core";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { CommandTransport } from "./mock-client.js";
 import { CompetitionService, seededBehaviorRandom } from "./competition-service.js";
 import { openDatabase, type OpenedDatabase } from "./storage/database.js";
@@ -144,6 +144,55 @@ describe("CompetitionService dynamic participants", () => {
       expect.objectContaining({ id: "Silent_Snow", online: false }),
       expect.objectContaining({ id: "Modern_Player", connectionIds: ["314"], online: true })
     ]));
+  });
+
+  it("automatically restarts once for the 5003 connection-drop line and resolves on reconnect", async () => {
+    dataRoot = mkdtempSync(join(tmpdir(), "ballance-auto-reconnect-"));
+    database = openDatabase(join(dataRoot, "console.sqlite"));
+    const service = new CompetitionService(undefined, { database, dataRoot });
+    const record = service.create({ name: "Automatic reconnect", mode: "work", idempotencyKey: "create-auto-reconnect" });
+    service.publish(record.id, 0, "publish-auto-reconnect");
+    const manager = workRuntimeManager(service);
+    const runtime = manager.makeRuntime(record.id, service.snapshot(record.id).publishedConfig as CompetitionConfig, { write: async () => undefined });
+    runtime.customMapsRegistered = true;
+    manager.register(record.id, runtime);
+    const replaceClient = vi.fn(async () => {
+      manager.ingestLine(runtime, "[07-03 09:53:52] Connected to server OK");
+    });
+    (manager as unknown as { replaceClient(runtime: WorkRuntime): Promise<void> }).replaceClient = replaceClient;
+
+    manager.ingestLine(runtime, "[07-03 09:53:51] The host hath bidden us farewell.  (5003: Connection dropped)");
+    await vi.waitFor(() => expect(replaceClient).toHaveBeenCalledTimes(1));
+
+    expect(runtime.connectionRecoveryState).toBeUndefined();
+    expect(runtime.controller.snapshot()).toMatchObject({ phase: "paused", automationEnabled: false, blockers: [] });
+    expect(service.snapshot(record.id).runtime.attentionItems).toEqual(expect.arrayContaining([
+      expect.objectContaining({ title: "连接中断，正在自动恢复" }),
+      expect.objectContaining({ title: "比赛服务器连接已恢复" })
+    ]));
+    service.close();
+  });
+
+  it("opens manual reconnect only after the single automatic restart fails", async () => {
+    dataRoot = mkdtempSync(join(tmpdir(), "ballance-auto-reconnect-failed-"));
+    database = openDatabase(join(dataRoot, "console.sqlite"));
+    const service = new CompetitionService(undefined, { database, dataRoot });
+    const record = service.create({ name: "Failed reconnect", mode: "work", idempotencyKey: "create-failed-reconnect" });
+    service.publish(record.id, 0, "publish-failed-reconnect");
+    const manager = workRuntimeManager(service);
+    const runtime = manager.makeRuntime(record.id, service.snapshot(record.id).publishedConfig as CompetitionConfig, { write: async () => undefined });
+    manager.register(record.id, runtime);
+    const replaceClient = vi.fn(async () => { throw new Error("restart failed"); });
+    (manager as unknown as { replaceClient(runtime: WorkRuntime): Promise<void> }).replaceClient = replaceClient;
+
+    manager.ingestLine(runtime, "[07-03 09:53:51] The host hath bidden us farewell.  (5003: Connection dropped)");
+    expect(service.snapshot(record.id).runtime.availableActions.find((action) => action.action === "restart-work")).toMatchObject({ enabled: false, disabledReason: "正在自动尝试恢复连接" });
+    await vi.waitFor(() => expect(runtime.connectionRecoveryState).toBe("failed"));
+
+    expect(replaceClient).toHaveBeenCalledTimes(1);
+    expect(service.snapshot(record.id).runtime.availableActions.find((action) => action.action === "restart-work")).toMatchObject({ enabled: true });
+    expect(runtime.controller.snapshot().blockers).toContainEqual(expect.objectContaining({ code: "INCIDENT_OPEN" }));
+    service.close();
   });
 
   it("uses a live fatal-error line once and mirrors the voided protected attempt into scoring", () => {
@@ -333,6 +382,28 @@ describe("CompetitionService dynamic participants", () => {
       reason: "cheat-enabled"
     });
     expect(snapshot.runtime.attentionItems.filter((item) => item.title === "违规成绩已排除")).toHaveLength(1);
+  });
+
+  it("records a player who enters with cheat enabled directly in the live scoreboard", () => {
+    dataRoot = mkdtempSync(join(tmpdir(), "ballance-cheat-login-scoreboard-"));
+    database = openDatabase(join(dataRoot, "console.sqlite"));
+    const service = new CompetitionService(undefined, { database, dataRoot });
+    const record = service.create({ name: "Cheat login scoreboard", mode: "work", idempotencyKey: "create-cheat-login-scoreboard" });
+    service.publish(record.id, 0, "publish-cheat-login-scoreboard");
+    const manager = workRuntimeManager(service);
+    const runtime = manager.makeRuntime(record.id, service.snapshot(record.id).publishedConfig as CompetitionConfig, { write: async () => undefined });
+    manager.register(record.id, runtime);
+
+    manager.ingestLine(runtime, "[07-02 20:00:00] [7, *ContestConsole]: Level 01 - Go!");
+    manager.ingestLine(runtime, "[07-02 20:00:01] LoginCheater (#41) logged in with cheat mode on.");
+
+    expect(service.snapshot(record.id).currentScoreboard.find((entry) => entry.playerId === "LoginCheater")?.stages["sr-1"]).toMatchObject({
+      status: "excluded",
+      points: 0,
+      reason: "cheat-enabled"
+    });
+    expect(service.snapshot(record.id).runtime.attentionItems.filter((item) => item.title === "违规成绩已排除")).toHaveLength(1);
+    service.close();
   });
 
   it("keeps raw test finish logs sequential when earlier finisher is excluded", () => {
@@ -573,6 +644,23 @@ describe("CompetitionService dynamic participants", () => {
     expect(timedOut.length).toBeGreaterThan(0);
     expect(rawDnfLines).toHaveLength(explicitDnf.length);
     expect(service.snapshot(record.id).runtime.attentionItems).toContainEqual(expect.objectContaining({ title: "关卡时限已到" }));
+  });
+
+  it("models player Warning as deterministic behavior instead of a scenario fault", () => {
+    const service = new CompetitionService();
+    const record = service.create({ name: "Warning behavior", mode: "test", idempotencyKey: "warning-behavior" });
+    service.publish(record.id, 0, "publish-warning-behavior");
+    expect(service.listTestScenarios().find((scenario) => scenario.id === "disruptor-player-roster")?.faults).toBe(0);
+    const runId = service.createTestRunFromScenario(record.id, "disruptor-player-roster").runId;
+    service.startTestAutomation(record.id, runId);
+    service.advanceTestAutomation(record.id, runId, 360_000);
+
+    const snapshot = service.snapshot(record.id);
+    expect(service.getRawClientLogs(record.id, 1_000).some((line) => line.rawLine.includes("[Warning]"))).toBe(true);
+    expect(snapshot.currentScoreboard.some((entry) => entry.stages["sr-1"] && (entry.stages["sr-1"] as { status?: string }).status === "excluded")).toBe(true);
+    expect(snapshot.runtime.incidents).toEqual([]);
+    expect(snapshot.runtime.attentionItems).toContainEqual(expect.objectContaining({ title: "违规成绩已排除" }));
+    service.close();
   });
 
   it("keeps accepting post-threshold finishes before the next Ready starts", () => {

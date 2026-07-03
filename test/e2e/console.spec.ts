@@ -384,7 +384,7 @@ test("shows disabled reasons, shared scheduling controls and automatic review co
   await expect(page.locator(".competition-list button.selected")).toContainText("published");
   await page.getByRole("button", { name: "测试", exact: true }).click();
   await page.getByRole("button", { name: /30 人大型综合沙盒/ }).click();
-  await expect(page.getByText("30 人 · 2 个场景故障")).toBeVisible();
+  await expect(page.getByText("30 人 · 1 个场景故障")).toBeVisible();
   await page.getByRole("button", { name: "创建测试运行" }).click();
   await expect(page.getByText(/虚拟时钟：0:00/)).toBeVisible();
   await page.getByRole("button", { name: "控制台", exact: true }).click();

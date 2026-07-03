@@ -15,6 +15,8 @@ describe("parseLogLine", () => {
       .toMatchObject({ type: "ready", level: 1, refereeName: "*ContestConsole", forceNextRestart: true });
     expect(parseLogLine("[07-02 20:32:50] Disconnected from server.", context).event)
       .toMatchObject({ type: "server-disconnected" });
+    expect(parseLogLine("[07-03 09:53:51] The host hath bidden us farewell.  (5003: Connection dropped)", context).event)
+      .toMatchObject({ type: "server-disconnected" });
   });
 
   it("parses finishes, DNF, login, disconnect and cheat", () => {

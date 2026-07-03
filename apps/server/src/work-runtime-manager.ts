@@ -63,6 +63,8 @@ export interface WorkRuntime {
   mapEchoPrefixes: Map<string, string>;
   customMapRegistration?: Promise<void>;
   customMapsRegistered?: boolean;
+  connectionRecoveryState?: "automatic" | "manual" | "failed";
+  connectionRecoveryTimer?: ReturnType<typeof setTimeout>;
 }
 
 export interface WorkRuntimeHost {
@@ -93,6 +95,7 @@ export interface WorkRuntimeHost {
 }
 
 const serverWindowsRoot = (): string => resolve(process.cwd(), "server-windows");
+const CONNECTION_RECOVERY_TIMEOUT_MS = 15_000;
 
 export class WorkRuntimeManager {
   private readonly runtimes = new Map<string, WorkRuntime>();
@@ -145,6 +148,22 @@ export class WorkRuntimeManager {
   public async restartClient(competitionId: string): Promise<RuntimeSnapshot> {
     const runtime = this.runtimes.get(competitionId);
     if (!runtime) throw new ServiceError("NOT_FOUND", "工作运行时尚未启动", 404);
+    this.clearConnectionRecoveryTimer(runtime);
+    runtime.connectionRecoveryState = "manual";
+    try {
+      await this.replaceClient(runtime);
+      this.scheduleConnectionRecoveryTimeout(runtime, "manual");
+    } catch (error) {
+      this.markConnectionRecoveryFailed(runtime, error instanceof Error ? error.message : "MockClient 启动失败", "manual");
+      throw error;
+    }
+    this.saveSnapshot(runtime);
+    this.host.journal.append({ type: "work.mock-client-restarted", competitionId, data: { server: runtime.server, source: "manual" } });
+    return this.view(runtime);
+  }
+
+  private async replaceClient(runtime: WorkRuntime): Promise<void> {
+    const competitionId = runtime.competitionId;
     if (runtime.client?.isRunning) {
       await runtime.client.stop().catch(() => undefined);
       if (runtime.client.isRunning) throw new ServiceError("STATE_CONFLICT", "旧 MockClient 尚未退出，不能启动第二个实例", 409);
@@ -164,9 +183,6 @@ export class WorkRuntimeManager {
     if (runtime.listTimer) clearInterval(runtime.listTimer);
     this.startParticipantReconciliation(runtime);
     this.startRealtime(runtime);
-    this.saveSnapshot(runtime);
-    this.host.journal.append({ type: "work.mock-client-restarted", competitionId, data: { server: config.server } });
-    return this.view(runtime);
   }
 
   public view(runtime: WorkRuntime): RuntimeSnapshot {
@@ -252,10 +268,70 @@ export class WorkRuntimeManager {
     });
     client.onExit((info) => {
       if (info.expected || this.runtimes.get(runtime.competitionId) !== runtime || runtime.client !== client) return;
-      runtime.controller.observeServerDisconnect(`MockClient 进程意外退出（code=${info.code ?? "null"}, signal=${info.signal ?? "none"}）`);
-      this.saveSnapshot(runtime);
+      const evidence = `MockClient 进程意外退出（code=${info.code ?? "null"}, signal=${info.signal ?? "none"}）`;
+      if (runtime.connectionRecoveryState === "automatic" || runtime.connectionRecoveryState === "manual") {
+        this.markConnectionRecoveryFailed(runtime, evidence, runtime.connectionRecoveryState);
+      } else if (runtime.connectionRecoveryState !== "failed") {
+        this.handleUnexpectedDisconnect(runtime, evidence);
+      }
       this.host.journal.append({ type: "work.mock-client-exited", competitionId: runtime.competitionId, data: info });
     });
+  }
+
+  private handleUnexpectedDisconnect(runtime: WorkRuntime, evidence: string): void {
+    runtime.controller.observeServerDisconnect(evidence);
+    if (runtime.connectionRecoveryState) {
+      this.saveSnapshot(runtime);
+      return;
+    }
+    runtime.connectionRecoveryState = "automatic";
+    this.host.appendAttention(runtime.competitionId, {
+      id: `connection-auto-restart:${Date.now()}`,
+      category: "incident",
+      severity: "warning",
+      title: "连接中断，正在自动恢复",
+      message: "已冻结后续发令并自动重启一次比赛连接；若 15 秒内仍未连接，将开放人工重新连接。",
+      occurredAt: new Date().toISOString()
+    });
+    this.saveSnapshot(runtime);
+    void this.replaceClient(runtime).then(() => {
+      if (runtime.connectionRecoveryState === "automatic") this.scheduleConnectionRecoveryTimeout(runtime, "automatic");
+      this.host.journal.append({ type: "work.mock-client-restarted", competitionId: runtime.competitionId, data: { server: runtime.server, source: "automatic" } });
+    }).catch((error: unknown) => {
+      this.markConnectionRecoveryFailed(runtime, error instanceof Error ? error.message : "MockClient 自动重启失败", "automatic");
+    });
+  }
+
+  private scheduleConnectionRecoveryTimeout(runtime: WorkRuntime, source: "automatic" | "manual"): void {
+    this.clearConnectionRecoveryTimer(runtime);
+    runtime.connectionRecoveryTimer = setTimeout(() => {
+      if (runtime.connectionRecoveryState !== source) return;
+      this.markConnectionRecoveryFailed(runtime, "15 秒内未观察到 Connected to server OK", source);
+    }, CONNECTION_RECOVERY_TIMEOUT_MS);
+    runtime.connectionRecoveryTimer.unref?.();
+  }
+
+  private markConnectionRecoveryFailed(runtime: WorkRuntime, detail: string, source: "automatic" | "manual"): void {
+    if (runtime.connectionRecoveryState === "failed") return;
+    this.clearConnectionRecoveryTimer(runtime);
+    runtime.connectionRecoveryState = "failed";
+    runtime.controller.observeServerDisconnect(detail);
+    this.host.appendAttention(runtime.competitionId, {
+      id: `connection-recovery-failed:${Date.now()}`,
+      category: "incident",
+      severity: "critical",
+      title: source === "automatic" ? "自动恢复连接失败" : "重新连接失败",
+      message: `${detail}；请使用“重新连接比赛服务器”再次尝试。`,
+      occurredAt: new Date().toISOString(),
+      action: "restart-work"
+    });
+    this.saveSnapshot(runtime);
+  }
+
+  private clearConnectionRecoveryTimer(runtime: WorkRuntime): void {
+    if (!runtime.connectionRecoveryTimer) return;
+    clearTimeout(runtime.connectionRecoveryTimer);
+    delete runtime.connectionRecoveryTimer;
   }
 
   public startRealtime(runtime: WorkRuntime): void {
@@ -337,12 +413,14 @@ export class WorkRuntimeManager {
       for (const result of attempt.results) {
         if (engineSources.has(result.sourceId)
           || result.status === "excluded" && engineSources.has(`${result.sourceId}:excluded`)) continue;
+        const versionCount = runtime.engine.snapshot().scoreboardVersions.length;
         if (result.status === "dnf" && result.sourceId.match(/^(deadline|manual-end):/)) {
           runtime.engine.apply({ atMs: engineAttempt.deadlineAtMs, sourceId: result.sourceId, type: "dnf", stageId: attempt.stageId, playerId: result.playerId, reason: result.reason ?? "time-limit" });
         } else if (result.status === "excluded") {
           runtime.engine.apply({ atMs: engineAttempt.goAtMs, sourceId: result.sourceId, type: "exclude", stageId: attempt.stageId, playerId: result.playerId, reason: result.reason ?? "excluded" });
-          this.host.recordExclusionAttention(runtime.competitionId, attempt.stageId, result.playerId, result.sourceId, result.reason ?? "违规");
         } else continue;
+        if (runtime.engine.snapshot().scoreboardVersions.length === versionCount) continue;
+        if (result.status === "excluded") this.host.recordExclusionAttention(runtime.competitionId, attempt.stageId, result.playerId, result.sourceId, result.reason ?? "违规");
         engineSources.add(result.sourceId);
         changed = true;
         if (result.status === "dnf") {
@@ -382,6 +460,7 @@ export class WorkRuntimeManager {
     this.stopRealtime(runtime);
     if (runtime.initialListTimer) clearTimeout(runtime.initialListTimer);
     if (runtime.listTimer) clearInterval(runtime.listTimer);
+    this.clearConnectionRecoveryTimer(runtime);
     await runtime.client?.stop().catch(() => undefined);
     this.runtimes.delete(competitionId);
   }
@@ -391,6 +470,7 @@ export class WorkRuntimeManager {
       this.stopRealtime(runtime);
       if (runtime.initialListTimer) clearTimeout(runtime.initialListTimer);
       if (runtime.listTimer) clearInterval(runtime.listTimer);
+      this.clearConnectionRecoveryTimer(runtime);
       void runtime.client?.stop().catch(() => undefined);
     }
   }
@@ -404,9 +484,21 @@ export class WorkRuntimeManager {
     const parsed = parseLogLine(line, { year: Number(config.date.slice(0, 4)), utcOffsetMinutes: utcOffsetMinutes(config.timezone) });
     if (parsed.event.type === "connected") {
       runtime.controller.observeServerConnected();
+      if (runtime.connectionRecoveryState) {
+        this.clearConnectionRecoveryTimer(runtime);
+        delete runtime.connectionRecoveryState;
+        this.host.appendAttention(runtime.competitionId, {
+          id: `connection-recovered:${parsed.sourceId}`,
+          category: "incident",
+          severity: "info",
+          title: "比赛服务器连接已恢复",
+          message: "自动化保持暂停；请核对现场后再恢复发令。",
+          occurredAt: parsed.event.occurredAt
+        });
+      }
       void this.registerPublishedCustomMaps(runtime, config).catch(() => undefined);
     }
-    if (parsed.event.type === "server-disconnected") runtime.controller.observeServerDisconnect("MockClient 与比赛服务器断开连接");
+    if (parsed.event.type === "server-disconnected") this.handleUnexpectedDisconnect(runtime, "MockClient 与比赛服务器断开连接");
     if (parsed.event.type === "permission-denied") runtime.controller.observePermissionDenied(parsed.event.message);
     if (parsed.event.type === "fatal-error") this.handleFatalError(runtime, parsed.event);
     const before = runtime.controller.snapshot();
@@ -451,22 +543,28 @@ export class WorkRuntimeManager {
           const excludedByThisEvent = snapshot.attempts.some((attempt) => attempt.results.some((result) =>
             result.playerId === event.playerId && result.status === "excluded" && result.sourceId === event.sourceId));
           if (event.enabled && excludedByThisEvent && (snapshot.phase === "running" || snapshot.phase === "tail-intake")) {
+            const versionCount = runtime.engine.snapshot().scoreboardVersions.length;
             runtime.engine.apply({ atMs: Date.parse(parsed.event.occurredAt), sourceId: `${event.sourceId}:excluded`, type: "exclude", stageId: snapshot.currentStageId, playerId: event.playerId, reason: "cheat-enabled" });
-            this.host.recordExclusionAttention(runtime.competitionId, snapshot.currentStageId, event.playerId, event.sourceId, "开启 cheat");
+            if (runtime.engine.snapshot().scoreboardVersions.length > versionCount) {
+              this.host.recordExclusionAttention(runtime.competitionId, snapshot.currentStageId, event.playerId, event.sourceId, "开启 cheat");
+            }
           }
         }
       }
       if (event.type === "finish" && parsed.event.type === "finish" && parsed.event.cheat) {
         const exclusionSourceId = `${event.sourceId}:cheat-finish`;
+        const versionCount = runtime.engine.snapshot().scoreboardVersions.length;
         runtime.engine.apply({ atMs: event.atMs, sourceId: exclusionSourceId, type: "exclude", stageId: event.stageId, playerId: event.playerId, reason: "cheat-finish" });
         runtime.controller.observeViolation(event.playerId, exclusionSourceId, "cheat-finish");
         this.observeParticipant(runtime.competitionId, parsed.event.playerName, parsed.event.connectionId, true, "excluded");
-        this.host.recordExclusionAttention(runtime.competitionId, event.stageId, event.playerId, exclusionSourceId, "[CHEAT] 完赛");
+        if (runtime.engine.snapshot().scoreboardVersions.length > versionCount) {
+          this.host.recordExclusionAttention(runtime.competitionId, event.stageId, event.playerId, exclusionSourceId, "[CHEAT] 完赛");
+        }
       }
       if (event.type === "login" && (parsed.event.type === "player-login" || parsed.event.type === "player-listed") && parsed.event.cheat) {
         const snapshot = runtime.controller.snapshot();
         const activeAttempt = [...snapshot.attempts].reverse().find((candidate) => candidate.stageId === snapshot.currentStageId && candidate.intakeOpen);
-        if (!activeAttempt?.results.some((result) => result.playerId === event.playerId)) runtime.controller.observeCheat(event.playerId, true, event.sourceId);
+        if (!activeAttempt?.results.some((result) => result.playerId === event.playerId)) runtime.controller.observeCheat(event.playerId, true, `${event.sourceId}:cheat-login`);
       }
       this.host.saveScoreboards(runtime.competitionId, runtime.engine.snapshot().scoreboardVersions);
     }
@@ -586,10 +684,13 @@ export class WorkRuntimeManager {
     runtime.controller.registerParticipant(participant.id);
     runtime.engine.registerPlayer(participant.id, participant.displayName);
     const sourceId = `${event.sourceId}:excluded`;
+    const versionCount = runtime.engine.snapshot().scoreboardVersions.length;
     runtime.engine.apply({ atMs: Date.parse(event.occurredAt), sourceId, type: "exclude", stageId: stage.id, playerId: participant.id, reason: event.violationCode });
     runtime.controller.observeViolation(participant.id, sourceId, event.violationCode);
     this.observeParticipant(runtime.competitionId, participant.id, participant.connectionIds.at(-1) ?? participant.id, true, "excluded");
-    this.host.recordExclusionAttention(runtime.competitionId, stage.id, participant.id, sourceId, event.message);
+    if (runtime.engine.snapshot().scoreboardVersions.length > versionCount) {
+      this.host.recordExclusionAttention(runtime.competitionId, stage.id, participant.id, sourceId, event.message);
+    }
     this.host.saveScoreboards(runtime.competitionId, runtime.engine.snapshot().scoreboardVersions);
   }
 

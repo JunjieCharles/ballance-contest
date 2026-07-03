@@ -1497,6 +1497,7 @@ export class CompetitionService {
     const hasUnconfirmedCommands = this.unconfirmedCommandsFor(competitionId, snapshot).length > 0;
     const hasOpenServerIncident = (snapshot?.incidents as readonly { type?: string; status?: string }[] | undefined)
       ?.some((incident) => incident.type === "server-disconnect" && incident.status === "open") ?? false;
+    const workConnectionRecoveryFailed = this.workRuntimeManager.get(competitionId)?.connectionRecoveryState === "failed";
     const openAttempt = snapshot?.attempts.findLast((attempt) => attempt.intakeOpen && !attempt.voided);
     const currentAttempt = snapshot?.attempts.findLast((attempt) => attempt.stageId === snapshot.currentStageId && !attempt.voided);
     const restartPhase = phase === "running" || phase === "tail-intake" || phase === "incident"
@@ -1521,8 +1522,8 @@ export class CompetitionService {
       descriptor("start-work", hasPersistedWorkRuntime ? "恢复工作运行" : "启动工作运行", hasPersistedWorkRuntime ? "重启真实 MockClient，恢复持久化阶段、尝试、榜单和计划，并保持自动化暂停等待现场核对。" : "启动真实 MockClient，并立即开始在线名单对账。", competition.mode === "work" && competition.status === "published" && !hasRuntime,
         competition.mode !== "work" ? "测试比赛不启动真实 MockClient" : competition.status !== "published" ? "请先发布比赛配置" : "工作运行已经启动"),
       descriptor("restart-work", competition.mode === "work" ? "重启 MockClient" : "模拟恢复连接", "恢复服务器事件源；连接成功后保持原阶段暂停，等待裁判恢复自动化。",
-        refereeActionsUnlocked && hasRuntime && hasOpenServerIncident,
-        !refereeActionsUnlocked ? "请先发布比赛配置" : !hasRuntime ? "请先启动运行" : "当前没有待恢复的服务器连接阻断"),
+        refereeActionsUnlocked && hasRuntime && hasOpenServerIncident && (competition.mode === "test" || workConnectionRecoveryFailed),
+        !refereeActionsUnlocked ? "请先发布比赛配置" : !hasRuntime ? "请先启动运行" : competition.mode === "work" && hasOpenServerIncident && !workConnectionRecoveryFailed ? "正在自动尝试恢复连接" : "当前没有待恢复的服务器连接阻断"),
       descriptor(
         "enable-automation",
         phase === "paused" || snapshot?.pausedFromPhase ? "恢复自动化" : "启动自动化",
