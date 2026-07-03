@@ -25,7 +25,13 @@ interface ScoreboardOverrideContext {
   existingVersions(): readonly ScoreboardVersionView[];
   payload(): ServiceSnapshotPayload;
   permissions: RuntimeSnapshot["scoreEditPermissions"];
-  consumeConfirmation(token: string, impactHash: string, target: string): void;
+  consumeConfirmation(
+    token: string,
+    impactHash: string,
+    target: string,
+    intent: "scoreboard-set-place" | "scoreboard-set-dnf",
+    input: ScoreboardOverrideInput
+  ): void;
   savePayload(payload: ServiceSnapshotPayload): void;
   setNextVersion(nextVersion: number): void;
   bumpCompetitionVersion(): number;
@@ -133,7 +139,13 @@ export class ScoreboardService {
       throw new ServiceError("VALIDATION_FAILED", "成绩修订不接受前端提交的得分、总分、原因或证据", 400);
     }
     this.assertEditAllowed(context.permissions, input.stageId);
-    context.consumeConfirmation(input.confirmationToken, input.impactHash, `${input.playerId}:${input.stageId}`);
+    context.consumeConfirmation(
+      input.confirmationToken,
+      input.impactHash,
+      `${input.playerId}:${input.stageId}`,
+      input.operation === "set-place" ? "scoreboard-set-place" : "scoreboard-set-dnf",
+      input
+    );
     if (input.operation === "set-place" && (!Number.isInteger(input.place) || input.place < 1)) {
       throw new ServiceError("VALIDATION_FAILED", "名次必须是大于等于 1 的整数", 400);
     }

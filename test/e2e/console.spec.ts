@@ -369,8 +369,8 @@ test("restarts the current stage and unlocks its score review only after the nex
   await page.getByRole("button", { name: "控制台", exact: true }).click();
   await page.getByRole("button", { name: "重赛本关" }).click();
   const confirmation = page.getByRole("group", { name: "重赛本关确认" });
-  await expect(confirmation).toContainText("当前尝试将作废并立即退出有效榜单");
-  await expect(confirmation).toContainText("只有新 Go 才创建新尝试");
+  await expect(confirmation).toContainText("当前尝试和本次成绩将作废，但原始证据会保留。");
+  await expect(confirmation).toContainText("收到新的 Go 后才创建新尝试。");
   await confirmation.getByRole("button", { name: "确认" }).click();
   await expect(page.getByText("阶段", { exact: true }).locator("..")).toContainText("重赛准备");
   await page.getByRole("button", { name: "成绩", exact: true }).click();
@@ -408,6 +408,14 @@ test("shows disabled reasons, shared scheduling controls and automatic review co
   await expect(page.getByRole("button", { name: "关卡时限改期" })).toBeDisabled();
   await expect(page.getByText("当前没有开放的成绩接收窗口").first()).toBeVisible();
   await expect(page.getByRole("button", { name: "进入 Ready+发令流程" })).toBeEnabled();
+  const readyFlowAction = page.locator(".confirm-action").filter({ has: page.getByRole("button", { name: "进入 Ready+发令流程" }) });
+  await readyFlowAction.getByRole("button", { name: "进入 Ready+发令流程" }).click();
+  await expect(readyFlowAction.getByText("进入 SR1 的 Ready+发令流程？", { exact: true })).toBeVisible();
+  await expect(readyFlowAction.getByText("立即发布本关发令预告，并把第一条 Ready 安排在 1 分钟后。", { exact: true })).toBeVisible();
+  await expect(readyFlowAction).not.toContainText("目标：");
+  await expect(readyFlowAction).not.toContainText("状态版本");
+  await expect(readyFlowAction).not.toContainText("令牌有效");
+  await readyFlowAction.getByRole("button", { name: "取消" }).click();
   await expect(page.getByRole("button", { name: "手动 Ready" })).toBeEnabled();
   await expect(page.getByRole("button", { name: "关闭 cheat" })).toBeEnabled();
   await expect(page.getByRole("button", { name: "手动发令" })).toBeDisabled();
@@ -415,9 +423,8 @@ test("shows disabled reasons, shared scheduling controls and automatic review co
   const protectionAction = page.locator(".confirm-action").filter({ hasText: "将起跑保护标记为已使用" });
   await expect(protectionAction.getByRole("button", { name: "将起跑保护标记为已使用" })).toBeEnabled();
   await protectionAction.getByRole("button", { name: "将起跑保护标记为已使用" }).click();
-  await expect(protectionAction.getByText("确认将起跑保护标记为已使用", { exact: true })).toBeVisible();
-  await expect(protectionAction.getByText("目标关：sr-1", { exact: true })).toBeVisible();
-  await expect(protectionAction.getByText("本关后续敏感期掉线不再自动延时或作废尝试", { exact: true })).toBeVisible();
+  await expect(protectionAction.getByText("把 SR1 的起跑保护标记为已使用？", { exact: true })).toBeVisible();
+  await expect(protectionAction.getByText("本关后续掉线不再触发自动延时或作废尝试。", { exact: true })).toBeVisible();
   await protectionAction.getByRole("button", { name: "确认" }).click();
   await expect(page.getByRole("button", { name: "将起跑保护重置为未使用" })).toBeVisible();
   await expect(page.getByText("下一关 Ready（UTC+8）").locator("..")).toContainText("未设置");

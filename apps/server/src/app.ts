@@ -7,6 +7,7 @@ import {
   stageDisplayName,
   type CompetitionAction,
   type CompetitionConfig,
+  type ConfirmationIntent,
   type HealthResponse,
   type ScoreboardOverrideInput
 } from "@ballance/contracts";
@@ -169,6 +170,7 @@ export const buildApp = async (options: BuildAppOptions): Promise<FastifyInstanc
   });
   app.post<{ Params: { competitionId: string }; Body: {
     kind: "restart-stage" | "manual-action" | "manual-go" | "scoreboard-override" | "automation-command-resolution" | "command-resolution" | "observation-gap-resolution" | "high-risk";
+    intent?: ConfirmationIntent;
     target?: string;
     playerId?: string;
     stageId?: string;
@@ -178,6 +180,10 @@ export const buildApp = async (options: BuildAppOptions): Promise<FastifyInstanc
     actionId?: string;
     commandId?: string;
     gapId?: string;
+    milliseconds?: number;
+    plannedReadyAt?: string;
+    deadlineAt?: string;
+    command?: string;
     resolution?: "confirm-executed" | "dismiss-failed" | "resend" | "continue";
   } }>("/api/v1/competitions/:competitionId/confirmations", async (request) => {
     requireSession(request, true);
@@ -336,7 +342,7 @@ export const buildApp = async (options: BuildAppOptions): Promise<FastifyInstanc
   });
   app.post<{
     Params: { competitionId: string };
-    Body: { expectedStateVersion: number; idempotencyKey: string; confirmationToken: string; impactHash: string };
+    Body: { expectedStateVersion: number; idempotencyKey: string; confirmationToken: string; impactHash: string; confirmationIntent?: "finish" | "finish-and-archive" };
   }>("/api/v1/competitions/:competitionId/finish", async (request) => {
     requireSession(request, true);
     return { data: await service.finishCompetition(request.params.competitionId, request.body) };

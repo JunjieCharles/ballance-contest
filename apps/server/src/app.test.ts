@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import type { FastifyInstance } from "fastify";
@@ -386,10 +386,11 @@ describe("local API", () => {
       method: "POST",
       url: `/api/v1/competitions/${competitionId}/confirmations`,
       headers: auth(token),
-      payload: { kind: "scoreboard-override", target: "p4:s3", playerId: "p4", stageId: "s3", operation: "set-place", place: 1, rankPolicy: "shift" }
+      payload: { kind: "scoreboard-override", intent: "scoreboard-set-place", target: "p4:s3", playerId: "p4", stageId: "s3", operation: "set-place", place: 1, rankPolicy: "shift" }
     });
-    const confirmation = confirmationResponse.json<{ data: { token: string; impactHash: string; effect: { consequences: string[]; affectedPlayers?: Array<{ playerId: string; displayName: string }> } } }>().data;
-    expect(confirmation.effect.consequences).toContain("生成新的榜单版本");
+    const confirmation = confirmationResponse.json<{ data: { token: string; impactHash: string; effect: { title: string; consequences: string[]; affectedPlayers?: Array<{ playerId: string; displayName: string }> } } }>().data;
+    expect(confirmation.effect.title).toMatch(/^把 .+ 的 SR13 成绩设为第 1 名？$/);
+    expect(confirmation.effect.consequences).toContain("将生成新的榜单版本，原始成绩不会被覆盖。");
     expect(confirmation.effect.affectedPlayers?.map((player) => player.playerId)).toContain("p4");
     const basePayload = {
       expectedStateVersion: 3,
@@ -445,10 +446,10 @@ describe("local API", () => {
       method: "POST",
       url: `/api/v1/competitions/${competitionId}/confirmations`,
       headers: auth(token),
-      payload: { kind: "scoreboard-override", target: "p2:s3", playerId: "p2", stageId: "s3", operation: "set-dnf", rankPolicy: "shift" }
+      payload: { kind: "scoreboard-override", intent: "scoreboard-set-dnf", target: "p2:s3", playerId: "p2", stageId: "s3", operation: "set-dnf", rankPolicy: "shift" }
     });
     const dnfConfirmation = dnfConfirmationResponse.json<{ data: { token: string; impactHash: string; effect: { consequences: string[]; affectedPlayers?: Array<{ playerId: string; displayName: string }> } } }>().data;
-    expect(dnfConfirmation.effect.consequences).toContain("其他玩家将顺延重算，受影响 1 名玩家");
+    expect(dnfConfirmation.effect.consequences).toContain("其他玩家将顺延重算，共影响 1 名玩家。");
     expect(dnfConfirmation.effect.affectedPlayers?.map((player) => player.playerId)).toContain("p2");
     const dnfRevision = await app.inject({
       method: "POST",
@@ -606,9 +607,11 @@ describe("local API", () => {
     expect(revision.json()).toMatchObject({ data: { version: 16 } });
     const rearchive = await app.inject({ method: "POST", url: `/api/v1/competitions/${archivedId}/test-runs/${archivedRunId}/archive`, headers: auth(token), payload: { version: 16 } });
     expect(rearchive.statusCode).toBe(200);
+    const retainedPackagePath = rearchive.json<{ data: { packagePath: string } }>().data.packagePath;
     const archivedSnapshot = await app.inject({ method: "GET", url: `/api/v1/competitions/${archivedId}/snapshot`, headers: auth(token) });
     expect(archivedSnapshot.json<{ data: { archives: unknown[] } }>().data.archives).toHaveLength(2);
     await remove(archivedId, 6, "delete-archived");
+    expect(existsSync(retainedPackagePath)).toBe(true);
   });
 
   it("auto-marks competition finished when runtime reaches review phase", async () => {

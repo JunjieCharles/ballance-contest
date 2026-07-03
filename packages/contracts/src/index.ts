@@ -457,6 +457,12 @@ export interface CompetitionSnapshot {
 
 export type ConfirmationKind = "restart-stage" | "manual-action" | "manual-go" | "scoreboard-override" | "automation-command-resolution" | "command-resolution" | "observation-gap-resolution" | "high-risk";
 
+export type ConfirmationIntent =
+  | "start-ready-flow" | "ready" | "manual-go" | "delay-ready" | "extend-stage-deadline"
+  | "reschedule" | "reschedule-stage-deadline" | "end-stage" | "restart-stage" | "set-start-protection"
+  | "kick" | "raw-command" | "finish" | "finish-and-archive" | "delete"
+  | "scoreboard-set-place" | "scoreboard-set-dnf";
+
 export interface ConfirmationSummary {
   token: string;
   kind: ConfirmationKind;

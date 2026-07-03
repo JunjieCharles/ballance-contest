@@ -631,8 +631,8 @@ describe("CompetitionService dynamic participants", () => {
     expect(snapshot.runtime).toMatchObject({ startProtectionEnabled: true, startProtectionUsed: false });
     let confirmation = service.createConfirmation(record.id, { kind: "manual-action", target: `${record.id}:start-protection:sr-1:true` });
     expect(confirmation.effect).toMatchObject({
-      title: "确认将起跑保护标记为已使用",
-      consequences: expect.arrayContaining(["目标关：sr-1"])
+      title: "把 SR1 的起跑保护标记为已使用？",
+      consequences: expect.arrayContaining(["本关后续掉线不再触发自动延时或作废尝试。"])
     });
     await service.performAction(record.id, {
       expectedStateVersion: snapshot.competition.stateVersion,
@@ -652,6 +652,63 @@ describe("CompetitionService dynamic participants", () => {
       action: { type: "set-start-protection", used: false, confirmationToken: confirmation.token, impactHash: confirmation.impactHash }
     });
     expect(service.snapshot(record.id).runtime.startProtectionUsed).toBe(false);
+    service.close();
+  });
+
+  it("returns button-specific confirmation copy and rejects a token prepared for another action", async () => {
+    const service = new CompetitionService();
+    const record = service.create({ name: "Specific confirmations", mode: "work", idempotencyKey: "specific-confirmations" });
+    service.publish(record.id, 0, "publish-specific-confirmations");
+    const manager = workRuntimeManager(service);
+    manager.register(record.id, manager.makeRuntime(record.id, service.snapshot(record.id).config, { write: async () => undefined }));
+    const snapshot = service.snapshot(record.id);
+    const stageId = snapshot.runtime.currentStageId;
+    if (!stageId) throw new Error("missing current stage");
+
+    const readyFlow = service.createConfirmation(record.id, {
+      kind: "manual-action",
+      intent: "start-ready-flow",
+      target: record.id,
+      stageId
+    });
+    expect(readyFlow.effect).toMatchObject({
+      title: "进入 SR1 的 Ready+发令流程？",
+      consequences: expect.arrayContaining(["立即发布本关发令预告，并把第一条 Ready 安排在 1 分钟后。"])
+    });
+
+    const endStage = service.createConfirmation(record.id, {
+      kind: "manual-action",
+      intent: "end-stage",
+      target: record.id,
+      stageId
+    });
+    expect(endStage.effect.title).toBe("提前结束 SR1？");
+    await expect(service.performAction(record.id, {
+      expectedStateVersion: snapshot.competition.stateVersion,
+      idempotencyKey: "wrong-confirmation-intent",
+      action: { type: "start-ready-flow", confirmationToken: endStage.token, impactHash: endStage.impactHash }
+    })).rejects.toThrow(/确认令牌与当前操作不匹配/);
+
+    const rawCommand = service.createConfirmation(record.id, {
+      kind: "high-risk",
+      intent: "raw-command",
+      target: record.id,
+      command: "list"
+    });
+    expect(rawCommand.effect.consequences).toContain("将发送：list");
+    await expect(service.performAction(record.id, {
+      expectedStateVersion: snapshot.competition.stateVersion,
+      idempotencyKey: "changed-command-after-confirmation",
+      action: { type: "raw-command", command: "scores", confirmationToken: rawCommand.token, impactHash: rawCommand.impactHash }
+    })).rejects.toThrow(/确认令牌与当前操作不匹配/);
+
+    const finish = service.createConfirmation(record.id, { kind: "high-risk", intent: "finish", target: record.id });
+    const remove = service.createConfirmation(record.id, { kind: "high-risk", intent: "delete", target: record.id });
+    expect(finish.effect.title).toBe("结束比赛“Specific confirmations”？");
+    expect(remove.effect).toMatchObject({
+      title: "永久删除比赛“Specific confirmations”？",
+      consequences: expect.arrayContaining(["已生成的归档文件会保留，但比赛无法从控制台恢复。"])
+    });
     service.close();
   });
 

@@ -19,6 +19,7 @@ import type {
   CompetitionMode,
   CompetitionRecordView,
   CompetitionSnapshot,
+  ConfirmationIntent,
   ConfirmationKind,
   ConfirmationSummary,
   HealthResponse,
@@ -155,11 +156,9 @@ function ConfirmButton({
         const effect = confirmation.effect as ConfirmationSummary["effect"] & { affectedPlayers?: readonly { playerId: string; displayName: string; beforePlace: number | null; afterPlace: number | null; beforePoints: number; afterPoints: number; }[] };
         return <>
       <strong>{confirmation.effect.title}</strong>
-      <span>目标：{confirmation.effect.target}</span>
-      <span>当前阶段：{phaseLabel[confirmation.effect.currentPhase] ?? confirmation.effect.currentPhase} · 状态版本 v{confirmation.stateVersion}</span>
       <ul>{effect.consequences.map((item) => <li key={item}>{item}</li>)}</ul>
       {effect.affectedPlayers?.length ? <div className="affected-players"><strong>受影响玩家</strong><ul>{effect.affectedPlayers.map((item) => <li key={item.playerId}><span>{item.displayName}</span><small>{item.beforePlace === null ? "空成绩" : `第 ${item.beforePlace} 名`} → {item.afterPlace === null ? "空成绩" : `第 ${item.afterPlace} 名`} · {item.beforePoints} 分 → {item.afterPoints} 分</small></li>)}</ul></div> : null}
-      <small>令牌有效至 {formatUtc8DateTime(confirmation.expiresAt)}{confirmation.effect.irreversible ? " · 此操作不可撤销" : ""}</small>
+      {confirmation.effect.irreversible && <small>确认后无法撤销。</small>}
       <div className="button-row compact">
         <button className={className} disabled={busy} onClick={() => void confirm()}>确认</button>
         <button className="ghost" disabled={busy} onClick={() => setConfirmation(undefined)}>取消</button>
@@ -478,7 +477,8 @@ export function App() {
       method: "POST",
       body: JSON.stringify({
         expectedStateVersion: snapshot.competition.stateVersion,
-        idempotencyKey: crypto.randomUUID(), confirmationToken: confirmation.token, impactHash: confirmation.impactHash
+        idempotencyKey: crypto.randomUUID(), confirmationToken: confirmation.token, impactHash: confirmation.impactHash,
+        confirmationIntent: archiveAfter ? "finish-and-archive" : "finish"
       })
     });
     if (archiveAfter) await request(`/api/v1/competitions/${snapshot.competition.id}/archive`, session, {
@@ -563,7 +563,7 @@ function ConsolePanel({ snapshot, canWrite, versionKey, startWork, enableAutomat
   snapshot: CompetitionSnapshot; canWrite: boolean; versionKey: string;
   startWork(): Promise<void>; enableAutomation(): Promise<void>; pauseAutomation(): Promise<void>;
   performAction(action: CompetitionAction): Promise<void>;
-  requestConfirmation(kind: ConfirmationKind, target: string): Promise<ConfirmationSummary>;
+  requestConfirmation(kind: ConfirmationKind, target: string, requestPayload?: unknown): Promise<ConfirmationSummary>;
 }) {
   const runtime = snapshot.runtime;
   const [channel, setChannel] = useState<NotificationChannel>("notice");
@@ -593,9 +593,17 @@ function ConsolePanel({ snapshot, canWrite, versionKey, startWork, enableAutomat
     confirmationVersionKey = versionKey
   ) => {
     const availability = availabilityFor(runtime, actionId);
+    const confirmationPayload: Record<string, unknown> = {
+      intent: actionId as ConfirmationIntent,
+      stageId: runtime.currentStageId,
+      ...(actionId === "delay-ready" || actionId === "extend-stage-deadline" ? { milliseconds: 60_000 } : {}),
+      ...(actionId === "reschedule" ? { plannedReadyAt: utc8InputToIso(scheduleAt) } : {}),
+      ...(actionId === "reschedule-stage-deadline" ? { deadlineAt: utc8InputToIso(scheduleAt) } : {}),
+      ...(actionId === "raw-command" ? { command: rawCommand.trim() } : {})
+    };
     return <ConfirmButton key={`${label}:${target}:${confirmationVersionKey}`} label={label} kind={kind} target={target} versionKey={confirmationVersionKey} className={className}
       disabled={!canWrite || !availability?.enabled || extraDisabled} disabledReason={!canWrite ? "实时连接或控制权不可用" : extraDisabled ? extraReason : availability?.disabledReason}
-      requestConfirmation={requestConfirmation} onConfirm={(confirmation) => performAction(build(confirmation))} />;
+      requestPayload={confirmationPayload} requestConfirmation={requestConfirmation} onConfirm={(confirmation) => performAction(build(confirmation))} />;
   };
   return <section className="grid two">
     <div className="panel"><h2>裁判操作</h2>
@@ -626,8 +634,8 @@ function ConsolePanel({ snapshot, canWrite, versionKey, startWork, enableAutomat
       </div>
       <h3>改期（UTC+8）</h3>
       <div className="schedule-editor"><input aria-label="改期时间（UTC+8）" type="datetime-local" value={scheduleAt} onChange={(event) => setScheduleAt(event.target.value)} />
-        {confirmedAction("Ready 改期", "reschedule", "manual-action", snapshot.competition.id, (confirmation) => ({ type: "reschedule", plannedReadyAt: utc8InputToIso(scheduleAt), confirmationToken: confirmation.token, impactHash: confirmation.impactHash }))}
-        {confirmedAction("关卡时限改期", "reschedule-stage-deadline", "manual-action", snapshot.competition.id, (confirmation) => ({ type: "reschedule-stage-deadline", deadlineAt: utc8InputToIso(scheduleAt), confirmationToken: confirmation.token, impactHash: confirmation.impactHash }))}
+        {confirmedAction("Ready 改期", "reschedule", "manual-action", snapshot.competition.id, (confirmation) => ({ type: "reschedule", plannedReadyAt: utc8InputToIso(scheduleAt), confirmationToken: confirmation.token, impactHash: confirmation.impactHash }), undefined, false, undefined, `${versionKey}:${scheduleAt}`)}
+        {confirmedAction("关卡时限改期", "reschedule-stage-deadline", "manual-action", snapshot.competition.id, (confirmation) => ({ type: "reschedule-stage-deadline", deadlineAt: utc8InputToIso(scheduleAt), confirmationToken: confirmation.token, impactHash: confirmation.impactHash }), undefined, false, undefined, `${versionKey}:${scheduleAt}`)}
       </div>
     </div>
     <div className="panel"><h2>流程动态与注意事项</h2>
@@ -675,7 +683,7 @@ function ConsolePanel({ snapshot, canWrite, versionKey, startWork, enableAutomat
       <label>目标玩家<select value={participantId} onChange={(event) => setParticipantId(event.target.value)}><option value="">请选择</option>{snapshot.config.participants.map((item) => <option value={item.id} key={item.id}>{item.displayName}</option>)}</select></label>
       <div className="button-row action-row">{confirmedAction("Kick", "kick", "high-risk", participant?.displayName ?? "未选择玩家", (confirmation) => ({ type: "kick", playerName: participant?.displayName ?? "", confirmationToken: confirmation.token, impactHash: confirmation.impactHash }), "danger", !participant, "请先选择目标玩家")}</div>
       <label>原始命令<input value={rawCommand} onChange={(event) => setRawCommand(event.target.value)} /></label>
-      {confirmedAction("发送原始命令", "raw-command", "high-risk", snapshot.competition.id, (confirmation) => ({ type: "raw-command", command: rawCommand.trim(), confirmationToken: confirmation.token, impactHash: confirmation.impactHash }), "danger", !rawCommand.trim(), "请输入原始命令")}
+      {confirmedAction("发送原始命令", "raw-command", "high-risk", snapshot.competition.id, (confirmation) => ({ type: "raw-command", command: rawCommand.trim(), confirmationToken: confirmation.token, impactHash: confirmation.impactHash }), "danger", !rawCommand.trim(), "请输入原始命令", `${versionKey}:${rawCommand.trim()}`)}
     </div>
     <div className="panel"><h2>命令审计</h2><CommandTable commands={runtime.commands} /></div>
   </section>;
@@ -919,7 +927,7 @@ function PlayersPanel({ snapshot, canWrite, performAction }: { snapshot: Competi
 
 function ScoreboardPanel({ snapshot, canWrite, versionKey, requestConfirmation, overrideScoreboard, downloadExport }: {
   snapshot: CompetitionSnapshot; canWrite: boolean; versionKey: string;
-  requestConfirmation(kind: ConfirmationKind, target: string): Promise<ConfirmationSummary>;
+  requestConfirmation(kind: ConfirmationKind, target: string, requestPayload?: unknown): Promise<ConfirmationSummary>;
   overrideScoreboard(draft: ScoreDraft, confirmation: ConfirmationSummary): Promise<void>;
   downloadExport(format: "csv" | "xlsx"): Promise<void>;
 }) {
@@ -994,8 +1002,8 @@ function EditableScoreCell({ value, display, stage, playerId, playerName, canWri
   const rankPolicy = shiftOthers ? "shift" : "tie";
   return <td className="score-cell-editor"><label>新名次<input aria-label={`${playerId} ${stage.label} 新名次`} type="number" min="1" value={place} onChange={(event) => setPlace(event.target.value)} /></label><label className="score-policy-row">其他玩家是否顺延<input aria-label="其他玩家是否顺延" type="checkbox" checked={shiftOthers} onChange={(event) => setShiftOthers(event.target.checked)} /><span>{shiftOthers ? "顺延" : "不顺延"}</span></label><small>{shiftOthers ? `会顺延其他玩家并按本关规则自动计 ${calculatedPoints} 分` : `不会顺延其他玩家，按本关规则直接计 ${calculatedPoints} 分`}</small>
     <div className="score-editor-actions">
-      <ConfirmButton key={`save:${target}:${versionKey}:${place}:${rankPolicy}`} label="保存名次" kind="scoreboard-override" target={target} versionKey={versionKey} requestPayload={{ playerId, stageId: stage.id, operation: "set-place", place: numericPlace, rankPolicy }} disabled={!Number.isInteger(numericPlace) || numericPlace < 1} requestConfirmation={requestConfirmation} onConfirm={async (confirmation) => { await save({ playerId, stageId: stage.id, operation: "set-place", place: numericPlace, rankPolicy }, confirmation); setEditing(false); }} />
-      <ConfirmButton key={`dnf:${target}:${versionKey}:${rankPolicy}`} label="设为 DNF" kind="scoreboard-override" target={target} versionKey={versionKey} requestPayload={{ playerId, stageId: stage.id, operation: "set-dnf", rankPolicy }} className="danger" requestConfirmation={requestConfirmation} onConfirm={async (confirmation) => { await save({ playerId, stageId: stage.id, operation: "set-dnf", rankPolicy }, confirmation); setEditing(false); }} />
+      <ConfirmButton key={`save:${target}:${versionKey}:${place}:${rankPolicy}`} label="保存名次" kind="scoreboard-override" target={target} versionKey={versionKey} requestPayload={{ intent: "scoreboard-set-place", playerId, stageId: stage.id, operation: "set-place", place: numericPlace, rankPolicy }} disabled={!Number.isInteger(numericPlace) || numericPlace < 1} requestConfirmation={requestConfirmation} onConfirm={async (confirmation) => { await save({ playerId, stageId: stage.id, operation: "set-place", place: numericPlace, rankPolicy }, confirmation); setEditing(false); }} />
+      <ConfirmButton key={`dnf:${target}:${versionKey}:${rankPolicy}`} label="设为 DNF" kind="scoreboard-override" target={target} versionKey={versionKey} requestPayload={{ intent: "scoreboard-set-dnf", playerId, stageId: stage.id, operation: "set-dnf", rankPolicy }} className="danger" requestConfirmation={requestConfirmation} onConfirm={async (confirmation) => { await save({ playerId, stageId: stage.id, operation: "set-dnf", rankPolicy }, confirmation); setEditing(false); }} />
       <button className="ghost" onClick={() => setEditing(false)}>取消</button>
     </div>
   </td>;
@@ -1026,18 +1034,18 @@ function TestPanel({ snapshot, scenarios, scenarioDetail, canWrite, loadScenario
 
 function ArchivePanel({ snapshot, canWrite, versionKey, requestConfirmation, archiveCompetition, finishCompetition, deleteCompetition }: {
   snapshot: CompetitionSnapshot; canWrite: boolean; versionKey: string;
-  requestConfirmation(kind: ConfirmationKind, target: string): Promise<ConfirmationSummary>;
+  requestConfirmation(kind: ConfirmationKind, target: string, requestPayload?: unknown): Promise<ConfirmationSummary>;
   archiveCompetition(): Promise<void>; finishCompetition(confirmation: ConfirmationSummary, archiveAfter: boolean): Promise<void>; deleteCompetition(confirmation: ConfirmationSummary): Promise<void>;
 }) {
   const finish = availabilityFor(snapshot.runtime, "finish");
   const archive = availabilityFor(snapshot.runtime, "archive");
   const remove = availabilityFor(snapshot.runtime, "delete");
   return <section className="panel"><div className="panel-title-row"><h2>结束与归档</h2><div className="button-row compact action-row">
-    <ConfirmButton key={`finish:${versionKey}`} label="结束比赛" kind="high-risk" target={snapshot.competition.id} versionKey={versionKey} disabled={!canWrite || !finish?.enabled} disabledReason={!canWrite ? "实时连接或控制权不可用" : finish?.disabledReason} requestConfirmation={requestConfirmation} onConfirm={(confirmation) => finishCompetition(confirmation, false)} />
-    <ConfirmButton key={`finish-archive:${versionKey}`} label="结束并生成归档" kind="high-risk" target={snapshot.competition.id} versionKey={versionKey} disabled={!canWrite || !finish?.enabled || snapshot.currentScoreboard.length === 0} disabledReason={snapshot.currentScoreboard.length === 0 ? "暂无可归档榜单" : finish?.disabledReason} requestConfirmation={requestConfirmation} onConfirm={(confirmation) => finishCompetition(confirmation, true)} />
+    <ConfirmButton key={`finish:${versionKey}`} label="结束比赛" kind="high-risk" target={snapshot.competition.id} versionKey={versionKey} requestPayload={{ intent: "finish" }} disabled={!canWrite || !finish?.enabled} disabledReason={!canWrite ? "实时连接或控制权不可用" : finish?.disabledReason} requestConfirmation={requestConfirmation} onConfirm={(confirmation) => finishCompetition(confirmation, false)} />
+    <ConfirmButton key={`finish-archive:${versionKey}`} label="结束并生成归档" kind="high-risk" target={snapshot.competition.id} versionKey={versionKey} requestPayload={{ intent: "finish-and-archive" }} disabled={!canWrite || !finish?.enabled || snapshot.currentScoreboard.length === 0} disabledReason={snapshot.currentScoreboard.length === 0 ? "暂无可归档榜单" : finish?.disabledReason} requestConfirmation={requestConfirmation} onConfirm={(confirmation) => finishCompetition(confirmation, true)} />
     <div className="action-control"><button disabled={!canWrite || !archive?.enabled || snapshot.currentScoreboard.length === 0} title={archive?.disabledReason} onClick={() => void archiveCompetition()}>仅生成归档</button>{!archive?.enabled && <small className="disabled-reason">{archive?.disabledReason}</small>}</div>
-    <ConfirmButton key={`delete:${versionKey}`} label="删除比赛" kind="high-risk" target={snapshot.competition.id} versionKey={versionKey} className="danger" disabled={!canWrite || !remove?.enabled} disabledReason={!canWrite ? "实时连接或控制权不可用" : remove?.disabledReason} requestConfirmation={requestConfirmation} onConfirm={deleteCompetition} />
-  </div></div><p className="muted">确认面板会展示目标、阶段、状态版本、具体影响和令牌有效期；无需填写操作原因。</p>
+    <ConfirmButton key={`delete:${versionKey}`} label="删除比赛" kind="high-risk" target={snapshot.competition.id} versionKey={versionKey} requestPayload={{ intent: "delete" }} className="danger" disabled={!canWrite || !remove?.enabled} disabledReason={!canWrite ? "实时连接或控制权不可用" : remove?.disabledReason} requestConfirmation={requestConfirmation} onConfirm={deleteCompetition} />
+  </div></div><p className="muted">确认面板只说明当前按钮会执行什么、会造成什么结果；无需填写操作原因。</p>
     <table><thead><tr><th>版本</th><th>目录</th><th>Manifest Hash</th><th>时间</th></tr></thead><tbody>{snapshot.archives.map((item) => <tr key={`${item.version}:${item.manifestHash}`}><td>v{item.version}</td><td>{item.directory}</td><td><code>{item.manifestHash}</code></td><td>{formatUtc8DateTime(item.createdAt)}</td></tr>)}</tbody></table>
     {snapshot.archives.length === 0 && <p className="muted">暂无归档版本。</p>}
   </section>;

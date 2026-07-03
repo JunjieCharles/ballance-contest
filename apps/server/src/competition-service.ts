@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { rmSync } from "node:fs";
+import { existsSync, readdirSync, rmSync } from "node:fs";
 import { isAbsolute, join, relative, resolve } from "node:path";
 import { performance } from "node:perf_hooks";
 import {
@@ -19,6 +19,7 @@ import {
   type CompetitionMode,
   type CompetitionRecordView,
   type CompetitionSnapshot,
+  type ConfirmationIntent,
   type ConfirmationSummary,
   type RawClientLogLine,
   type RefereeActionId,
@@ -84,7 +85,52 @@ interface ConfirmationRecord {
   stateVersion: number;
   impactHash: string;
   expiresAtMs: number;
+  intent?: ConfirmationIntent;
+  boundInput?: string;
 }
+
+interface ConfirmationBindingInput {
+  milliseconds?: number;
+  plannedReadyAt?: string;
+  deadlineAt?: string;
+  command?: string;
+  playerId?: string;
+  stageId?: string;
+  operation?: "set-place" | "set-dnf";
+  place?: number;
+  rankPolicy?: "tie" | "shift";
+}
+
+const confirmationInputBinding = (intent: ConfirmationIntent | undefined, input: ConfirmationBindingInput): string | undefined => {
+  switch (intent) {
+    case "delay-ready":
+    case "extend-stage-deadline":
+      return JSON.stringify({ milliseconds: input.milliseconds });
+    case "reschedule":
+      return JSON.stringify({ plannedReadyAt: input.plannedReadyAt });
+    case "reschedule-stage-deadline":
+      return JSON.stringify({ deadlineAt: input.deadlineAt });
+    case "raw-command":
+      return JSON.stringify({ command: input.command?.trim() });
+    case "scoreboard-set-place":
+      return JSON.stringify({ playerId: input.playerId, stageId: input.stageId, operation: input.operation, place: input.place, rankPolicy: input.rankPolicy });
+    case "scoreboard-set-dnf":
+      return JSON.stringify({ playerId: input.playerId, stageId: input.stageId, operation: input.operation, rankPolicy: input.rankPolicy });
+    default:
+      return undefined;
+  }
+};
+
+const formatConfirmationDateTime = (value?: string): string => value
+  ? `${new Intl.DateTimeFormat("zh-CN", {
+      timeZone: "Asia/Shanghai",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      hour12: false
+    }).format(new Date(value))}（UTC+8）`
+  : "未设置";
 
 const rows = <T>(database: OpenedDatabase | undefined, sql: string, ...params: unknown[]): T[] =>
   database ? database.sqlite.prepare(sql).all(...params) as T[] : [];
@@ -509,6 +555,7 @@ export class CompetitionService {
     competitionId: string,
     input: {
       kind: ConfirmationSummary["kind"];
+      intent?: ConfirmationIntent;
       target?: string;
       playerId?: string;
       stageId?: string;
@@ -518,6 +565,10 @@ export class CompetitionService {
       actionId?: string;
       commandId?: string;
       gapId?: string;
+      milliseconds?: number;
+      plannedReadyAt?: string;
+      deadlineAt?: string;
+      command?: string;
       resolution?: "confirm-executed" | "dismiss-failed" | "resend" | "continue";
     }
   ): ConfirmationSummary {
@@ -526,7 +577,26 @@ export class CompetitionService {
     const expiresAtMs = Date.now() + 60_000;
     const token = randomUUID();
     const target = input.target ?? (input.kind === "scoreboard-override" && input.playerId && input.stageId ? `${input.playerId}:${input.stageId}` : competition.id);
-    let impactHash = createHash("sha256").update(JSON.stringify({ competitionId, target, stateVersion: competition.stateVersion, kind: input.kind, playerId: input.playerId, stageId: input.stageId, operation: input.operation, place: input.place, rankPolicy: input.rankPolicy })).digest("hex");
+    const intent = input.intent ?? (input.kind === "scoreboard-override" && input.operation
+      ? input.operation === "set-place" ? "scoreboard-set-place" : "scoreboard-set-dnf"
+      : undefined);
+    const boundInput = confirmationInputBinding(intent, input);
+    let impactHash = createHash("sha256").update(JSON.stringify({
+      competitionId,
+      target,
+      stateVersion: competition.stateVersion,
+      kind: input.kind,
+      intent,
+      playerId: input.playerId,
+      stageId: input.stageId,
+      operation: input.operation,
+      place: input.place,
+      rankPolicy: input.rankPolicy,
+      milliseconds: input.milliseconds,
+      plannedReadyAt: input.plannedReadyAt,
+      deadlineAt: input.deadlineAt,
+      command: input.command
+    })).digest("hex");
     let runtimeToken: string | undefined;
     const unresolvedAutomationAction = input.kind === "automation-command-resolution"
       ? runtimeSnapshot?.actions.find((action) => action.id === input.actionId && isUnresolvedAutomationAction(action))
@@ -647,66 +717,173 @@ export class CompetitionService {
       target,
       stateVersion: competition.stateVersion,
       impactHash,
-      expiresAtMs
+      expiresAtMs,
+      ...(intent === undefined ? {} : { intent }),
+      ...(boundInput === undefined ? {} : { boundInput })
     };
     this.confirmations.set(token, record);
-    const effect = startProtectionMatch
-      ? {
-          title: startProtectionMatch[2] === "true" ? "确认将起跑保护标记为已使用" : "确认将起跑保护重置为未使用",
+    const displayConfig = this.getPublishedConfig(competitionId) ?? this.getDraftConfig(competitionId);
+    const displayStageId = input.stageId ?? runtimeSnapshot?.currentStageId;
+    const displayStage = displayConfig.stages.find((stage) => stage.id === displayStageId);
+    const displayStageName = displayStage ? stageDisplayName(displayStage) : displayStageId ?? "本关";
+    const displayPlayerName = scorePreview?.affectedPlayers.find((player) => player.playerId === input.playerId)?.displayName
+      ?? displayConfig.participants.find((player) => player.id === input.playerId)?.displayName
+      ?? input.playerId
+      ?? target;
+    const effect = (() : Omit<ConfirmationSummary["effect"], "target" | "currentPhase"> => {
+      if (startProtectionMatch) {
+        return {
+          title: startProtectionMatch[2] === "true" ? `把 ${displayStageName} 的起跑保护标记为已使用？` : `重置 ${displayStageName} 的起跑保护？`,
           consequences: startProtectionMatch[2] === "true"
-            ? [`目标关：${startProtectionMatch[1]}`, "本关后续敏感期掉线不再自动延时或作废尝试", "不改变 Ready 计划或当前尝试"]
-            : [`目标关：${startProtectionMatch[1]}`, "本关后续首次有效敏感期掉线可以再次触发起跑保护", "不改变 Ready 计划或当前尝试"],
+            ? ["本关后续掉线不再触发自动延时或作废尝试。", "不会改变 Ready 计划或当前尝试。"]
+            : ["本关下一次符合条件的掉线可以再次触发起跑保护。", "不会改变 Ready 计划或当前尝试。"],
           irreversible: false
-        }
-      : input.kind === "manual-go"
-      ? { title: "确认手动发令", consequences: ["将发送真实倒数命令", "只有 Go 回显后才创建尝试并启动关卡时限"], irreversible: false }
-      : input.kind === "automation-command-resolution"
-        ? {
-            title: input.resolution === "resend" ? "确认执行重发" : "确认命令已执行",
-            consequences: input.resolution === "resend"
-              ? ["生成新的命令审计记录并等待新回显", "原 uncertain/timed_out 记录不会被覆盖", "本次为裁判显式重发，不会继续自动重试"]
-              : ["原 uncertain/timed_out 记录保持不变", "流程动作标记为裁判已现场核对", "不会发送任何新命令"],
-            irreversible: input.resolution === "resend"
-          }
-      : input.kind === "command-resolution"
-        ? {
-            title: input.resolution === "resend" ? "确认重发真实命令" : input.resolution === "dismiss-failed" ? "确认不再执行失败命令" : "确认真实命令已执行",
-            consequences: input.resolution === "resend"
-              ? ["生成新的命令审计并等待新回显", "原 failed/uncertain 记录永久保留", "若新命令仍不确定，将作为新的待处置项出现"]
-              : input.resolution === "dismiss-failed"
-                ? ["记录裁判决定不再执行该失败命令", "原 failed 记录永久保留", "不会发送任何新命令"]
-                : ["原 uncertain 记录永久保留", "只记录裁判现场核对结论", "不会发送任何新命令"],
-            irreversible: input.resolution === "resend"
-          }
-      : input.kind === "observation-gap-resolution"
-        ? {
-            title: "确认带缺口继续比赛",
-            consequences: ["记录裁判已核对该观察缺口，但不会补造未观察到的成绩或事件", "原缺口证据永久保留并标记已处置", "仍需单独点击恢复自动化；如当前尝试不可信，应改用重赛本关"],
+        };
+      }
+      switch (intent) {
+        case "start-ready-flow":
+          return {
+            title: `进入 ${displayStageName} 的 Ready+发令流程？`,
+            consequences: ["立即发布本关发令预告，并把第一条 Ready 安排在 1 分钟后。", "之后按计划自动发送 Ready、READY!、关闭 cheat 和 3/2/1/Go。"],
             irreversible: false
-          }
-      : input.kind === "restart-stage"
-        ? { title: "确认重赛本关", consequences: ["当前尝试将作废并立即退出有效榜单，但原始证据永久保留", "发送重赛通知并重新执行 Ready ×3、READY、关闭 cheat 和 3/2/1/Go", "只有新 Go 才创建新尝试"], irreversible: false }
-        : input.kind === "scoreboard-override"
-          ? {
-              title: "确认成绩修订",
-              consequences: [
-                "生成新的榜单版本",
-                ...(input.operation === "set-place" || input.operation === "set-dnf"
-                  ? [
-                      input.rankPolicy === "shift"
-                        ? `其他玩家将顺延重算，受影响 ${scorePreview?.affectedPlayers.length ?? 0} 名玩家`
-                        : "不会顺延其他玩家，按当前规则直接计分"
-                    ]
-                  : ["该成绩将改为 DNF，原始事件不覆盖"])
-              ],
-              irreversible: false,
-              ...(scorePreview === undefined ? {} : { affectedPlayers: scorePreview.affectedPlayers })
-            }
-          : input.kind === "high-risk" && target === competition.id
-            ? { title: "确认比赛级操作", consequences: ["将结束或删除目标比赛，具体结果以按钮所示操作为准", "删除操作会移除本地比赛数据"], irreversible: true }
-            : input.kind === "high-risk"
-              ? { title: "确认高风险操作", consequences: ["将影响目标玩家或比赛尝试", "真实命令结果不确定时不会自动重试"], irreversible: false }
-              : { title: "确认流程控制", consequences: ["立即按按钮说明修改当前流程计划", "状态版本变化后本确认自动失效"], irreversible: false };
+          };
+        case "ready":
+          return {
+            title: `发送一次 ${displayStageName} Ready？`,
+            consequences: ["只发送一次 Ready 命令。", "不会改变当前阶段、计划时间或自动流程进度。"],
+            irreversible: false
+          };
+        case "manual-go":
+          return {
+            title: `立即为 ${displayStageName} 手动发令？`,
+            consequences: ["立即发送 3、2、1 倒数。", "收到服务器 Go 回显后才会创建尝试并开始本关计时。"],
+            irreversible: false
+          };
+        case "end-stage":
+          return {
+            title: `提前结束 ${displayStageName}？`,
+            consequences: ["立即关闭本关成绩接收窗口。", "已记录的成绩和原始证据会保留，并按比赛流程进入下一步。"],
+            irreversible: false
+          };
+        case "restart-stage":
+          return {
+            title: `重赛 ${displayStageName}？`,
+            consequences: ["当前尝试和本次成绩将作废，但原始证据会保留。", "重新执行完整 Ready 和发令；收到新的 Go 后才创建新尝试。"],
+            irreversible: false
+          };
+        case "delay-ready":
+          return {
+            title: "把下一次 Ready 延后 1 分钟？",
+            consequences: ["现有 Ready 计划顺延 1 分钟，并发送新的发令时间公告。"],
+            irreversible: false
+          };
+        case "extend-stage-deadline":
+          return {
+            title: `把 ${displayStageName} 的时限延长 1 分钟？`,
+            consequences: ["本关成绩接收截止时间延后 1 分钟。"],
+            irreversible: false
+          };
+        case "reschedule":
+          return {
+            title: `把下一次 Ready 改到 ${formatConfirmationDateTime(input.plannedReadyAt)}？`,
+            consequences: ["更新 Ready 计划，并发送新的发令时间公告。"],
+            irreversible: false
+          };
+        case "reschedule-stage-deadline":
+          return {
+            title: `把 ${displayStageName} 的截止时间改到 ${formatConfirmationDateTime(input.deadlineAt)}？`,
+            consequences: ["到该时间后关闭本关成绩接收窗口。"],
+            irreversible: false
+          };
+        case "kick":
+          return {
+            title: `Kick 玩家 ${target}？`,
+            consequences: ["向比赛服务器发送 Kick 命令。", "如果结果不确定，不会自动重试，需要裁判单独处理。"],
+            irreversible: false
+          };
+        case "raw-command":
+          return {
+            title: "发送这条原始命令？",
+            consequences: [`将发送：${input.command?.trim() || "未填写命令"}`, "如果结果不确定，不会自动重试，需要裁判单独处理。"],
+            irreversible: false
+          };
+        case "finish":
+          return {
+            title: `结束比赛“${competition.name}”？`,
+            consequences: ["停止当前运行，比赛进入已结束状态。", "之后仍可修订成绩并生成归档。"],
+            irreversible: true
+          };
+        case "finish-and-archive":
+          return {
+            title: `结束比赛“${competition.name}”并生成归档？`,
+            consequences: ["先停止当前运行，再固定当前榜单版本生成归档。", "归档生成期间不会混入后续成绩变化。"],
+            irreversible: true
+          };
+        case "delete":
+          return {
+            title: `永久删除比赛“${competition.name}”？`,
+            consequences: ["删除比赛配置、运行状态、命令审计和工作数据。", "已生成的归档文件会保留，但比赛无法从控制台恢复。"],
+            irreversible: true
+          };
+        case "scoreboard-set-place":
+          return {
+            title: `把 ${displayPlayerName} 的 ${displayStageName} 成绩设为第 ${input.place ?? "？"} 名？`,
+            consequences: [
+              input.rankPolicy === "shift"
+                ? `其他玩家将顺延重算，共影响 ${scorePreview?.affectedPlayers.length ?? 0} 名玩家。`
+                : "其他玩家不会顺延，按当前名次直接计分。",
+              "将生成新的榜单版本，原始成绩不会被覆盖。"
+            ],
+            irreversible: false,
+            ...(scorePreview === undefined ? {} : { affectedPlayers: scorePreview.affectedPlayers })
+          };
+        case "scoreboard-set-dnf":
+          return {
+            title: `把 ${displayPlayerName} 的 ${displayStageName} 成绩设为 DNF？`,
+            consequences: [
+              input.rankPolicy === "shift"
+                ? `其他玩家将顺延重算，共影响 ${scorePreview?.affectedPlayers.length ?? 0} 名玩家。`
+                : "其他玩家不会顺延。",
+              "将生成新的榜单版本，原始成绩不会被覆盖。"
+            ],
+            irreversible: false,
+            ...(scorePreview === undefined ? {} : { affectedPlayers: scorePreview.affectedPlayers })
+          };
+      }
+      if (input.kind === "automation-command-resolution") {
+        return {
+          title: input.resolution === "resend" ? "重新发送这条流程命令？" : "确认这条流程命令已经执行？",
+          consequences: input.resolution === "resend"
+            ? ["创建一条新的命令记录并等待新回显。", "原待核实记录会保留；如果仍不确定，会再次要求裁判处理。"]
+            : ["只记录裁判已经现场核对，不会发送新命令。", "原待核实记录会保留。"],
+          irreversible: input.resolution === "resend"
+        };
+      }
+      if (input.kind === "command-resolution") {
+        return {
+          title: input.resolution === "resend" ? `重新发送命令“${unresolvedCommand?.command ?? target}”？`
+            : input.resolution === "dismiss-failed" ? `确认不再执行命令“${unresolvedCommand?.command ?? target}”？`
+              : `确认命令“${unresolvedCommand?.command ?? target}”已经执行？`,
+          consequences: input.resolution === "resend"
+            ? ["创建一条新的命令记录并等待新回显。", "原失败或待核实记录会保留。"]
+            : input.resolution === "dismiss-failed"
+              ? ["记录裁判决定不再执行，不会发送新命令。", "原失败记录会保留。"]
+              : ["只记录裁判已经现场核对，不会发送新命令。", "原待核实记录会保留。"],
+          irreversible: input.resolution === "resend"
+        };
+      }
+      if (input.kind === "observation-gap-resolution") {
+        return {
+          title: "确认带观察缺口继续比赛？",
+          consequences: ["记录裁判已核对该缺口，但不会补造未观察到的成绩或事件。", "自动化仍保持暂停；如果当前尝试不可信，应改用重赛本关。"],
+          irreversible: false
+        };
+      }
+      if (input.kind === "restart-stage") {
+        return { title: `重赛 ${displayStageName}？`, consequences: ["当前尝试和本次成绩将作废，但原始证据会保留。", "重新执行完整 Ready 和发令。"], irreversible: false };
+      }
+      return { title: "确认执行这个操作？", consequences: ["将按按钮说明执行当前操作。"], irreversible: false };
+    })();
     return {
       token,
       kind: input.kind,
@@ -932,8 +1109,16 @@ export class CompetitionService {
         existingVersions: () => this.snapshot(competitionId).scoreboardVersions,
         payload: () => this.getPayload(competitionId),
         permissions: this.scoreEditPermissionsFor(competitionId),
-        consumeConfirmation: (token, impactHash, target) => {
-          this.consumeConfirmation(competitionId, "scoreboard-override", token, impactHash, target);
+        consumeConfirmation: (token, impactHash, target, intent, confirmationInput) => {
+          this.consumeConfirmation(
+            competitionId,
+            "scoreboard-override",
+            token,
+            impactHash,
+            target,
+            intent,
+            confirmationInputBinding(intent, confirmationInput)
+          );
         },
         savePayload: (payload) => this.savePayload(competitionId, payload),
         setNextVersion: (nextVersion) => {
@@ -989,6 +1174,7 @@ export class CompetitionService {
     idempotencyKey: string;
     confirmationToken: string;
     impactHash: string;
+    confirmationIntent?: "finish" | "finish-and-archive";
   }): Promise<CompetitionRecord> {
     const key = `${competitionId}:finish:${input.idempotencyKey}`;
     const old = this.idempotency.get(key);
@@ -996,7 +1182,7 @@ export class CompetitionService {
     const current = this.get(competitionId);
     if (current.stateVersion !== input.expectedStateVersion) throw new ServiceError("STATE_CONFLICT", "状态版本已变化", 409, { latestStateVersion: current.stateVersion });
     this.assertActionAvailable(competitionId, "finish", this.runtimeAutomationSnapshot(competitionId));
-    this.consumeConfirmation(competitionId, "high-risk", input.confirmationToken, input.impactHash, competitionId);
+    this.consumeConfirmation(competitionId, "high-risk", input.confirmationToken, input.impactHash, competitionId, input.confirmationIntent ?? "finish");
     const runtime = this.workRuntimeManager.get(competitionId);
     runtime?.controller.pause();
     await this.workRuntimeManager.remove(competitionId);
@@ -1033,7 +1219,7 @@ export class CompetitionService {
     const current = this.get(competitionId);
     if (current.stateVersion !== input.expectedStateVersion) throw new ServiceError("STATE_CONFLICT", "状态版本已变化", 409, { latestStateVersion: current.stateVersion });
     this.assertActionAvailable(competitionId, "delete", this.runtimeAutomationSnapshot(competitionId));
-    this.consumeConfirmation(competitionId, "high-risk", input.confirmationToken, input.impactHash, competitionId);
+    this.consumeConfirmation(competitionId, "high-risk", input.confirmationToken, input.impactHash, competitionId, "delete");
     await this.workRuntimeManager.remove(competitionId);
     this.testRuntimeManager.removeCompetition(competitionId);
     this.withDatabase((database) => {
@@ -1466,30 +1652,48 @@ export class CompetitionService {
   private consumeActionConfirmation(competitionId: string, action: CompetitionAction): ConfirmationRecord | undefined {
     switch (action.type) {
       case "manual-go":
-        return this.consumeConfirmation(competitionId, "manual-go", action.confirmationToken, action.impactHash, competitionId);
+        return this.consumeConfirmation(competitionId, "manual-go", action.confirmationToken, action.impactHash, competitionId, "manual-go");
       case "start-ready-flow":
+      case "end-stage":
+        return this.consumeConfirmation(competitionId, "manual-action", action.confirmationToken, action.impactHash, competitionId, action.type);
       case "reschedule":
       case "reschedule-stage-deadline":
       case "delay-ready":
       case "extend-stage-deadline":
-      case "end-stage":
-        return this.consumeConfirmation(competitionId, "manual-action", action.confirmationToken, action.impactHash, competitionId);
+        return this.consumeConfirmation(
+          competitionId,
+          "manual-action",
+          action.confirmationToken,
+          action.impactHash,
+          competitionId,
+          action.type,
+          confirmationInputBinding(action.type, action)
+        );
       case "set-start-protection":
         return this.consumeConfirmation(
           competitionId,
           "manual-action",
           action.confirmationToken,
           action.impactHash,
-          `${competitionId}:start-protection:${this.runtimeAutomationSnapshot(competitionId)?.currentStageId ?? "unknown"}:${action.used}`
+          `${competitionId}:start-protection:${this.runtimeAutomationSnapshot(competitionId)?.currentStageId ?? "unknown"}:${action.used}`,
+          "set-start-protection"
         );
       case "restart-stage":
-        return this.consumeConfirmation(competitionId, "restart-stage", action.confirmationToken, action.impactHash, action.attemptId);
+        return this.consumeConfirmation(competitionId, "restart-stage", action.confirmationToken, action.impactHash, action.attemptId, "restart-stage");
       case "scoreboard-override":
-        return this.consumeConfirmation(competitionId, "scoreboard-override", action.confirmationToken, action.impactHash, `${action.playerId}:${action.stageId}`);
+        return this.consumeConfirmation(
+          competitionId,
+          "scoreboard-override",
+          action.confirmationToken,
+          action.impactHash,
+          `${action.playerId}:${action.stageId}`,
+          action.operation === "set-place" ? "scoreboard-set-place" : "scoreboard-set-dnf",
+          confirmationInputBinding(action.operation === "set-place" ? "scoreboard-set-place" : "scoreboard-set-dnf", action)
+        );
       case "kick":
-        return this.consumeConfirmation(competitionId, "high-risk", action.confirmationToken, action.impactHash, action.playerName);
+        return this.consumeConfirmation(competitionId, "high-risk", action.confirmationToken, action.impactHash, action.playerName, "kick");
       case "raw-command":
-        return this.consumeConfirmation(competitionId, "high-risk", action.confirmationToken, action.impactHash, competitionId);
+        return this.consumeConfirmation(competitionId, "high-risk", action.confirmationToken, action.impactHash, competitionId, "raw-command", confirmationInputBinding("raw-command", action));
       default:
         return undefined;
     }
@@ -1500,11 +1704,16 @@ export class CompetitionService {
     kind: ConfirmationSummary["kind"],
     token: string,
     impactHash: string,
-    target?: string
+    target?: string,
+    intent?: ConfirmationIntent,
+    boundInput?: string
   ): ConfirmationRecord {
     const record = this.confirmations.get(token);
     const competition = this.get(competitionId);
-    if (!record || record.competitionId !== competitionId || record.kind !== kind || record.impactHash !== impactHash || target !== undefined && record.target !== target) {
+    if (!record || record.competitionId !== competitionId || record.kind !== kind || record.impactHash !== impactHash
+      || target !== undefined && record.target !== target
+      || intent !== undefined && record.intent !== undefined && record.intent !== intent
+      || record.boundInput !== undefined && record.boundInput !== boundInput) {
       throw new ServiceError("CONFIRMATION_INVALID", "确认令牌与当前操作不匹配", 409);
     }
     if (Date.now() > record.expiresAtMs) {
@@ -1755,7 +1964,15 @@ export class CompetitionService {
     if (!relativeTarget || relativeTarget.startsWith("..") || isAbsolute(relativeTarget)) {
       throw new ServiceError("PATH_REJECTED", "比赛数据目录不在授权数据根目录内", 500);
     }
-    rmSync(target, { recursive: true, force: true });
+    if (!existsSync(target)) return;
+    const archiveDirectory = join(target, "archive");
+    if (!existsSync(archiveDirectory)) {
+      rmSync(target, { recursive: true, force: true });
+      return;
+    }
+    for (const entry of readdirSync(target)) {
+      if (entry !== "archive") rmSync(join(target, entry), { recursive: true, force: true });
+    }
   }
 
   private toCommandAction(competitionId: string, action: CompetitionAction): CommandAction {
