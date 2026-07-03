@@ -5,6 +5,7 @@ import { performance } from "node:perf_hooks";
 import {
   capabilitiesFor,
   createDefaultCompetitionConfig,
+  defaultFlowPolicy,
   minimumScoringPlaceFor,
   stageDisplayName,
   stageMapKind,
@@ -302,7 +303,7 @@ export class CompetitionService {
             automationEnabled: false,
             blockers: [
               ...preparedPersistedWorkAutomation.blockers.filter((blocker) => blocker.code !== "AUTOMATION_PAUSED"),
-              { code: "AUTOMATION_PAUSED" as const, severity: "critical" as const, autoRecoverable: false, suggestion: "服务已重启；请核对服务器现场和不确定命令后重新启动工作运行。" }
+              { code: "AUTOMATION_PAUSED" as const, severity: "critical" as const, autoRecoverable: false, suggestion: "服务已重启；请核对服务器现场和不确定命令后恢复比赛现场。" }
             ]
           }
       : undefined);
@@ -462,7 +463,7 @@ export class CompetitionService {
     }
     const runtime = this.workRuntimeManager.get(competitionId);
     this.assertActionAvailable(competitionId, "enable-automation", runtime?.controller.snapshot());
-    if (!runtime) throw new ServiceError("NOT_FOUND", "请先启动工作运行", 404);
+    if (!runtime) throw new ServiceError("NOT_FOUND", "请先建立比赛连接", 404);
     const runtimeSnapshot = runtime.controller.snapshot();
     const initialReadyInMs = input.readyInMs ?? this.getDraftConfig(competitionId).flow.intermissionMs;
     runtime.controller.enable(runtimeSnapshot.plannedReadyAtMs ?? performance.now() + initialReadyInMs);
@@ -494,7 +495,7 @@ export class CompetitionService {
         this.availableActionsFor(competitionId, snapshot), this.attentionItemsFor(competitionId, snapshot), stageDeadlineAt(snapshot, origin));
     }
     const runtime = this.workRuntimeManager.get(competitionId);
-    if (!runtime) throw new ServiceError("NOT_FOUND", "工作运行时尚未启动", 404);
+    if (!runtime) throw new ServiceError("NOT_FOUND", "比赛连接尚未建立", 404);
     this.assertActionAvailable(competitionId, "pause-automation", runtime.controller.snapshot());
     runtime.controller.pause();
     this.workRuntimeManager.saveSnapshot(runtime);
@@ -580,6 +581,21 @@ export class CompetitionService {
         throw new ServiceError("CONFIRMATION_UNAVAILABLE", error instanceof Error ? error.message : "当前关不能重赛", 409);
       }
     }
+    const startProtectionMatch = input.kind === "manual-action"
+      ? target.match(new RegExp(`^${competitionId.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}:start-protection:([^:]+):(true|false)$`))
+      : null;
+    if (startProtectionMatch) {
+      const stageId = startProtectionMatch[1];
+      const used = startProtectionMatch[2] === "true";
+      const currentUsed = runtimeSnapshot?.startProtectionUsedStageIds?.includes(runtimeSnapshot.currentStageId) ?? false;
+      const availability = this.availableActionsFor(competitionId, runtimeSnapshot).find((candidate) => candidate.action === "set-start-protection");
+      if (!runtimeSnapshot || stageId !== runtimeSnapshot.currentStageId || used === currentUsed) {
+        throw new ServiceError("CONFIRMATION_UNAVAILABLE", "起跑保护目标关或目标状态已经变化", 409);
+      }
+      if (!availability?.enabled) {
+        throw new ServiceError("CONFIRMATION_UNAVAILABLE", availability?.disabledReason ?? "当前不能修改起跑保护状态", 409);
+      }
+    }
     if (input.kind === "scoreboard-override" && input.stageId) {
       this.scoreboardService.assertEditAllowed(this.scoreEditPermissionsFor(competitionId), input.stageId);
     }
@@ -634,7 +650,15 @@ export class CompetitionService {
       expiresAtMs
     };
     this.confirmations.set(token, record);
-    const effect = input.kind === "manual-go"
+    const effect = startProtectionMatch
+      ? {
+          title: startProtectionMatch[2] === "true" ? "确认将起跑保护标记为已使用" : "确认将起跑保护重置为未使用",
+          consequences: startProtectionMatch[2] === "true"
+            ? [`目标关：${startProtectionMatch[1]}`, "本关后续敏感期掉线不再自动延时或作废尝试", "不改变 Ready 计划或当前尝试"]
+            : [`目标关：${startProtectionMatch[1]}`, "本关后续首次有效敏感期掉线可以再次触发起跑保护", "不改变 Ready 计划或当前尝试"],
+          irreversible: false
+        }
+      : input.kind === "manual-go"
       ? { title: "确认手动发令", consequences: ["将发送真实倒数命令", "只有 Go 回显后才创建尝试并启动关卡时限"], irreversible: false }
       : input.kind === "automation-command-resolution"
         ? {
@@ -764,7 +788,7 @@ export class CompetitionService {
         this.recordCommandView(competitionId, input.idempotencyKey, view);
       } else {
         const runtime = this.workRuntimeManager.get(competitionId);
-        if (!runtime) throw new ServiceError("NOT_FOUND", "请先恢复工作运行再执行重发", 404);
+        if (!runtime) throw new ServiceError("NOT_FOUND", "请先恢复比赛现场再执行重发", 404);
         view = commandView(await runtime.commands.enqueue(unresolved.action, `${input.idempotencyKey}:resend`));
       }
       const payload = this.getPayload(competitionId);
@@ -825,7 +849,7 @@ export class CompetitionService {
         this.recordCommandView(competitionId, input.idempotencyKey, view);
       } else {
         const runtime = this.workRuntimeManager.get(competitionId);
-        if (!runtime) throw new ServiceError("NOT_FOUND", "工作运行时尚未启动", 404);
+        if (!runtime) throw new ServiceError("NOT_FOUND", "比赛连接尚未建立", 404);
         const record = await runtime.commands.enqueue(this.refereeActionService.toAutomationCommand(unresolved), `${input.idempotencyKey}:resend`);
         const resolvedStatus = record.status === "acknowledged" ? "acknowledged"
           : record.status === "uncertain" || record.status === "timed_out" ? "uncertain" : "failed";
@@ -876,7 +900,7 @@ export class CompetitionService {
       this.recordCommandView(competitionId, input.idempotencyKey, view);
     } else {
       const runtime = this.workRuntimeManager.get(competitionId);
-      if (!runtime) throw new ServiceError("NOT_FOUND", "工作运行时尚未启动", 404);
+      if (!runtime) throw new ServiceError("NOT_FOUND", "比赛连接尚未建立", 404);
       const command = this.refereeActionService.toCommandAction(competitionId, input.action);
       view = commandView(await runtime.commands.enqueue(command, input.idempotencyKey));
     }
@@ -1284,6 +1308,7 @@ export class CompetitionService {
     return {
       ...config,
       refereeName: "ContestConsole",
+      flow: { ...defaultFlowPolicy(), ...(config.flow ?? {}), startProtectionEnabled: config.flow?.startProtectionEnabled !== false },
       playerAliases: config.playerAliases ?? [],
       stages: config.stages.map((stage) => migrateStageMap(stage))
     };
@@ -1313,7 +1338,8 @@ export class CompetitionService {
         minimumScoringPlace: minimumScoringPlaceFor(mapped.scoring.length > 0 ? mapped.scoring : scoring.points)
       };
     });
-    return { ...config, name, server: config.server.trim(), refereeName, contestType: scoring.contestType, scoring, stages };
+    const flow = { ...defaultFlowPolicy(), ...config.flow, startProtectionEnabled: config.flow.startProtectionEnabled !== false };
+    return { ...config, name, server: config.server.trim(), refereeName, contestType: scoring.contestType, scoring, flow, stages };
   }
 
   private completeCompetitionOnReview(competitionId: string, snapshot: AutomationSnapshot): void {
@@ -1426,7 +1452,7 @@ export class CompetitionService {
       return this.testRuntimeManager.getRuntime(competitionId, runId).automation;
     }
     const runtime = this.workRuntimeManager.get(competitionId);
-    if (!runtime) throw new ServiceError("NOT_FOUND", "工作运行时尚未启动", 404);
+    if (!runtime) throw new ServiceError("NOT_FOUND", "比赛连接尚未建立", 404);
     return runtime.controller;
   }
 
@@ -1448,6 +1474,14 @@ export class CompetitionService {
       case "extend-stage-deadline":
       case "end-stage":
         return this.consumeConfirmation(competitionId, "manual-action", action.confirmationToken, action.impactHash, competitionId);
+      case "set-start-protection":
+        return this.consumeConfirmation(
+          competitionId,
+          "manual-action",
+          action.confirmationToken,
+          action.impactHash,
+          `${competitionId}:start-protection:${this.runtimeAutomationSnapshot(competitionId)?.currentStageId ?? "unknown"}:${action.used}`
+        );
       case "restart-stage":
         return this.consumeConfirmation(competitionId, "restart-stage", action.confirmationToken, action.impactHash, action.attemptId);
       case "scoreboard-override":
@@ -1497,7 +1531,8 @@ export class CompetitionService {
     const hasUnconfirmedCommands = this.unconfirmedCommandsFor(competitionId, snapshot).length > 0;
     const hasOpenServerIncident = (snapshot?.incidents as readonly { type?: string; status?: string }[] | undefined)
       ?.some((incident) => incident.type === "server-disconnect" && incident.status === "open") ?? false;
-    const workConnectionRecoveryFailed = this.workRuntimeManager.get(competitionId)?.connectionRecoveryState === "failed";
+    const workConnectionRecoveryState = this.workRuntimeManager.get(competitionId)?.connectionRecoveryState;
+    const workConnectionRecoveryFailed = workConnectionRecoveryState === "failed";
     const openAttempt = snapshot?.attempts.findLast((attempt) => attempt.intakeOpen && !attempt.voided);
     const currentAttempt = snapshot?.attempts.findLast((attempt) => attempt.stageId === snapshot.currentStageId && !attempt.voided);
     const restartPhase = phase === "running" || phase === "tail-intake" || phase === "incident"
@@ -1511,6 +1546,8 @@ export class CompetitionService {
       ? this.workRuntimeManager.has(competitionId)
       : Boolean(this.getPayload(competitionId).activeRunId && snapshot);
     const hasPersistedWorkRuntime = competition.mode === "work" && Boolean(this.getPayload(competitionId).work?.started);
+    const startProtectionEnabled = (this.getPublishedConfig(competitionId) ?? this.getDraftConfig(competitionId)).flow.startProtectionEnabled !== false;
+    const startProtectionUsed = snapshot?.startProtectionUsedStageIds?.includes(snapshot.currentStageId) ?? false;
     const descriptor = (
       action: RefereeActionId,
       label: string,
@@ -1519,11 +1556,11 @@ export class CompetitionService {
       disabledReason: string
     ): ActionAvailability => ({ action, label, effect, enabled, ...(enabled ? {} : { disabledReason }) });
     return [
-      descriptor("start-work", hasPersistedWorkRuntime ? "恢复工作运行" : "启动工作运行", hasPersistedWorkRuntime ? "重启真实 MockClient，恢复持久化阶段、尝试、榜单和计划，并保持自动化暂停等待现场核对。" : "启动真实 MockClient，并立即开始在线名单对账。", competition.mode === "work" && competition.status === "published" && !hasRuntime,
-        competition.mode !== "work" ? "测试比赛不启动真实 MockClient" : competition.status !== "published" ? "请先发布比赛配置" : "工作运行已经启动"),
-      descriptor("restart-work", competition.mode === "work" ? "重启 MockClient" : "模拟恢复连接", "恢复服务器事件源；连接成功后保持原阶段暂停，等待裁判恢复自动化。",
+      descriptor("start-work", hasPersistedWorkRuntime ? "恢复比赛现场" : "连接比赛服务器", hasPersistedWorkRuntime ? "重新建立比赛连接，恢复持久化阶段、尝试、榜单和计划，并保持自动化暂停等待现场核对。" : "建立比赛服务器连接，并立即开始在线名单对账。", competition.mode === "work" && competition.status === "published" && !hasRuntime,
+        competition.mode !== "work" ? "测试比赛不连接真实服务器" : competition.status !== "published" ? "请先发布比赛配置" : "比赛连接已经启动"),
+      descriptor("restart-work", competition.mode === "work" ? "重新连接比赛服务器" : "模拟恢复连接", "恢复服务器事件源；连接成功后保持原阶段暂停，等待裁判恢复自动化。",
         refereeActionsUnlocked && hasRuntime && hasOpenServerIncident && (competition.mode === "test" || workConnectionRecoveryFailed),
-        !refereeActionsUnlocked ? "请先发布比赛配置" : !hasRuntime ? "请先启动运行" : competition.mode === "work" && hasOpenServerIncident && !workConnectionRecoveryFailed ? "正在自动尝试恢复连接" : "当前没有待恢复的服务器连接阻断"),
+        !refereeActionsUnlocked ? "请先发布比赛配置" : !hasRuntime ? "请先建立比赛连接或创建测试运行" : competition.mode === "work" && workConnectionRecoveryState === "manual" ? "正在重新连接比赛服务器" : competition.mode === "work" && hasOpenServerIncident && !workConnectionRecoveryFailed ? "正在自动尝试恢复连接" : "当前没有待恢复的服务器连接阻断"),
       descriptor(
         "enable-automation",
         phase === "paused" || snapshot?.pausedFromPhase ? "恢复自动化" : "启动自动化",
@@ -1531,21 +1568,21 @@ export class CompetitionService {
           ? "从暂停前阶段继续；未确认命令必须先由裁判核对，且不会自动重发。"
           : "按轮间准备时长规划首轮 Ready，并由状态机推进后续流程。",
         refereeActionsUnlocked && hasRuntime && !snapshot?.automationEnabled && !["review", "incident"].includes(phase) && !hasUnconfirmedAutomationActions && !hasUnconfirmedCommands && !hasObservationGaps && !hasResumeBlockingIssue,
-        !refereeActionsUnlocked ? "请先发布比赛配置" : !hasRuntime ? "请先启动运行" : snapshot?.automationEnabled ? "自动化已经启用" : phase === "incident" ? "请先恢复 MockClient/服务器连接" : hasUnconfirmedAutomationActions ? "请先逐条确认流程命令已执行或执行重发" : hasUnconfirmedCommands ? "请先逐条处置失败或结果不确定的真实命令" : hasObservationGaps ? "请先逐条核对服务中断期间的观察缺口" : hasResumeBlockingIssue ? "请先按红色阻断项完成复检或处置" : "比赛已进入复核"
+        !refereeActionsUnlocked ? "请先发布比赛配置" : !hasRuntime ? "请先建立比赛连接或创建测试运行" : snapshot?.automationEnabled ? "自动化已经启用" : phase === "incident" ? "请先恢复比赛服务器连接" : hasUnconfirmedAutomationActions ? "请先逐条确认流程命令已执行或执行重发" : hasUnconfirmedCommands ? "请先逐条处置失败或结果不确定的真实命令" : hasObservationGaps ? "请先逐条核对服务中断期间的观察缺口" : hasResumeBlockingIssue ? "请先按红色阻断项完成复检或处置" : "比赛已进入复核"
       ),
       descriptor("pause-automation", "暂停自动化", "停止自动推进；已经发出的真实命令不会自动撤回。", refereeActionsUnlocked && Boolean(snapshot?.automationEnabled),
         !refereeActionsUnlocked ? "请先发布比赛配置" : "自动化当前未启用"),
       descriptor("start-ready-flow", "进入 Ready+发令流程", "立即发布本关预告，把目标关第一条 Ready 设为 1 分钟后，并自动完成 Ready、READY!、关闭 cheat 和发令。",
         refereeActionsUnlocked && hasRuntime && ["lobby", "preparing", "paused", "restart-preparing", "tail-intake"].includes(phase) && !hasReadyFlowBlockingIssue,
-        !refereeActionsUnlocked ? "请先发布比赛配置" : !hasRuntime ? "请先启动运行" : !["lobby", "preparing", "paused", "restart-preparing", "tail-intake"].includes(phase) ? `当前阶段 ${phase} 不能进入发令流程` : "存在权限、事故或不确定命令"),
+        !refereeActionsUnlocked ? "请先发布比赛配置" : !hasRuntime ? "请先建立比赛连接或创建测试运行" : !["lobby", "preparing", "paused", "restart-preparing", "tail-intake"].includes(phase) ? `当前阶段 ${phase} 不能进入发令流程` : "存在权限、事故或不确定命令"),
       descriptor("ready", "手动 Ready", "只向计划目标关发送一次 Ready；不改变阶段、计划时间、Bulletin 或自动流程进度。",
         refereeActionsUnlocked && hasRuntime && !["countdown", "running", "review", "incident"].includes(phase) && !hasReadyFlowBlockingIssue,
-        !refereeActionsUnlocked ? "请先发布比赛配置" : !hasRuntime ? "请先启动运行" : "当前阶段或流程阻断不允许发送手动 Ready"),
+        !refereeActionsUnlocked ? "请先发布比赛配置" : !hasRuntime ? "请先建立比赛连接或创建测试运行" : "当前阶段或流程阻断不允许发送手动 Ready"),
       descriptor("cheat-off", "关闭 cheat", "只发送一次关闭 cheat 命令；成功回显将作为目标关手动发令的前置证据，不改变计划。", refereeActionsUnlocked && hasRuntime && !["review", "incident"].includes(phase) && !hasUnconfirmedAutomationActions,
-        !refereeActionsUnlocked ? "请先发布比赛配置" : !hasRuntime ? "请先启动运行" : "当前阶段不可发送"),
+        !refereeActionsUnlocked ? "请先发布比赛配置" : !hasRuntime ? "请先建立比赛连接或创建测试运行" : "当前阶段不可发送"),
       descriptor("manual-go", "手动发令", "不等待计划时间并立即触发仅作用于相同地图玩家的真实 3/2/1；只有权威 Go 回显后才创建尝试和设置本关时间。",
         refereeActionsUnlocked && hasRuntime && !["countdown", "running", "review", "incident"].includes(phase) && cheatOffConfirmed && !hasPendingCommands && !hasBlockingIssue,
-        !refereeActionsUnlocked ? "请先发布比赛配置" : !hasRuntime ? "请先启动运行" : !cheatOffConfirmed ? "目标关尚无关闭 cheat 成功回显" : hasPendingCommands ? "仍有命令等待回显" : "存在权限、连接或未决命令阻断"),
+        !refereeActionsUnlocked ? "请先发布比赛配置" : !hasRuntime ? "请先建立比赛连接或创建测试运行" : !cheatOffConfirmed ? "目标关尚无关闭 cheat 成功回显" : hasPendingCommands ? "仍有命令等待回显" : "存在权限、连接或未决命令阻断"),
       descriptor("delay-ready", "Ready 延后 1 分钟", "将下一次已安排的 Ready 时间顺延 1 分钟。", refereeActionsUnlocked && snapshot?.plannedReadyAtMs !== undefined && ["preparing", "pre-start-wait", "tail-intake", "restart-preparing"].includes(phase),
         !refereeActionsUnlocked ? "请先发布比赛配置" : "当前没有可延后的 Ready 计划"),
       descriptor("reschedule", "Ready 改期", "把下一次 Ready 改到指定时间，不改变本关时限。", refereeActionsUnlocked && snapshot?.plannedReadyAtMs !== undefined && ["preparing", "pre-start-wait", "tail-intake", "restart-preparing"].includes(phase),
@@ -1558,10 +1595,14 @@ export class CompetitionService {
         !refereeActionsUnlocked ? "请先发布比赛配置" : "当前没有可结束的开放关卡"),
       descriptor("restart-stage", "重赛本关", "作废当前尝试并退出有效榜单，保留证据、发送通知并重新执行完整 Ready 与倒数。", competition.status === "published" && Boolean(currentAttempt) && restartPhase,
         competition.status !== "published" ? "比赛已结束，不能再重赛" : !currentAttempt ? "本关尚未 Go，不能重赛" : "下一关已进入 Ready 或当前阶段不能重赛"),
+      descriptor("set-start-protection", startProtectionUsed ? "将起跑保护重置为未使用" : "将起跑保护标记为已使用",
+        startProtectionUsed ? "允许本关后续首次有效敏感期掉线再次触发起跑保护。" : "本关后续敏感期掉线不再自动延时或作废尝试。",
+        refereeActionsUnlocked && hasRuntime && startProtectionEnabled && Boolean(snapshot?.currentStageId) && phase !== "review",
+        !startProtectionEnabled ? "比赛配置未启用起跑保护" : !refereeActionsUnlocked ? "请先发布比赛配置" : !hasRuntime ? "请先建立比赛连接或创建测试运行" : "比赛已进入复核"),
       descriptor("kick", "Kick 玩家", "从服务器移除目标玩家；结果不确定时不会自动重试。", refereeActionsUnlocked && competition.mode === "work" && hasRuntime,
-        !refereeActionsUnlocked ? "请先发布比赛配置" : competition.mode !== "work" ? "测试模式不发送真实 Kick" : "请先启动工作运行"),
+        !refereeActionsUnlocked ? "请先发布比赛配置" : competition.mode !== "work" ? "测试模式不发送真实 Kick" : "请先建立比赛连接"),
       descriptor("raw-command", "发送原始命令", "原样发送一条 MockClient 命令；结果不确定时不会自动重试。", refereeActionsUnlocked && competition.mode === "work" && hasRuntime,
-        !refereeActionsUnlocked ? "请先发布比赛配置" : competition.mode !== "work" ? "测试模式不发送真实命令" : "请先启动工作运行"),
+        !refereeActionsUnlocked ? "请先发布比赛配置" : competition.mode !== "work" ? "测试模式不发送真实命令" : "请先建立比赛连接"),
       descriptor("finish", "结束比赛", "停止运行并固定比赛为已结束状态，之后可归档。", refereeActionsUnlocked && !["finished", "archived"].includes(competition.status),
         !refereeActionsUnlocked ? "请先发布比赛配置" : "比赛已经结束"),
       descriptor("archive", "生成归档", "基于明确榜单版本生成不可变归档。", ["finished", "archived"].includes(competition.status), "请先结束比赛"),
@@ -1586,7 +1627,7 @@ export class CompetitionService {
   private actionIdFor(action: CompetitionAction): RefereeActionId | undefined {
     switch (action.type) {
       case "restart-work": case "start-ready-flow": case "ready": case "cheat-off": case "manual-go": case "reschedule": case "reschedule-stage-deadline": case "delay-ready":
-      case "extend-stage-deadline": case "end-stage": case "restart-stage": case "kick": case "raw-command":
+      case "extend-stage-deadline": case "end-stage": case "restart-stage": case "set-start-protection": case "kick": case "raw-command":
         return action.type;
       default: return undefined;
     }

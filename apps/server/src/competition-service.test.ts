@@ -604,7 +604,8 @@ describe("CompetitionService dynamic participants", () => {
     const record = service.create({ name: "Legacy maps", mode: "test", idempotencyKey: "legacy-maps" });
     service.publish(record.id, 0, "publish-legacy-maps");
     const stored = database.sqlite.prepare("SELECT payload FROM config_versions WHERE competition_id=? AND immutable=1").get(record.id) as { payload: string };
-    const legacy = JSON.parse(stored.payload) as { stages: Array<{ mapKind?: string; label: string }> };
+    const legacy = JSON.parse(stored.payload) as { flow: { startProtectionEnabled?: boolean }; stages: Array<{ mapKind?: string; label: string }> };
+    delete legacy.flow.startProtectionEnabled;
     for (const [index, stage] of legacy.stages.entries()) {
       delete stage.mapKind;
       stage.label = `SR ${index + 1}`;
@@ -613,8 +614,97 @@ describe("CompetitionService dynamic participants", () => {
     database.sqlite.prepare("UPDATE config_versions SET payload=? WHERE competition_id=? AND immutable=1").run(immutablePayload, record.id);
 
     expect(service.snapshot(record.id).publishedConfig?.stages[0]).toMatchObject({ mapKind: "official", label: "SR1", level: 1 });
+    expect(service.snapshot(record.id).publishedConfig?.flow.startProtectionEnabled).toBe(true);
     const afterRead = database.sqlite.prepare("SELECT payload FROM config_versions WHERE competition_id=? AND immutable=1").get(record.id) as { payload: string };
     expect(afterRead.payload).toBe(immutablePayload);
+  });
+
+  it("persists the configured and manually toggled start-protection state", async () => {
+    dataRoot = mkdtempSync(join(tmpdir(), "ballance-start-protection-toggle-"));
+    database = openDatabase(join(dataRoot, "console.sqlite"));
+    let service = new CompetitionService(undefined, { database, dataRoot });
+    const record = service.create({ name: "Protection toggle", mode: "test", idempotencyKey: "protection-toggle" });
+    service.publish(record.id, 0, "publish-protection-toggle");
+    service.createTestRunFromScenario(record.id, "normal-player-roster");
+
+    let snapshot = service.snapshot(record.id);
+    expect(snapshot.runtime).toMatchObject({ startProtectionEnabled: true, startProtectionUsed: false });
+    let confirmation = service.createConfirmation(record.id, { kind: "manual-action", target: `${record.id}:start-protection:sr-1:true` });
+    expect(confirmation.effect).toMatchObject({
+      title: "确认将起跑保护标记为已使用",
+      consequences: expect.arrayContaining(["目标关：sr-1"])
+    });
+    await service.performAction(record.id, {
+      expectedStateVersion: snapshot.competition.stateVersion,
+      idempotencyKey: "mark-protection-used",
+      action: { type: "set-start-protection", used: true, confirmationToken: confirmation.token, impactHash: confirmation.impactHash }
+    });
+    expect(service.snapshot(record.id).runtime.startProtectionUsed).toBe(true);
+    service.close();
+
+    service = new CompetitionService(undefined, { database, dataRoot });
+    snapshot = service.snapshot(record.id);
+    expect(snapshot.runtime.startProtectionUsed).toBe(true);
+    confirmation = service.createConfirmation(record.id, { kind: "manual-action", target: `${record.id}:start-protection:sr-1:false` });
+    await service.performAction(record.id, {
+      expectedStateVersion: snapshot.competition.stateVersion,
+      idempotencyKey: "reset-protection-unused",
+      action: { type: "set-start-protection", used: false, confirmationToken: confirmation.token, impactHash: confirmation.impactHash }
+    });
+    expect(service.snapshot(record.id).runtime.startProtectionUsed).toBe(false);
+    service.close();
+  });
+
+  it("binds start-protection confirmations to the current stage and persists work-mode changes immediately", async () => {
+    dataRoot = mkdtempSync(join(tmpdir(), "ballance-work-start-protection-toggle-"));
+    database = openDatabase(join(dataRoot, "console.sqlite"));
+    const service = new CompetitionService(undefined, { database, dataRoot });
+    const record = service.create({ name: "Work protection toggle", mode: "work", idempotencyKey: "work-protection-toggle" });
+    service.publish(record.id, 0, "publish-work-protection-toggle");
+    const manager = workRuntimeManager(service);
+    const config = service.snapshot(record.id).publishedConfig as CompetitionConfig;
+    const runtime = manager.makeRuntime(record.id, config, { write: async () => undefined });
+    manager.register(record.id, runtime);
+
+    expect(() => service.createConfirmation(record.id, {
+      kind: "manual-action",
+      target: `${record.id}:start-protection:sr-2:true`
+    })).toThrowError(/目标关或目标状态已经变化/);
+
+    const snapshot = service.snapshot(record.id);
+    const confirmation = service.createConfirmation(record.id, {
+      kind: "manual-action",
+      target: `${record.id}:start-protection:sr-1:true`
+    });
+    await service.performAction(record.id, {
+      expectedStateVersion: snapshot.competition.stateVersion,
+      idempotencyKey: "mark-work-protection-used",
+      action: { type: "set-start-protection", used: true, confirmationToken: confirmation.token, impactHash: confirmation.impactHash }
+    });
+
+    const restoredRuntime = manager.makeRuntime(record.id, config, { write: async () => undefined });
+    expect(restoredRuntime.controller.snapshot().startProtectionUsedStageIds).toEqual(["sr-1"]);
+    service.close();
+  });
+
+  it("disables manual start-protection control when the published config opts out", () => {
+    dataRoot = mkdtempSync(join(tmpdir(), "ballance-no-start-protection-"));
+    database = openDatabase(join(dataRoot, "console.sqlite"));
+    const service = new CompetitionService(undefined, { database, dataRoot });
+    const record = service.create({ name: "No protection", mode: "test", idempotencyKey: "no-protection" });
+    const config = service.snapshot(record.id).config;
+    service.updateDraft(record.id, { expectedStateVersion: 0, idempotencyKey: "disable-protection", flow: { ...config.flow, startProtectionEnabled: false } });
+    service.publish(record.id, 1, "publish-no-protection");
+    service.createTestRunFromScenario(record.id, "normal-player-roster");
+    expect(service.snapshot(record.id).runtime.availableActions.find((action) => action.action === "set-start-protection")).toMatchObject({
+      enabled: false,
+      disabledReason: "比赛配置未启用起跑保护"
+    });
+    expect(() => service.createConfirmation(record.id, {
+      kind: "manual-action",
+      target: `${record.id}:start-protection:sr-1:true`
+    })).toThrowError(/比赛配置未启用起跑保护/);
+    service.close();
   });
 
   it("records timeout DNF in results without inventing MockClient DNF lines", () => {
@@ -964,7 +1054,7 @@ describe("CompetitionService dynamic participants", () => {
     const manager = workRuntimeManager(service);
     manager.register(first.id, { server: "same.server" } as WorkRuntime);
 
-    expect(() => service.startWorkMode(second.id)).toThrowError(/已有工作运行/);
+    expect(() => service.startWorkMode(second.id)).toThrowError(/已有比赛连接/);
     expect(() => manager.assertServerLeaseAvailable(third.id, "other.server")).not.toThrow();
   });
 });

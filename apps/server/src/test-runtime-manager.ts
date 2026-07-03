@@ -187,6 +187,15 @@ export class TestRuntimeManager {
     return this.snapshot(competitionId, runId);
   }
 
+  public setStartProtectionUsed(competitionId: string, used: boolean): void {
+    const runId = this.host.getPayload(competitionId).activeRunId;
+    if (!runId) throw new ServiceError("NOT_FOUND", "请先创建测试运行", 404);
+    const runtime = this.getRuntime(competitionId, runId);
+    runtime.automation.setStartProtectionUsed(used);
+    runtime.operations.push({ kind: "start-protection", used });
+    this.persistRuntime(runtime);
+  }
+
   public reset(competitionId: string, runId: string): EngineSnapshot {
     this.stopRealtime(runId);
     const runtime = this.getRuntime(competitionId, runId);
@@ -407,6 +416,8 @@ export class TestRuntimeManager {
           ...(operation.playerId === undefined ? {} : { playerId: operation.playerId }),
           ...(operation.milliseconds === undefined ? {} : { milliseconds: operation.milliseconds })
         });
+      } else if (operation.kind === "start-protection") {
+        runtime.automation.setStartProtectionUsed(operation.used ?? false);
       }
       this.settleAutomation(runtime);
     }

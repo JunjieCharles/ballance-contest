@@ -34,8 +34,8 @@ const createCompetition = async (page: Page, name: string, mode: "work" | "test"
   await expect(page.getByRole("button", { name: "发布比赛" })).toBeEnabled();
 };
 
-const accelerateActiveTestRun = async (page: Page, competitionName: string, milliseconds = 9_000_000): Promise<void> => {
-  await page.evaluate(async ({ name, duration }) => {
+const accelerateActiveTestRun = async (page: Page, competitionName: string, milliseconds = 9_000_000): Promise<string> =>
+  page.evaluate(async ({ name, duration }) => {
     const stored = sessionStorage.getItem("ballance-console-session");
     if (!stored) throw new Error("missing local session");
     const session = JSON.parse(stored) as { token: string };
@@ -50,8 +50,9 @@ const accelerateActiveTestRun = async (page: Page, competitionName: string, mill
       method: "POST", headers, body: JSON.stringify({ milliseconds: duration })
     });
     if (!response.ok) throw new Error(`advance failed ${response.status}`);
+    const advanced = await response.json() as { data: { phase: string } };
+    return advanced.data.phase;
   }, { name: competitionName, duration: milliseconds });
-};
 
 test("opens the authenticated local console without external requests", async ({ page }) => {
   const externalRequests: string[] = [];
@@ -74,6 +75,12 @@ test("edits per-stage scoring and replaces the stage draft through inline confir
   const name = `E2E 单关配置 ${testInfo.project.name}`;
   await createCompetition(page, name, "test");
   await expect(page.getByText("配置完整，可以发布。")).toBeVisible();
+  const protectionToggle = page.getByLabel("启用起跑保护");
+  await expect(protectionToggle).toBeChecked();
+  await protectionToggle.uncheck();
+  await expect(page.getByText("未启用", { exact: true })).toBeVisible();
+  await protectionToggle.check();
+  await expect(page.getByText("已启用（默认）", { exact: true })).toBeVisible();
   await page.getByRole("button", { name: "大型赛事预设" }).click();
   const scoringPresetConfirmation = page.locator(".grid.two .panel .inline-confirm").filter({ hasText: "用大型赛事预设覆盖当前计分" });
   await expect(scoringPresetConfirmation).toBeVisible();
@@ -143,6 +150,11 @@ test("hides test controls in work mode and keeps official-stage actions clear of
   await createCompetition(page, `E2E 工作布局 ${testInfo.project.name}`, "work");
   await expect(page.getByRole("button", { name: "测试", exact: true })).toHaveCount(0);
   await expect(page.getByText("工作模式不提供测试运行控制。")).toHaveCount(0);
+  await page.getByRole("button", { name: "控制台", exact: true }).click();
+  await expect(page.getByRole("button", { name: "连接比赛服务器" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "连接比赛服务器" })).toBeDisabled();
+  await expect(page.getByRole("button", { name: /恢复工作运行|重启 MockClient/ })).toHaveCount(0);
+  await page.getByRole("button", { name: "比赛配置", exact: true }).click();
 
   const official = page.locator(".stage-editor.official-stage").first();
   const scoringBox = await official.getByLabel("单关计分").boundingBox();
@@ -198,8 +210,8 @@ test("runs the 20-player sandbox from the console and edits a score without losi
   await page.getByRole("button", { name: "控制台", exact: true }).click();
   await page.getByRole("button", { name: "启动自动化" }).click();
   await expect(page.getByText("阶段", { exact: true }).locator("..")).toContainText("准备检查");
-  await accelerateActiveTestRun(page, name);
-  await expect(page.getByText("阶段", { exact: true }).locator("..")).toContainText("比赛复核");
+  expect(await accelerateActiveTestRun(page, name)).toBe("review");
+  await expect(page.getByText("阶段", { exact: true }).locator("..")).toContainText("比赛复核", { timeout: 15_000 });
   await expect(page.locator(".attention-card").first()).toBeVisible();
   await expect(page.locator(".attention-card small")).toHaveCount(0);
   expect(await page.locator(".attention-card p").filter({ hasText: "玩家" }).count()).toBeGreaterThan(0);
@@ -379,6 +391,8 @@ test("shows disabled reasons, shared scheduling controls and automatic review co
   await createCompetition(page, name, "test");
   await page.getByRole("button", { name: "控制台", exact: true }).click();
   await expect(page.getByRole("button", { name: "启动自动化" })).toBeDisabled();
+  await expect(page.getByRole("button", { name: "重赛本关" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "重赛本关" })).toBeDisabled();
   await page.getByRole("button", { name: "比赛配置", exact: true }).click();
   await page.getByRole("button", { name: "发布比赛" }).click();
   await expect(page.locator(".competition-list button.selected")).toContainText("published");
@@ -398,8 +412,19 @@ test("shows disabled reasons, shared scheduling controls and automatic review co
   await expect(page.getByRole("button", { name: "关闭 cheat" })).toBeEnabled();
   await expect(page.getByRole("button", { name: "手动发令" })).toBeDisabled();
   await expect(page.getByText("目标关尚无关闭 cheat 成功回显")).toBeVisible();
+  const protectionAction = page.locator(".confirm-action").filter({ hasText: "将起跑保护标记为已使用" });
+  await expect(protectionAction.getByRole("button", { name: "将起跑保护标记为已使用" })).toBeEnabled();
+  await protectionAction.getByRole("button", { name: "将起跑保护标记为已使用" }).click();
+  await expect(protectionAction.getByText("确认将起跑保护标记为已使用", { exact: true })).toBeVisible();
+  await expect(protectionAction.getByText("目标关：sr-1", { exact: true })).toBeVisible();
+  await expect(protectionAction.getByText("本关后续敏感期掉线不再自动延时或作废尝试", { exact: true })).toBeVisible();
+  await protectionAction.getByRole("button", { name: "确认" }).click();
+  await expect(page.getByRole("button", { name: "将起跑保护重置为未使用" })).toBeVisible();
+  await expect(page.getByText("下一关 Ready（UTC+8）").locator("..")).toContainText("未设置");
 
   await page.getByRole("button", { name: "启动自动化" }).click();
+  await expect(page.getByText("本关 Ready（UTC+8）").locator("..")).not.toContainText("未设置");
+  await expect(page.getByText("下一关 Ready（UTC+8）").locator("..")).toContainText("未设置");
   await accelerateActiveTestRun(page, name);
   await expect(page.getByText("阶段", { exact: true }).locator("..")).toContainText("比赛复核");
   await page.getByRole("button", { name: "归档", exact: true }).click();

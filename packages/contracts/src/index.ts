@@ -212,6 +212,7 @@ export interface FlowPolicy {
   delayLimitMs: number;
   reconnectStableMs: number;
   readyBufferMs: number;
+  startProtectionEnabled: boolean;
   protectionWindowMs: number;
   intermissionMs: number;
   groupDisconnectThreshold: number;
@@ -314,6 +315,10 @@ export interface RuntimeSnapshot {
   plannedReadyAtMs?: number;
   plannedReadyStageId?: string;
   plannedReadyAt?: string;
+  currentStageReadyAt?: string;
+  nextStageReadyAt?: string;
+  startProtectionEnabled: boolean;
+  startProtectionUsed: boolean;
   plannedStageStartAt?: string;
   stageDeadlineAt?: string;
   countdownValue?: 3 | 2 | 1;
@@ -354,7 +359,7 @@ export interface RuntimeSnapshot {
 
 export type RefereeActionId =
   | "start-work" | "restart-work" | "enable-automation" | "pause-automation" | "start-ready-flow" | "ready" | "cheat-off" | "manual-go"
-  | "delay-ready" | "extend-stage-deadline" | "reschedule" | "reschedule-stage-deadline" | "end-stage" | "restart-stage"
+  | "delay-ready" | "extend-stage-deadline" | "reschedule" | "reschedule-stage-deadline" | "end-stage" | "restart-stage" | "set-start-protection"
   | "kick" | "raw-command" | "finish" | "archive" | "delete";
 
 export interface ActionAvailability {
@@ -505,6 +510,7 @@ export type CompetitionAction =
   | { type: "extend-stage-deadline"; milliseconds: number; confirmationToken: string; impactHash: string }
   | { type: "end-stage"; confirmationToken: string; impactHash: string }
   | { type: "restart-stage"; attemptId: string; confirmationToken: string; impactHash: string }
+  | { type: "set-start-protection"; used: boolean; confirmationToken: string; impactHash: string }
   | { type: "participant-associate"; participantId: string; connectionId: string }
   | { type: "participant-split"; connectionId: string }
   | { type: "participant-edit"; participantId: string; displayName?: string; notes?: string }
@@ -547,6 +553,7 @@ export const defaultFlowPolicy = (): FlowPolicy => ({
   delayLimitMs: 5 * 60_000,
   reconnectStableMs: 15_000,
   readyBufferMs: 30_000,
+  startProtectionEnabled: true,
   protectionWindowMs: 15_000,
   intermissionMs: 3 * 60_000,
   groupDisconnectThreshold: 2

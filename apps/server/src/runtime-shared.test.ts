@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { AutomationSnapshot } from "@ballance/core";
-import { plannedStageStartAt, stageDeadlineAt } from "./runtime-shared.js";
+import { currentStageReadyAt, nextStageReadyAt, plannedStageStartAt, stageDeadlineAt } from "./runtime-shared.js";
 
 describe("runtime schedule views", () => {
   it("uses authoritative Go for the stage start and preserves the deadline after early intake closure", () => {
@@ -42,6 +42,45 @@ describe("runtime schedule views", () => {
 
     expect(plannedStageStartAt(snapshot, 1_000)).toBe(new Date(11_000).toISOString());
     expect(stageDeadlineAt(snapshot, 1_000)).toBe(new Date(71_000).toISOString());
+    expect(currentStageReadyAt(snapshot, 1_000)).toBeUndefined();
+    expect(nextStageReadyAt(snapshot, 1_000)).toBe(new Date(51_000).toISOString());
+  });
+
+  it("shows the current first Ready separately from a genuinely next-stage Ready", () => {
+    const base: AutomationSnapshot = {
+      phase: "preparing", stateVersion: 1, automationEnabled: true, currentStageId: "s1", plannedReadyAtMs: 60_000, plannedReadyStageId: "s1",
+      blockers: [], waitingParticipants: [], attempts: [], incidents: [], rejectedResults: [], actions: []
+    };
+    expect(currentStageReadyAt(base, 1_000)).toBe(new Date(61_000).toISOString());
+    expect(nextStageReadyAt(base, 1_000)).toBeUndefined();
+
+    const running: AutomationSnapshot = {
+      ...base,
+      phase: "tail-intake",
+      plannedReadyAtMs: 180_000,
+      plannedReadyStageId: "s2",
+      attempts: [{ id: "a1", stageId: "s1", attemptNumber: 1, goAtMs: 40_000, deadlineAtMs: 640_000, intakeOpen: true, voided: false, results: [] }],
+      actions: [{ id: "r1", kind: "ready", idempotencyKey: "r1", createdAtMs: 10_000, stageId: "s1", map: "level 1", mode: "sr", status: "acknowledged" }]
+    };
+    expect(currentStageReadyAt(running, 1_000)).toBe(new Date(11_000).toISOString());
+    expect(nextStageReadyAt(running, 1_000)).toBe(new Date(181_000).toISOString());
+
+    const runningWithoutPlan: Partial<AutomationSnapshot> = { ...running };
+    delete runningWithoutPlan.plannedReadyAtMs;
+    delete runningWithoutPlan.plannedReadyStageId;
+    const restarted = {
+      ...runningWithoutPlan,
+      phase: "running",
+      attempts: [
+        { id: "a1", stageId: "s1", attemptNumber: 1, goAtMs: 40_000, deadlineAtMs: 640_000, intakeOpen: false, voided: true, results: [] },
+        { id: "a2", stageId: "s1", attemptNumber: 2, goAtMs: 100_000, deadlineAtMs: 700_000, intakeOpen: true, voided: false, results: [] }
+      ],
+      actions: [
+        ...running.actions,
+        { id: "r2", kind: "ready", idempotencyKey: "r2", createdAtMs: 70_000, stageId: "s1", map: "level 1", mode: "sr", status: "acknowledged" }
+      ]
+    } as AutomationSnapshot;
+    expect(currentStageReadyAt(restarted, 1_000)).toBe(new Date(71_000).toISOString());
   });
 
   it("moves the displayed planned Go after delayed acknowledgements", () => {

@@ -2,11 +2,12 @@ import type { ScoreboardVersionView, ScenarioDefinition } from "@ballance/contra
 import type { AutomationAction, AutomationSnapshot, EngineSnapshot } from "@ballance/core";
 
 export interface PersistedTestOperation {
-  kind: "automation-start" | "advance-clock" | "fault";
+  kind: "automation-start" | "advance-clock" | "fault" | "start-protection";
   readyInMs?: number;
   milliseconds?: number;
   fault?: string;
   playerId?: string;
+  used?: boolean;
 }
 
 export interface PendingTestCountdown {

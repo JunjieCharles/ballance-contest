@@ -83,6 +83,28 @@ export class RefereeActionService {
         }
         break;
       }
+      case "set-start-protection": {
+        const snapshot = controller().snapshot();
+        if (competition.mode === "test") this.host.testRuntimeManager.setStartProtectionUsed(competitionId, action.used);
+        else {
+          const runtime = this.host.workRuntimeManager.get(competitionId);
+          if (!runtime) throw new ServiceError("NOT_FOUND", "比赛连接尚未建立", 404);
+          runtime.controller.setStartProtectionUsed(action.used);
+          this.host.workRuntimeManager.saveSnapshot(runtime);
+        }
+        this.host.appendAttention(competitionId, {
+          id: `start-protection-manual:${snapshot.currentStageId}:${action.used}:${randomUUID()}`,
+          category: "flow",
+          severity: "warning",
+          title: action.used ? "起跑保护已手动标记为已使用" : "起跑保护已手动重置为未使用",
+          message: action.used
+            ? "本关后续敏感期掉线不会再触发自动延时或作废。"
+            : "本关后续首次有效敏感期掉线可以再次触发起跑保护。",
+          occurredAt: new Date().toISOString(),
+          stageId: snapshot.currentStageId
+        });
+        break;
+      }
       case "reschedule": {
         const target = Date.parse(action.plannedReadyAt);
         if (!Number.isFinite(target)) throw new ServiceError("VALIDATION_FAILED", "Ready 改期时间无效", 400);
@@ -123,7 +145,7 @@ export class RefereeActionService {
           this.host.saveScoreboards(competitionId, runtime.engine.snapshot().scoreboardVersions);
         } else {
           const runtime = this.host.workRuntimeManager.get(competitionId);
-          if (!runtime) throw new ServiceError("NOT_FOUND", "工作运行时尚未启动", 404);
+          if (!runtime) throw new ServiceError("NOT_FOUND", "比赛连接尚未建立", 404);
           runtime.engine.voidAttempt(controlledAttempt.stageId, controlledAttempt.attemptNumber, sourceId);
           this.host.saveScoreboards(competitionId, runtime.engine.snapshot().scoreboardVersions);
         }
@@ -228,6 +250,7 @@ export class RefereeActionService {
     switch (action.type) {
       case "notification": return `${action.channel}: ${action.text}`;
       case "restart-work": return "恢复 MockClient/服务器连接";
+      case "set-start-protection": return action.used ? "将本关起跑保护标记为已使用" : "将本关起跑保护重置为未使用";
       case "kick": return `kick ${action.playerName}`;
       case "raw-command": return action.command;
       case "participant-associate": return `${action.participantId} <- ${action.connectionId}`;

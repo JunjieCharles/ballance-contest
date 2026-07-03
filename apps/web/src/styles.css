@@ -545,6 +545,9 @@ header > span:last-of-type { margin-left: auto; font-size: 13px; }
   max-height: calc(100vh - 8px);
 }
 .raw-log-window.minimized { width: min(560px, calc(100vw - 32px)); height: auto; min-height: 0; resize: none; }
+.raw-log-window.empty { pointer-events: none; }
+.raw-log-window.empty .raw-log-title,
+.raw-log-window.empty .raw-log-resize-handle { pointer-events: auto; }
 .raw-log-resize-handle {
   position: absolute;
   top: -1px;

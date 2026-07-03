@@ -32,6 +32,7 @@ export interface AutomationPolicy {
   reconnectStableMs: number;
   preStartWaitLimitMs: number;
   intermissionMs: number;
+  startProtectionEnabled: boolean;
   protectionWindowMs: number;
   groupDisconnectThreshold: number;
   preStartTimeoutPolicy: "absent" | "allow-late";
@@ -142,6 +143,7 @@ export interface AutomationSnapshot {
   blockers: readonly AutomationBlocker[];
   waitingParticipants: readonly string[];
   startProtectionUsedStageIds?: readonly string[];
+  startProtectionEnabled?: boolean;
   startProtectionSensitiveStageId?: string;
   startProtectionUntilMs?: number;
   attempts: readonly ControlledAttempt[];
@@ -175,6 +177,7 @@ const defaults = (participantCount: number): AutomationPolicy => ({
   reconnectStableMs: 15_000,
   preStartWaitLimitMs: 5 * 60_000,
   intermissionMs: 3 * 60_000,
+  startProtectionEnabled: true,
   protectionWindowMs: 15_000,
   groupDisconnectThreshold: Math.max(2, Math.ceil(participantCount * 0.2)),
   preStartTimeoutPolicy: "allow-late"
@@ -454,6 +457,17 @@ export class CompetitionController {
     this.assertParticipant(participantId);
     if (!this.isStartProtectionSensitive() || this.hasProtectionIneligibleResult(participantId)) return;
     if (!this.startProtectionUsedStageIds.has(this.stage.id)) this.triggerStartProtection(participantId, evidence);
+    this.bump();
+  }
+
+  public setStartProtectionUsed(used: boolean): void {
+    if (!this.policy.startProtectionEnabled) throw new Error("START_PROTECTION_DISABLED");
+    const changed = used
+      ? !this.startProtectionUsedStageIds.has(this.stage.id)
+      : this.startProtectionUsedStageIds.has(this.stage.id);
+    if (!changed) return;
+    if (used) this.startProtectionUsedStageIds.add(this.stage.id);
+    else this.startProtectionUsedStageIds.delete(this.stage.id);
     this.bump();
   }
 
@@ -854,6 +868,7 @@ export class CompetitionController {
       ...(this.countdownValue === undefined ? {} : { countdownValue: this.countdownValue }),
       blockers: this.startBlockers(),
       waitingParticipants: [...this.waiting],
+      startProtectionEnabled: this.policy.startProtectionEnabled,
       startProtectionUsedStageIds: [...this.startProtectionUsedStageIds],
       ...(this.startProtectionSensitiveStageId === undefined ? {} : { startProtectionSensitiveStageId: this.startProtectionSensitiveStageId }),
       ...(this.startProtectionUntilMs === undefined ? {} : { startProtectionUntilMs: this.startProtectionUntilMs }),
@@ -968,6 +983,7 @@ export class CompetitionController {
   }
 
   private isStartProtectionSensitive(): boolean {
+    if (!this.policy.startProtectionEnabled) return false;
     if (this.startProtectionSensitiveStageId !== this.stage.id) return false;
     return this.startProtectionUntilMs === undefined || this.clock.now() <= this.startProtectionUntilMs;
   }

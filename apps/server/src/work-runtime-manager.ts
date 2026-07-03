@@ -137,7 +137,7 @@ export class WorkRuntimeManager {
     for (const [otherCompetitionId, running] of this.runtimes) {
       if (otherCompetitionId === competitionId) continue;
       if (serverLeaseKey(running.server) === serverLeaseKey(server)) {
-        throw new ServiceError("STATE_CONFLICT", `服务器 ${server} 已有工作运行`, 409, {
+        throw new ServiceError("STATE_CONFLICT", `服务器 ${server} 已有比赛连接`, 409, {
           server,
           blockingCompetitionId: otherCompetitionId
         });
@@ -147,7 +147,7 @@ export class WorkRuntimeManager {
 
   public async restartClient(competitionId: string): Promise<RuntimeSnapshot> {
     const runtime = this.runtimes.get(competitionId);
-    if (!runtime) throw new ServiceError("NOT_FOUND", "工作运行时尚未启动", 404);
+    if (!runtime) throw new ServiceError("NOT_FOUND", "比赛连接尚未建立", 404);
     this.clearConnectionRecoveryTimer(runtime);
     runtime.connectionRecoveryState = "manual";
     try {

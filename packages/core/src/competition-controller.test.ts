@@ -493,6 +493,25 @@ describe("CompetitionController", () => {
     });
   });
 
+  it("can disable protection by policy and manually toggle the current stage usage", () => {
+    const disabledClock = new FakeClock();
+    const disabled = new CompetitionController(configuration({ policy: { announcementLeadMs: 0, readyBufferMs: 1_000, reconnectStableMs: 15_000, intermissionMs: 3_000, protectionWindowMs: 15_000, startProtectionEnabled: false } }), disabledClock);
+    connectAll(disabled);
+    enterRunning(disabled, disabledClock);
+    disabledClock.advance(5_000);
+    disabled.observeConnection("p1", false);
+    expect(disabled.snapshot()).toMatchObject({ phase: "running", startProtectionEnabled: false, startProtectionUsedStageIds: [], incidents: [] });
+    expect(() => disabled.setStartProtectionUsed(true)).toThrowError("START_PROTECTION_DISABLED");
+
+    const clock = new FakeClock();
+    const controller = new CompetitionController(configuration(), clock);
+    connectAll(controller);
+    controller.setStartProtectionUsed(true);
+    expect(controller.snapshot().startProtectionUsedStageIds).toEqual(["s1"]);
+    controller.setStartProtectionUsed(false);
+    expect(controller.snapshot().startProtectionUsedStageIds).toEqual([]);
+  });
+
   it("does not create an attempt when the Go command is uncertain", () => {
     const clock = new FakeClock();
     const controller = new CompetitionController(configuration(), clock);

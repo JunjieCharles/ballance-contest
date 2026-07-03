@@ -71,7 +71,11 @@ export const automationView = (
   deadlineAt?: string,
   unconfirmedCommands: RuntimeSnapshot["unconfirmedCommands"] = [],
   observationGaps: RuntimeSnapshot["observationGaps"] = []
-): RuntimeSnapshot => ({
+): RuntimeSnapshot => {
+  const wallClockOriginMs = snapshot?.wallClockOriginMs;
+  const currentReady = snapshot && wallClockOriginMs !== undefined ? currentStageReadyAt(snapshot, wallClockOriginMs) : undefined;
+  const nextReady = snapshot && wallClockOriginMs !== undefined ? nextStageReadyAt(snapshot, wallClockOriginMs) : undefined;
+  return ({
   phase: snapshot?.phase ?? "draft",
   ...(snapshot?.pausedFromPhase === undefined ? {} : { pausedFromPhase: snapshot.pausedFromPhase }),
   stateVersion: snapshot?.stateVersion ?? 0,
@@ -81,6 +85,10 @@ export const automationView = (
   ...(snapshot?.plannedReadyAtMs === undefined ? {} : { plannedReadyAtMs: snapshot.plannedReadyAtMs }),
   ...(snapshot?.plannedReadyStageId === undefined ? {} : { plannedReadyStageId: snapshot.plannedReadyStageId }),
   ...(plannedReadyAtValue === undefined ? {} : { plannedReadyAt: plannedReadyAtValue }),
+  ...(currentReady === undefined ? {} : { currentStageReadyAt: currentReady }),
+  ...(nextReady === undefined ? {} : { nextStageReadyAt: nextReady }),
+  startProtectionEnabled: snapshot?.startProtectionEnabled ?? true,
+  startProtectionUsed: snapshot?.startProtectionUsedStageIds?.includes(snapshot.currentStageId) ?? false,
   ...(plannedStageStartAt === undefined ? {} : { plannedStageStartAt }),
   ...(deadlineAt === undefined ? {} : { stageDeadlineAt: deadlineAt }),
   ...(virtualNowMs === undefined ? {} : { virtualNowMs }),
@@ -105,7 +113,28 @@ export const automationView = (
     .map((action) => ({ id: action.id, kind: action.kind, stageId: action.stageId, status: action.status })) ?? [],
   unconfirmedCommands,
   observationGaps
-});
+  });
+};
+
+export const currentStageReadyAt = (snapshot: AutomationSnapshot, epochOriginMs: number): string | undefined => {
+  if (snapshot.plannedReadyStageId === snapshot.currentStageId && snapshot.plannedReadyAtMs !== undefined) {
+    return new Date(epochOriginMs + snapshot.plannedReadyAtMs).toISOString();
+  }
+  const stageAttempts = snapshot.attempts.filter((attempt) => attempt.stageId === snapshot.currentStageId);
+  const currentAttemptIndex = stageAttempts.findLastIndex((attempt) => !attempt.voided);
+  const currentAttempt = currentAttemptIndex >= 0 ? stageAttempts[currentAttemptIndex] : undefined;
+  const previousAttempt = currentAttemptIndex > 0 ? stageAttempts[currentAttemptIndex - 1] : undefined;
+  const lowerBound = previousAttempt?.goAtMs ?? Number.NEGATIVE_INFINITY;
+  const upperBound = currentAttempt?.goAtMs ?? Number.POSITIVE_INFINITY;
+  const firstReady = snapshot.actions.find((action) => action.stageId === snapshot.currentStageId
+    && action.kind === "ready" && action.createdAtMs > lowerBound && action.createdAtMs <= upperBound);
+  return firstReady ? new Date(epochOriginMs + firstReady.createdAtMs).toISOString() : undefined;
+};
+
+export const nextStageReadyAt = (snapshot: AutomationSnapshot, epochOriginMs: number): string | undefined =>
+  snapshot.plannedReadyAtMs !== undefined && snapshot.plannedReadyStageId !== undefined && snapshot.plannedReadyStageId !== snapshot.currentStageId
+    ? new Date(epochOriginMs + snapshot.plannedReadyAtMs).toISOString()
+    : undefined;
 
 export const plannedStageStartAt = (snapshot: AutomationSnapshot, epochOriginMs: number): string | undefined => {
   const attempt = [...snapshot.attempts].reverse().find((candidate) => candidate.stageId === snapshot.currentStageId && !candidate.voided);
@@ -153,6 +182,7 @@ export const automationPolicyFor = (config: CompetitionConfig) => ({
   reconnectStableMs: config.flow.reconnectStableMs,
   preStartWaitLimitMs: config.flow.delayLimitMs,
   intermissionMs: config.flow.intermissionMs,
+  startProtectionEnabled: config.flow.startProtectionEnabled !== false,
   protectionWindowMs: config.flow.protectionWindowMs,
   groupDisconnectThreshold: config.flow.groupDisconnectThreshold
 });

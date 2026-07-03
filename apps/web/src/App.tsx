@@ -222,18 +222,26 @@ export function App() {
   const [rawLogsMinimized, setRawLogsMinimized] = useState(false);
   const lastSequence = useRef(0);
   const snapshotRequestSequence = useRef(0);
+  const selectedIdRef = useRef(selectedId);
   const canWrite = Boolean(session?.control && realtimeConnected);
+
+  useEffect(() => { selectedIdRef.current = selectedId; }, [selectedId]);
 
   const refreshCompetitions = async (current: Session) => {
     const records = await request<CompetitionRecordView[]>("/api/v1/competitions", current);
     setCompetitions(records);
     setSelectedId((old) => old ?? records[0]?.id);
   };
-  const refreshSnapshot = async (current: Session, competitionId: string) => {
-    const requestSequence = ++snapshotRequestSequence.current;
-    const next = await request<CompetitionSnapshot>(`/api/v1/competitions/${competitionId}/snapshot`, current);
-    if (requestSequence === snapshotRequestSequence.current) setSnapshot(next);
-    return next;
+  const refreshSnapshot = async (current: Session, competitionId: string, requireApplied = false): Promise<CompetitionSnapshot> => {
+    while (true) {
+      const requestSequence = ++snapshotRequestSequence.current;
+      const next = await request<CompetitionSnapshot>(`/api/v1/competitions/${competitionId}/snapshot`, current);
+      if (requestSequence === snapshotRequestSequence.current && selectedIdRef.current === competitionId) {
+        setSnapshot(next);
+        return next;
+      }
+      if (!requireApplied || selectedIdRef.current !== competitionId) return next;
+    }
   };
   const refreshRawLogs = async (current: Session, competitionId: string) =>
     setRawLogs(await request<RawClientLogLine[]>(`/api/v1/competitions/${competitionId}/logs/raw?limit=250`, current));
@@ -243,6 +251,7 @@ export function App() {
       if (session) void refreshSnapshot(session, competitionId).catch((error: unknown) => setMessage(error instanceof Error ? error.message : "快照加载失败"));
       return;
     }
+    selectedIdRef.current = competitionId;
     setSnapshot(undefined); setScenarioDetail(null); setRawLogs([]); setSelectedId(competitionId);
   };
 
@@ -344,7 +353,7 @@ export function App() {
       const target = await operation() ?? selectedId;
       if (session) await refreshCompetitions(session);
       if (target && target !== selectedId) { setSelectedId(target); }
-      else if (session && target) await refreshSnapshot(session, target);
+      else if (session && target) await refreshSnapshot(session, target, true);
       setMessage(ok);
     } catch (error) { setMessage(error instanceof Error ? error.message : "操作失败"); throw error; }
   };
@@ -376,7 +385,7 @@ export function App() {
   const startWork = () => run(async () => {
     if (!session || !snapshot) throw new Error("请选择比赛");
     await request(`/api/v1/competitions/${snapshot.competition.id}/work/start`, session, { method: "POST", body: "{}" });
-  }, "工作运行已启动");
+  }, "比赛连接已建立");
 
   const enableAutomation = () => run(async () => {
     if (!session || !snapshot) throw new Error("请选择比赛");
@@ -523,9 +532,9 @@ export function App() {
           <section className="status-strip">
             <div><span>阶段</span><strong>{phaseLabel[runtime.phase] ?? runtime.phase}</strong></div>
             <div><span>关卡</span><strong>{stageTitle(snapshot.config, runtime.currentStageId)}</strong></div>
-            <div><span>本关发令（UTC+8）</span><strong>{formatUtc8DateTime(runtime.plannedStageStartAt)}</strong></div>
+            <div><span>本关 Ready（UTC+8）</span><strong>{formatUtc8DateTime(runtime.currentStageReadyAt)}</strong></div>
             <div><span>本关最晚结束（UTC+8）</span><strong>{formatUtc8DateTime(runtime.stageDeadlineAt)}</strong></div>
-            <div><span>下一 Ready（UTC+8）</span><strong>{formatUtc8DateTime(runtime.plannedReadyAt)}</strong></div>
+            <div><span>下一关 Ready（UTC+8）</span><strong>{formatUtc8DateTime(runtime.nextStageReadyAt)}</strong></div>
             <div><span>自动化 / 倒数</span><strong>{runtime.automationEnabled ? "启用" : "暂停"}{runtime.countdownValue ? ` · ${runtime.countdownValue}` : ""}</strong></div>
           </section>
           <div className="tabs">{visibleTabs.map((item) =>
@@ -564,17 +573,35 @@ function ConsolePanel({ snapshot, canWrite, versionKey, startWork, enableAutomat
   const [scheduleAt, setScheduleAt] = useState(() => toUtc8Input(new Date(Date.now() + 5 * 60_000)));
   const participant = snapshot.config.participants.find((candidate) => candidate.id === participantId);
   const attempt = (runtime.attempts as Array<{ id?: string; stageId?: string; voided?: boolean }>).findLast((candidate) => candidate.stageId === runtime.currentStageId && !candidate.voided);
-  const confirmedAction = (label: string, actionId: RefereeActionId, kind: ConfirmationKind, target: string, build: (confirmation: ConfirmationSummary) => CompetitionAction, className?: string, extraDisabled = false, extraReason?: string) => {
+  const startConnection = availabilityFor(runtime, "start-work");
+  const reconnect = availabilityFor(runtime, "restart-work");
+  const hasOpenServerIncident = (runtime.incidents as Array<{ type?: string; status?: string }>).some((incident) => incident.type === "server-disconnect" && incident.status === "open");
+  const useReconnect = snapshot.competition.mode === "test" || startConnection?.disabledReason === "比赛连接已经启动";
+  const connectionLabel = snapshot.competition.mode === "test" ? reconnect?.label ?? "模拟恢复连接"
+    : !useReconnect ? startConnection?.label ?? "连接比赛服务器"
+      : reconnect?.enabled ? reconnect.label
+        : hasOpenServerIncident ? reconnect?.disabledReason ?? "正在恢复比赛连接" : "比赛服务器已连接";
+  const confirmedAction = (
+    label: string,
+    actionId: RefereeActionId,
+    kind: ConfirmationKind,
+    target: string,
+    build: (confirmation: ConfirmationSummary) => CompetitionAction,
+    className?: string,
+    extraDisabled = false,
+    extraReason?: string,
+    confirmationVersionKey = versionKey
+  ) => {
     const availability = availabilityFor(runtime, actionId);
-    return <ConfirmButton key={`${label}:${target}:${versionKey}`} label={label} kind={kind} target={target} versionKey={versionKey} className={className}
+    return <ConfirmButton key={`${label}:${target}:${confirmationVersionKey}`} label={label} kind={kind} target={target} versionKey={confirmationVersionKey} className={className}
       disabled={!canWrite || !availability?.enabled || extraDisabled} disabledReason={!canWrite ? "实时连接或控制权不可用" : extraDisabled ? extraReason : availability?.disabledReason}
       requestConfirmation={requestConfirmation} onConfirm={(confirmation) => performAction(build(confirmation))} />;
   };
   return <section className="grid two">
     <div className="panel"><h2>裁判操作</h2>
       <div className="button-row action-row">
-        {snapshot.competition.mode === "work" && <ActionButton runtime={runtime} action="start-work" canWrite={canWrite} onClick={() => void startWork()}>{availabilityFor(runtime, "start-work")?.label ?? "启动 MockClient"}</ActionButton>}
-        <ActionButton runtime={runtime} action="restart-work" canWrite={canWrite} onClick={() => void performAction({ type: "restart-work" })}>{availabilityFor(runtime, "restart-work")?.label ?? "恢复连接"}</ActionButton>
+        <ActionButton runtime={runtime} action={useReconnect ? "restart-work" : "start-work"} canWrite={canWrite}
+          onClick={() => void (useReconnect ? performAction({ type: "restart-work" }) : startWork())}>{connectionLabel}</ActionButton>
         <ActionButton runtime={runtime} action="enable-automation" canWrite={canWrite} onClick={() => void enableAutomation()}>{availabilityFor(runtime, "enable-automation")?.label ?? "启动自动化"}</ActionButton>
         <ActionButton runtime={runtime} action="pause-automation" canWrite={canWrite} className="secondary" onClick={() => void pauseAutomation()}>暂停自动化</ActionButton>
       </div>
@@ -589,7 +616,8 @@ function ConsolePanel({ snapshot, canWrite, versionKey, startWork, enableAutomat
         <ActionButton runtime={runtime} action="cheat-off" canWrite={canWrite} onClick={() => void performAction({ type: "cheat-off" })}>关闭 cheat</ActionButton>
         {confirmedAction("手动发令", "manual-go", "manual-go", snapshot.competition.id, (confirmation) => ({ type: "manual-go", confirmationToken: confirmation.token, impactHash: confirmation.impactHash }))}
         {confirmedAction("提前结束本关", "end-stage", "manual-action", snapshot.competition.id, (confirmation) => ({ type: "end-stage", confirmationToken: confirmation.token, impactHash: confirmation.impactHash }), "danger")}
-        {attempt?.id && confirmedAction("重赛本关", "restart-stage", "restart-stage", attempt.id, (confirmation) => ({ type: "restart-stage", attemptId: attempt.id as string, confirmationToken: confirmation.token, impactHash: confirmation.impactHash }), "danger")}
+        {confirmedAction("重赛本关", "restart-stage", "restart-stage", attempt?.id ?? runtime.currentStageId ?? snapshot.competition.id, (confirmation) => ({ type: "restart-stage", attemptId: attempt?.id ?? "", confirmationToken: confirmation.token, impactHash: confirmation.impactHash }), "danger")}
+        {confirmedAction(runtime.startProtectionUsed ? "将起跑保护重置为未使用" : "将起跑保护标记为已使用", "set-start-protection", "manual-action", `${snapshot.competition.id}:start-protection:${runtime.currentStageId}:${!runtime.startProtectionUsed}`, (confirmation) => ({ type: "set-start-protection", used: !runtime.startProtectionUsed, confirmationToken: confirmation.token, impactHash: confirmation.impactHash }), runtime.startProtectionUsed ? undefined : "danger", false, undefined, `${snapshot.competition.stateVersion}:${runtime.currentStageId}:${runtime.startProtectionUsed}`)}
       </div>
       <h3>相对延时</h3>
       <div className="button-row action-row">
@@ -659,6 +687,8 @@ function ConfigPanel({ snapshot, canWrite, saveDraft, publish }: {
   const config = snapshot.config;
   const editable = canWrite && snapshot.competition.status === "draft";
   const [contestType, setContestType] = useState(config.scoring.contestType);
+  const [startProtectionEnabled, setStartProtectionEnabled] = useState(config.flow.startProtectionEnabled);
+  const [startProtectionSaving, setStartProtectionSaving] = useState(false);
   const [points, setPoints] = useState<number[]>([...config.scoring.points]);
   const [scoringDirty, setScoringDirty] = useState(false);
   const [stages, setStages] = useState<StageConfig[]>(config.stages.map((stage) => ({ ...stage, scoring: [...stage.scoring] })));
@@ -678,7 +708,7 @@ function ConfigPanel({ snapshot, canWrite, saveDraft, publish }: {
     placeholder: HTMLElement;
   } | null>(null);
   const lastScoringPlace = minimumScoringPlaceFor(points);
-  const draft = { ...config, contestType, scoring: { ...config.scoring, contestType, points, minimumScoringPlace: lastScoringPlace }, stages };
+  const draft = { ...config, contestType, flow: { ...config.flow, startProtectionEnabled }, scoring: { ...config.scoring, contestType, points, minimumScoringPlace: lastScoringPlace }, stages };
   const publishIssues = [...validateCompetitionConfigForPublish(draft), ...(stagesDirty ? ["请先保存关卡列表"] : [])];
   const selectScoringPreset = async (type: CompetitionConfig["contestType"]) => {
     setContestType(type);
@@ -811,6 +841,16 @@ function ConfigPanel({ snapshot, canWrite, saveDraft, publish }: {
       <label>服务器<input defaultValue={config.server} disabled={!editable} onBlur={(event) => { if (event.target.value !== config.server) void saveDraft({ server: event.target.value }); }} /></label>
       <label>服务器控制身份<input value="ContestConsole" disabled /></label>
       <p className="muted">MockClient 固定以 *ContestConsole 旁观登录，避免服务器权限因名称变化失效。参赛者会从 login、disconnect 和定期 list 自动登记，无需发布前名单。</p>
+      <label className="score-policy-row">启用起跑保护<input aria-label="启用起跑保护" type="checkbox" checked={startProtectionEnabled} disabled={!editable || startProtectionSaving}
+        onChange={async (event) => {
+          const enabled = event.currentTarget.checked;
+          setStartProtectionEnabled(enabled);
+          setStartProtectionSaving(true);
+          try { await saveDraft({ flow: { ...config.flow, startProtectionEnabled: enabled } }); }
+          catch { setStartProtectionEnabled(config.flow.startProtectionEnabled); }
+          finally { setStartProtectionSaving(false); }
+        }} /><span>{startProtectionSaving ? "保存中…" : startProtectionEnabled ? "已启用（默认）" : "未启用"}</span></label>
+      <p className="muted">启用后，每关从第一条 Ready 到 Go 后 15 秒可自动使用一次保护；发布后仍可在控制台手动标记本关已使用或重置为未使用。</p>
       <div className={publishIssues.length ? "validation-summary invalid" : "validation-summary valid"}><strong>发布检查</strong>{publishIssues.length ? <ul>{publishIssues.map((issue) => <li key={issue}>{issue}</li>)}</ul> : <span>配置完整，可以发布。</span>}</div>
       <button disabled={!editable || publishIssues.length > 0} onClick={() => void publish()}>发布比赛</button>
     </div>
@@ -1013,7 +1053,8 @@ function RawLogWindow({ logs, minimized, setMinimized, refresh, mode }: { logs: 
     const body = bodyRef.current;
     if (!minimized && body && stickToBottom.current) body.scrollTo({ top: body.scrollHeight });
   }, [logs, minimized]);
-  return <aside className={minimized ? "raw-log-window minimized" : "raw-log-window"} aria-label="原始客户端日志" style={box ? { left: box.x, top: box.y, width: box.width, ...(minimized ? {} : { height: box.height }), right: "auto", bottom: "auto" } : undefined}>
+  const windowClass = ["raw-log-window", minimized ? "minimized" : "", logs.length === 0 ? "empty" : ""].filter(Boolean).join(" ");
+  return <aside className={windowClass} aria-label="原始客户端日志" style={box ? { left: box.x, top: box.y, width: box.width, ...(minimized ? {} : { height: box.height }), right: "auto", bottom: "auto" } : undefined}>
     <button className="raw-log-resize-handle" aria-label="拖动左上角缩放原始客户端日志" onPointerDown={(event) => {
       const bounds = event.currentTarget.parentElement?.getBoundingClientRect();
       if (!bounds) return;
