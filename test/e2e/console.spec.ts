@@ -369,10 +369,11 @@ test("restarts the current stage and unlocks its score review only after the nex
   await page.getByRole("button", { name: "控制台", exact: true }).click();
   await page.getByRole("button", { name: "重赛本关" }).click();
   const confirmation = page.getByRole("group", { name: "重赛本关确认" });
-  await expect(confirmation).toContainText("当前尝试和本次成绩将作废，但原始证据会保留。");
-  await expect(confirmation).toContainText("收到新的 Go 后才创建新尝试。");
+  await expect(confirmation).toContainText("立即把当前关重置到 Ready");
+  await expect(confirmation).toContainText("当前流程命令、事故、权限提示、未决真实命令和观察缺口将不再阻断新周期");
+  await expect(confirmation).toContainText("真实连接或权限仍不可用时，新命令可能再次失败。");
   await confirmation.getByRole("button", { name: "确认" }).click();
-  await expect(page.getByText("阶段", { exact: true }).locator("..")).toContainText("重赛准备");
+  await expect(page.getByText("阶段", { exact: true }).locator("..")).toContainText("Ready");
   await page.getByRole("button", { name: "成绩", exact: true }).click();
   expect((await page.locator(".scoreboard tbody tr td:nth-child(5) .cell-button").allTextContents()).some((value) => value.trim().startsWith("#"))).toBe(false);
 
@@ -402,6 +403,7 @@ test("shows disabled reasons, shared scheduling controls and automatic review co
   await page.getByRole("button", { name: "创建测试运行" }).click();
   await expect(page.getByText(/虚拟时钟：0:00/)).toBeVisible();
   await page.getByRole("button", { name: "控制台", exact: true }).click();
+  await expect(page.getByRole("button", { name: "重赛本关" })).toBeEnabled();
   await expect(page.getByLabel("改期时间（UTC+8）")).toBeVisible();
   await expect(page.getByRole("button", { name: "Ready 改期" })).toBeDisabled();
   await expect(page.getByText("当前没有可改期的 Ready 计划")).toBeVisible();

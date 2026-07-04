@@ -240,17 +240,23 @@ export class CommandQueue {
     return result;
   }
 
-  public observeLine(line: string): void {
+  public observeLine(line: string): CommandRecord | undefined {
     const modernIdentity = /(?:^|\] )(\d+):\s+\*ContestConsole\s+-?\d+ms/.exec(line)?.[1];
     const legacyIdentity = /(?:^|\] )\*ContestConsole \(#(\d+)\)$/.exec(line)?.[1];
     if (modernIdentity || legacyIdentity) this.refereeConnectionId = modernIdentity ?? legacyIdentity;
     const pending = this.pending;
-    if (!pending) return;
+    if (!pending) return undefined;
     if (isPermissionDeniedLine(line)) {
-      pending.resolve(this.update(pending.record, "failed", line));
-      return;
+      const record = this.update(pending.record, "failed", line);
+      pending.resolve(record);
+      return record;
     }
-    if (pending.encoded.acknowledge(line)) pending.resolve(this.update(pending.record, "acknowledged", line));
+    if (pending.encoded.acknowledge(line)) {
+      const record = this.update(pending.record, "acknowledged", line);
+      pending.resolve(record);
+      return record;
+    }
+    return undefined;
   }
 
   private update(record: CommandRecord, status: CommandStatus, responseLine?: string): CommandRecord {

@@ -266,7 +266,7 @@ describe("local API", () => {
     expect(finished.json<{ data: { runtime: { scoreEditPermissions: Array<{ editable: boolean }> } } }>().data.runtime.scoreEditPermissions.every((permission) => permission.editable)).toBe(true);
   });
 
-  it("restarts the current stage, removes the old attempt from scoring and waits for a new Go", async () => {
+  it("force-restarts before or after Go and removes an old attempt from scoring", async () => {
     const scenario = JSON.parse(readFileSync(resolve("test/fixtures/scenarios/three-stage-main/scenario.json"), "utf8")) as Record<string, unknown>;
     const stages = (scenario.stages as Array<{ id: string; order: number; level: number; mode: "SR" | "HS"; timeLimitMs: number; scoring: number[]; minimumScoringPlace: number }>).map((stage) => ({ ...stage, label: `${stage.mode} ${stage.level}` }));
     const created = await app.inject({ method: "POST", url: "/api/v1/competitions", headers: auth(token), payload: { name: "Restart stage", mode: "test", idempotencyKey: "restart-stage" } });
@@ -275,7 +275,24 @@ describe("local API", () => {
     await app.inject({ method: "POST", url: `/api/v1/competitions/${competitionId}/publish`, headers: auth(token), payload: { expectedStateVersion: 1, idempotencyKey: "publish-restart-stage" } });
     const run = await app.inject({ method: "POST", url: `/api/v1/competitions/${competitionId}/test-runs`, headers: auth(token), payload: scenario });
     const runId = run.json<{ data: { runId: string } }>().data.runId;
-    await app.inject({ method: "POST", url: `/api/v1/competitions/${competitionId}/test-runs/${runId}/automation/start`, headers: auth(token), payload: {} });
+    const beforeGo = (await app.inject({ method: "GET", url: `/api/v1/competitions/${competitionId}/snapshot`, headers: auth(token) })).json<{
+      data: { runtime: { phase: string; currentStageId: string; attempts: unknown[]; availableActions: Array<{ action: string; enabled: boolean }> } }
+    }>().data;
+    expect(beforeGo.runtime.availableActions).toContainEqual(expect.objectContaining({ action: "restart-stage", enabled: true }));
+    const beforeGoConfirmationResponse = await app.inject({
+      method: "POST", url: `/api/v1/competitions/${competitionId}/confirmations`, headers: auth(token),
+      payload: { kind: "restart-stage", target: beforeGo.runtime.currentStageId }
+    });
+    const beforeGoConfirmation = beforeGoConfirmationResponse.json<{ data: { token: string; impactHash: string } }>().data;
+    const beforeGoRestart = await app.inject({
+      method: "POST", url: `/api/v1/competitions/${competitionId}/actions`, headers: auth(token),
+      payload: { expectedStateVersion: 2, idempotencyKey: "restart-before-go", action: { type: "restart-stage", stageId: "s1", confirmationToken: beforeGoConfirmation.token, impactHash: beforeGoConfirmation.impactHash } }
+    });
+    expect(beforeGoRestart.statusCode).toBe(200);
+    const resetBeforeGo = (await app.inject({ method: "GET", url: `/api/v1/competitions/${competitionId}/snapshot`, headers: auth(token) })).json<{
+      data: { runtime: { phase: string; attempts: unknown[] } }
+    }>().data;
+    expect(resetBeforeGo.runtime).toMatchObject({ phase: "ready", attempts: [] });
     await app.inject({ method: "POST", url: `/api/v1/competitions/${competitionId}/test-runs/${runId}/automation/advance`, headers: auth(token), payload: { milliseconds: 33_000 } });
     const before = (await app.inject({ method: "GET", url: `/api/v1/competitions/${competitionId}/snapshot`, headers: auth(token) })).json<{
       data: { runtime: { attempts: Array<{ id: string; attemptNumber: number; voided: boolean }>; availableActions: Array<{ action: string; enabled: boolean }> }; currentScoreboard: Array<{ stages: Record<string, { sourceId: string }> }> }
@@ -285,20 +302,20 @@ describe("local API", () => {
     expect(before.runtime.availableActions).toContainEqual(expect.objectContaining({ action: "restart-stage", enabled: true }));
     expect(before.currentScoreboard.some((entry) => entry.stages.s1)).toBe(true);
 
-    const confirmationResponse = await app.inject({ method: "POST", url: `/api/v1/competitions/${competitionId}/confirmations`, headers: auth(token), payload: { kind: "restart-stage", target: attempt.id } });
+    const confirmationResponse = await app.inject({ method: "POST", url: `/api/v1/competitions/${competitionId}/confirmations`, headers: auth(token), payload: { kind: "restart-stage", target: "s1" } });
     const confirmation = confirmationResponse.json<{ data: { token: string; impactHash: string } }>().data;
     const restarted = await app.inject({
       method: "POST", url: `/api/v1/competitions/${competitionId}/actions`, headers: auth(token),
-      payload: { expectedStateVersion: 2, idempotencyKey: "restart-current-stage", action: { type: "restart-stage", attemptId: attempt.id, confirmationToken: confirmation.token, impactHash: confirmation.impactHash } }
+      payload: { expectedStateVersion: 3, idempotencyKey: "restart-current-stage", action: { type: "restart-stage", stageId: "s1", confirmationToken: confirmation.token, impactHash: confirmation.impactHash } }
     });
     expect(restarted.statusCode).toBe(200);
     const afterRestart = (await app.inject({ method: "GET", url: `/api/v1/competitions/${competitionId}/snapshot`, headers: auth(token) })).json<{
       data: { runtime: { phase: string; attempts: Array<{ attemptNumber: number; voided: boolean }> }; currentScoreboard: Array<{ stages: Record<string, unknown> }> }
     }>().data;
-    expect(afterRestart.runtime).toMatchObject({ phase: "restart-preparing", attempts: [{ attemptNumber: 1, voided: true }] });
+    expect(afterRestart.runtime).toMatchObject({ phase: "ready", attempts: [{ attemptNumber: 1, voided: true }] });
     expect(afterRestart.currentScoreboard.every((entry) => entry.stages.s1 === undefined)).toBe(true);
 
-    await app.inject({ method: "POST", url: `/api/v1/competitions/${competitionId}/test-runs/${runId}/automation/advance`, headers: auth(token), payload: { milliseconds: 93_000 } });
+    await app.inject({ method: "POST", url: `/api/v1/competitions/${competitionId}/test-runs/${runId}/automation/advance`, headers: auth(token), payload: { milliseconds: 33_000 } });
     const afterNewGo = (await app.inject({ method: "GET", url: `/api/v1/competitions/${competitionId}/snapshot`, headers: auth(token) })).json<{
       data: { runtime: { attempts: Array<{ attemptNumber: number; voided: boolean }> }; currentScoreboard: Array<{ stages: Record<string, { sourceId: string }> }> }
     }>().data;

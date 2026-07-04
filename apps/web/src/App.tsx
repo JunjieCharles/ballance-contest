@@ -572,7 +572,6 @@ function ConsolePanel({ snapshot, canWrite, versionKey, startWork, enableAutomat
   const [rawCommand, setRawCommand] = useState("");
   const [scheduleAt, setScheduleAt] = useState(() => toUtc8Input(new Date(Date.now() + 5 * 60_000)));
   const participant = snapshot.config.participants.find((candidate) => candidate.id === participantId);
-  const attempt = (runtime.attempts as Array<{ id?: string; stageId?: string; voided?: boolean }>).findLast((candidate) => candidate.stageId === runtime.currentStageId && !candidate.voided);
   const startConnection = availabilityFor(runtime, "start-work");
   const reconnect = availabilityFor(runtime, "restart-work");
   const hasOpenServerIncident = (runtime.incidents as Array<{ type?: string; status?: string }>).some((incident) => incident.type === "server-disconnect" && incident.status === "open");
@@ -624,7 +623,7 @@ function ConsolePanel({ snapshot, canWrite, versionKey, startWork, enableAutomat
         <ActionButton runtime={runtime} action="cheat-off" canWrite={canWrite} onClick={() => void performAction({ type: "cheat-off" })}>关闭 cheat</ActionButton>
         {confirmedAction("手动发令", "manual-go", "manual-go", snapshot.competition.id, (confirmation) => ({ type: "manual-go", confirmationToken: confirmation.token, impactHash: confirmation.impactHash }))}
         {confirmedAction("提前结束本关", "end-stage", "manual-action", snapshot.competition.id, (confirmation) => ({ type: "end-stage", confirmationToken: confirmation.token, impactHash: confirmation.impactHash }), "danger")}
-        {confirmedAction("重赛本关", "restart-stage", "restart-stage", attempt?.id ?? runtime.currentStageId ?? snapshot.competition.id, (confirmation) => ({ type: "restart-stage", attemptId: attempt?.id ?? "", confirmationToken: confirmation.token, impactHash: confirmation.impactHash }), "danger")}
+        {confirmedAction("重赛本关", "restart-stage", "restart-stage", runtime.currentStageId ?? snapshot.competition.id, (confirmation) => ({ type: "restart-stage", stageId: runtime.currentStageId ?? "", confirmationToken: confirmation.token, impactHash: confirmation.impactHash }), "danger")}
         {confirmedAction(runtime.startProtectionUsed ? "将起跑保护重置为未使用" : "将起跑保护标记为已使用", "set-start-protection", "manual-action", `${snapshot.competition.id}:start-protection:${runtime.currentStageId}:${!runtime.startProtectionUsed}`, (confirmation) => ({ type: "set-start-protection", used: !runtime.startProtectionUsed, confirmationToken: confirmation.token, impactHash: confirmation.impactHash }), runtime.startProtectionUsed ? undefined : "danger", false, undefined, `${snapshot.competition.stateVersion}:${runtime.currentStageId}:${runtime.startProtectionUsed}`)}
       </div>
       <h3>相对延时</h3>

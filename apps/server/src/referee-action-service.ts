@@ -129,34 +129,39 @@ export class RefereeActionService {
         break;
       case "restart-stage": {
         if (!confirmation?.runtimeToken) throw new ServiceError("CONFIRMATION_INVALID", "重赛确认缺少运行时凭据", 409);
-        const controlledAttempt = controller().snapshot().attempts.find((attempt) => attempt.id === action.attemptId && !attempt.voided);
-        if (!controlledAttempt) throw new ServiceError("ACTION_UNAVAILABLE", "当前尝试已变化，不能重赛", 409);
+        const before = controller().snapshot();
+        if (before.currentStageId !== action.stageId) throw new ServiceError("ACTION_UNAVAILABLE", "当前关卡已变化，不能使用旧确认重赛", 409);
+        const controlledAttempt = before.attempts.findLast((attempt) => attempt.stageId === action.stageId && !attempt.voided);
         controller().confirmStageRestart({
-          attemptId: action.attemptId,
+          stageId: action.stageId,
           impactHash: action.impactHash,
           token: confirmation.runtimeToken,
           reason: "裁判重赛本关"
         });
-        const sourceId = `restart-stage:${controlledAttempt.id}:${randomUUID()}`;
-        if (competition.mode === "test") {
-          const runId = this.host.getPayload(competitionId).activeRunId as string;
-          const runtime = this.host.testRuntimeManager.getRuntime(competitionId, runId);
-          runtime.engine.voidAttempt(controlledAttempt.stageId, controlledAttempt.attemptNumber, sourceId);
-          this.host.saveScoreboards(competitionId, runtime.engine.snapshot().scoreboardVersions);
-        } else {
-          const runtime = this.host.workRuntimeManager.get(competitionId);
-          if (!runtime) throw new ServiceError("NOT_FOUND", "比赛连接尚未建立", 404);
-          runtime.engine.voidAttempt(controlledAttempt.stageId, controlledAttempt.attemptNumber, sourceId);
-          this.host.saveScoreboards(competitionId, runtime.engine.snapshot().scoreboardVersions);
+        const sourceId = `restart-stage:${action.stageId}:${controlledAttempt?.id ?? "before-go"}:${randomUUID()}`;
+        if (controlledAttempt) {
+          if (competition.mode === "test") {
+            const runId = this.host.getPayload(competitionId).activeRunId as string;
+            const runtime = this.host.testRuntimeManager.getRuntime(competitionId, runId);
+            runtime.engine.voidAttempt(controlledAttempt.stageId, controlledAttempt.attemptNumber, sourceId);
+            this.host.saveScoreboards(competitionId, runtime.engine.snapshot().scoreboardVersions);
+          } else {
+            const runtime = this.host.workRuntimeManager.get(competitionId);
+            if (!runtime) throw new ServiceError("NOT_FOUND", "比赛连接尚未建立", 404);
+            runtime.engine.voidAttempt(controlledAttempt.stageId, controlledAttempt.attemptNumber, sourceId);
+            this.host.saveScoreboards(competitionId, runtime.engine.snapshot().scoreboardVersions);
+          }
         }
         this.host.appendAttention(competitionId, {
           id: sourceId,
           category: "flow",
           severity: "critical",
-          title: "裁判已重赛本关",
-          message: `第 ${controlledAttempt.attemptNumber} 次尝试已作废并退出榜单；原始证据保留，等待新 Go 创建下一次尝试。`,
+          title: "裁判已强制重赛本关",
+          message: controlledAttempt
+            ? `第 ${controlledAttempt.attemptNumber} 次尝试已作废并退出榜单；旧流程阻断已隔离，原始证据保留，当前关已重新进入 Ready。`
+            : "本关尚未 Go；旧流程阻断已隔离，原始证据保留，当前关已重新进入 Ready。",
           occurredAt: new Date().toISOString(),
-          stageId: controlledAttempt.stageId
+          stageId: action.stageId
         });
         break;
       }

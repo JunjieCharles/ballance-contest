@@ -265,8 +265,8 @@ export class WorkRuntimeManager {
 
   private bindManagedClient(runtime: WorkRuntime, client: ManagedMockClient): void {
     client.onLine((line) => {
-      runtime.commands.observeLine(line);
-      this.ingestLine(runtime, line);
+      const observedCommand = runtime.commands.observeLine(line);
+      this.ingestLine(runtime, line, observedCommand);
     });
     client.onExit((info) => {
       if (info.expected || this.runtimes.get(runtime.competitionId) !== runtime || runtime.client !== client) return;
@@ -479,7 +479,7 @@ export class WorkRuntimeManager {
 
   // Log ingestion, participant reconciliation and event attribution are kept together below.
 
-  public ingestLine(runtime: WorkRuntime, line: string): void {
+  public ingestLine(runtime: WorkRuntime, line: string, observedCommand?: CommandRecord): void {
     const config = this.host.getPublishedConfig(runtime.competitionId);
     if (!config) return;
     this.host.appendRawLog(runtime.competitionId, "mock-client", line);
@@ -525,6 +525,21 @@ export class WorkRuntimeManager {
     if (parsed.event.type === "warning") this.handleWarning(runtime, config, parsed.event);
     if (parsed.event.type === "unknown" && typeof (parsed.event as { text?: string }).text === "string" && /toggled cheat off globally/i.test((parsed.event as { text?: string }).text ?? "")) runtime.controller.resetAllCheat();
     const event = this.domainToScenarioEvent(runtime, config, parsed.event, eventStage);
+    const confirmsCurrentGo = observedCommand?.status === "acknowledged" && observedCommand.action.type === "go";
+    if (event?.type === "go" && before.restartPending && !confirmsCurrentGo) {
+      this.host.appendAttention(runtime.competitionId, {
+        id: `ignored-pre-restart-go:${event.sourceId}`,
+        category: "command",
+        severity: "warning",
+        title: "已忽略旧发令周期的 Go 回显",
+        message: "强制重赛后尚未发送并确认新的 Go；该迟到回显仅保留为原始证据，不会创建尝试或进入榜单。",
+        occurredAt: parsed.event.occurredAt,
+        stageId: before.currentStageId
+      });
+      this.host.journal.append({ type: "work.log", competitionId: runtime.competitionId, data: parsed });
+      this.saveSnapshot(runtime);
+      return;
+    }
     if (event) {
       if ("playerId" in event) {
         runtime.controller.registerParticipant(event.playerId);

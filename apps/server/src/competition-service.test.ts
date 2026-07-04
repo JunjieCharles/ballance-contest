@@ -1093,6 +1093,61 @@ describe("CompetitionService dynamic participants", () => {
     expect(service.snapshot(record.id).runtime.blockers.some((blocker) => blocker.code === "COMMAND_UNCONFIRMED")).toBe(false);
   });
 
+  it("uses force restart to supersede unresolved real commands without rewriting their audit status", async () => {
+    dataRoot = mkdtempSync(join(tmpdir(), "ballance-force-restart-commands-"));
+    database = openDatabase(join(dataRoot, "console.sqlite"));
+    const service = new CompetitionService(undefined, { database, dataRoot });
+    const record = service.create({ name: "Force restart commands", mode: "work", idempotencyKey: "force-restart-commands" });
+    service.publish(record.id, 0, "publish-force-restart-commands");
+    const manager = workRuntimeManager(service);
+    const runtimeHolder: { current?: WorkRuntime } = {};
+    const runtime = manager.makeRuntime(record.id, service.snapshot(record.id).publishedConfig as CompetitionConfig, {
+      write: async (command) => {
+        if (command.startsWith("countdown ")) {
+          runtimeHolder.current?.commands.observeLine("[7, *ContestConsole]: Level 01 - Get ready");
+        }
+      }
+    });
+    runtimeHolder.current = runtime;
+    manager.register(record.id, runtime);
+    manager.ingestLine(runtime, "[07-04 10:00:00] 7: *ContestConsole     0ms");
+    const now = new Date().toISOString();
+    const unresolved = {
+      id: "old-uncertain-raw",
+      idempotencyKey: "old-uncertain-raw",
+      action: { type: "raw" as const, command: "status" },
+      command: "status",
+      status: "uncertain" as const,
+      createdAt: now,
+      updatedAt: now
+    };
+    database.sqlite.prepare("INSERT INTO command_audits(id,competition_id,idempotency_key,action_type,status,payload,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?)")
+      .run(unresolved.id, record.id, unresolved.idempotencyKey, "raw", unresolved.status, JSON.stringify(unresolved), now, now);
+
+    let snapshot = service.snapshot(record.id);
+    expect(snapshot.runtime.unconfirmedCommands).toContainEqual(expect.objectContaining({ id: unresolved.id }));
+    expect(snapshot.runtime.availableActions).toContainEqual(expect.objectContaining({ action: "restart-stage", enabled: true }));
+    const stageId = snapshot.runtime.currentStageId;
+    if (!stageId) throw new Error("missing current stage");
+    const confirmation = service.createConfirmation(record.id, { kind: "restart-stage", target: stageId });
+    await service.performAction(record.id, {
+      expectedStateVersion: snapshot.competition.stateVersion,
+      idempotencyKey: "force-restart-with-unresolved-command",
+      action: { type: "restart-stage", stageId, confirmationToken: confirmation.token, impactHash: confirmation.impactHash }
+    });
+
+    snapshot = service.snapshot(record.id);
+    expect(snapshot.runtime.phase).toBe("ready");
+    expect(snapshot.runtime.unconfirmedCommands).toEqual([]);
+    expect(snapshot.runtime.attentionItems).toContainEqual(expect.objectContaining({ title: "未决真实命令已由强制重赛隔离" }));
+    expect(database.sqlite.prepare("SELECT status FROM command_audits WHERE id=?").get(unresolved.id)).toMatchObject({ status: "uncertain" });
+    manager.ingestLine(runtime, "[07-04 10:00:01] [7, *ContestConsole]: Level 01 - Go!");
+    snapshot = service.snapshot(record.id);
+    expect(snapshot.runtime.attempts).toEqual([]);
+    expect(snapshot.runtime.attentionItems).toContainEqual(expect.objectContaining({ title: "已忽略旧发令周期的 Go 回显" }));
+    service.close();
+  });
+
   it("rejects forcenextrestart at the real raw-command action boundary", async () => {
     const service = new CompetitionService();
     const record = service.create({ name: "Reject global Go", mode: "work", idempotencyKey: "reject-global-go" });

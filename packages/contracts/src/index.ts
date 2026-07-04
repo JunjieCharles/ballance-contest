@@ -515,7 +515,7 @@ export type CompetitionAction =
   | { type: "delay-ready"; milliseconds: number; confirmationToken: string; impactHash: string }
   | { type: "extend-stage-deadline"; milliseconds: number; confirmationToken: string; impactHash: string }
   | { type: "end-stage"; confirmationToken: string; impactHash: string }
-  | { type: "restart-stage"; attemptId: string; confirmationToken: string; impactHash: string }
+  | { type: "restart-stage"; stageId: string; confirmationToken: string; impactHash: string }
   | { type: "set-start-protection"; used: boolean; confirmationToken: string; impactHash: string }
   | { type: "participant-associate"; participantId: string; connectionId: string }
   | { type: "participant-split"; connectionId: string }

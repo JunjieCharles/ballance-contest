@@ -541,18 +541,16 @@ describe("CompetitionController", () => {
     controller.recordResult({ stageId: "s1", playerId: "p1", status: "finished", sourceId: "p1-finish" });
     const attempt = controller.snapshot().attempts[0];
     if (!attempt) throw new Error("missing attempt");
-    const stale = controller.issueStageRestartConfirmation(attempt.id);
+    const stale = controller.issueStageRestartConfirmation("s1");
     controller.observeCheat("p3", true, "p3-cheat");
-    expect(() => controller.confirmStageRestart({ attemptId: attempt.id, impactHash: stale.impactHash, token: stale.token, reason: "群体确认重赛" })).toThrow("STALE_CONFIRMATION_TOKEN");
+    expect(() => controller.confirmStageRestart({ stageId: "s1", impactHash: stale.impactHash, token: stale.token, reason: "群体确认重赛" })).toThrow("STALE_CONFIRMATION_TOKEN");
 
     controller.observeCheat("p3", false);
-    const confirmation = controller.issueStageRestartConfirmation(attempt.id);
-    controller.confirmStageRestart({ attemptId: attempt.id, impactHash: confirmation.impactHash, token: confirmation.token, reason: "裁判重赛本关" });
-    for (const item of controller.drainActions()) controller.acknowledgeAction(item.id, "acknowledged");
-    expect(() => controller.requestManualGo()).toThrow("MANUAL_GO_CHEAT_OFF_REQUIRED");
-    clock.advance(60_000);
-    controller.tick();
+    const confirmation = controller.issueStageRestartConfirmation("s1");
+    controller.confirmStageRestart({ stageId: "s1", impactHash: confirmation.impactHash, token: confirmation.token, reason: "裁判重赛本关" });
+    expect(controller.snapshot()).toMatchObject({ phase: "ready", restartPending: true, blockers: [] });
     controller.acknowledgeAction(action(controller, "ready").id, "acknowledged");
+    expect(() => controller.requestManualGo()).toThrow("MANUAL_GO_CHEAT_OFF_REQUIRED");
     for (let index = 0; index < 2; index += 1) {
       clock.advance(5_000); controller.tick(); controller.acknowledgeAction(action(controller, "ready").id, "acknowledged");
     }
@@ -568,6 +566,33 @@ describe("CompetitionController", () => {
     expect(snapshot.attempts).toHaveLength(2);
     expect(snapshot.attempts[0]).toMatchObject({ attemptNumber: 1, voided: true });
     expect(snapshot.attempts[1]).toMatchObject({ attemptNumber: 2, voided: false });
+  });
+
+  it("force-resets a pre-Go stage despite command, permission and incident blockers", () => {
+    const clock = new FakeClock();
+    const controller = new CompetitionController(configuration(), clock);
+    connectAll(controller);
+    controller.enable(0);
+    for (const item of controller.drainActions()) controller.acknowledgeAction(item.id, "acknowledged");
+    controller.tick();
+    const cycleActions = controller.drainActions();
+    const ready = cycleActions.find((item) => item.kind === "ready");
+    if (!ready) throw new Error("missing ready action");
+    controller.acknowledgeAction(ready.id, "uncertain");
+    controller.observePermissionDenied("permission denied");
+    controller.observeServerDisconnect("connection dropped");
+    expect(controller.snapshot().blockers.map((blocker) => blocker.code)).toEqual(expect.arrayContaining([
+      "PERMISSION_DENIED", "COMMAND_UNCONFIRMED", "INCIDENT_OPEN"
+    ]));
+
+    const confirmation = controller.issueStageRestartConfirmation("s1");
+    controller.confirmStageRestart({ stageId: "s1", impactHash: confirmation.impactHash, token: confirmation.token, reason: "强制恢复现场" });
+
+    const snapshot = controller.snapshot();
+    expect(snapshot).toMatchObject({ phase: "ready", automationEnabled: true, restartPending: true, attempts: [], blockers: [] });
+    expect(snapshot.incidents.every((incident) => incident.status === "resolved")).toBe(true);
+    expect(snapshot.actions.find((item) => item.id === ready.id)?.status).toBe("cancelled");
+    expect(controller.drainActions()).toEqual([expect.objectContaining({ kind: "ready", stageId: "s1", status: "pending" })]);
   });
 
   it("excludes an unfinished player's in-race cheat without changing completed players", () => {

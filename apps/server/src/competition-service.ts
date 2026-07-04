@@ -644,6 +644,7 @@ export class CompetitionService {
     }
     if (input.kind === "restart-stage") {
       try {
+        this.assertActionAvailable(competitionId, "restart-stage", runtimeSnapshot);
         const issued = this.controllerFor(competitionId).issueStageRestartConfirmation(target);
         impactHash = issued.impactHash;
         runtimeToken = issued.token;
@@ -767,9 +768,13 @@ export class CompetitionService {
           };
         case "restart-stage":
           return {
-            title: `重赛 ${displayStageName}？`,
-            consequences: ["当前尝试和本次成绩将作废，但原始证据会保留。", "重新执行完整 Ready 和发令；收到新的 Go 后才创建新尝试。"],
-            irreversible: false
+            title: `强制重赛 ${displayStageName}？`,
+            consequences: [
+              "立即把当前关重置到 Ready；已有尝试和本次成绩将作废，尚未 Go 时不会补造尝试。",
+              "当前流程命令、事故、权限提示、未决真实命令和观察缺口将不再阻断新周期，原始证据与审计永久保留。",
+              "系统会立即发送新的第一条 Ready；真实连接或权限仍不可用时，新命令可能再次失败。"
+            ],
+            irreversible: true
           };
         case "delay-ready":
           return {
@@ -880,7 +885,15 @@ export class CompetitionService {
         };
       }
       if (input.kind === "restart-stage") {
-        return { title: `重赛 ${displayStageName}？`, consequences: ["当前尝试和本次成绩将作废，但原始证据会保留。", "重新执行完整 Ready 和发令。"], irreversible: false };
+        return {
+          title: `强制重赛 ${displayStageName}？`,
+          consequences: [
+            "立即把当前关重置到 Ready；已有尝试和本次成绩将作废，尚未 Go 时不会补造尝试。",
+            "当前阻断不再阻止新周期，原始证据与审计永久保留。",
+            "真实连接或权限仍不可用时，新 Ready 可能再次失败。"
+          ],
+          irreversible: true
+        };
       }
       return { title: "确认执行这个操作？", consequences: ["将按按钮说明执行当前操作。"], irreversible: false };
     })();
@@ -1066,8 +1079,14 @@ export class CompetitionService {
     const actionId = this.actionIdFor(input.action);
     if (actionId) this.assertActionAvailable(competitionId, actionId, this.runtimeAutomationSnapshot(competitionId));
     const confirmation = this.consumeActionConfirmation(competitionId, input.action);
+    const restartUnconfirmedCommands = input.action.type === "restart-stage"
+      ? this.unconfirmedCommandsFor(competitionId, this.runtimeAutomationSnapshot(competitionId))
+      : [];
     const handledLocally = await this.refereeActionService.applyLocal(competitionId, input.action, confirmation);
-    if (input.action.type === "restart-stage") this.resolveObservationGapsByRestart(competitionId, input.action.attemptId);
+    if (input.action.type === "restart-stage") {
+      this.resolveObservationGapsByRestart(competitionId, input.action.stageId);
+      this.supersedeUnconfirmedCommandsByRestart(competitionId, input.action.stageId, restartUnconfirmedCommands);
+    }
     let view: CommandRecordView;
     if (handledLocally) {
       view = this.refereeActionService.localActionRecord(input.action.type, this.refereeActionService.describe(input.action), competition.mode === "test");
@@ -1311,7 +1330,7 @@ export class CompetitionService {
     ).map((gap) => ({ id: gap.id, code: gap.code, detail: gap.detail, createdAt: gap.created_at }));
   }
 
-  private resolveObservationGapsByRestart(competitionId: string, attemptId: string): void {
+  private resolveObservationGapsByRestart(competitionId: string, stageId: string): void {
     if (!this.options.database) return;
     const gaps = this.observationGapsFor(competitionId);
     if (gaps.length === 0) return;
@@ -1319,14 +1338,42 @@ export class CompetitionService {
     this.options.database.sqlite.prepare("UPDATE observation_gaps SET status='resolved',resolved_at=? WHERE competition_id=? AND status='open'")
       .run(resolvedAt, competitionId);
     this.appendAttention(competitionId, {
-      id: `observation-gaps-restart:${attemptId}:${randomUUID()}`,
+      id: `observation-gaps-restart:${stageId}:${randomUUID()}`,
       category: "incident",
       severity: "info",
       title: "观察缺口已由重赛处置",
-      message: `${gaps.length} 项观察缺口已绑定到作废尝试；新权威 Go 将创建新尝试，原缺口证据永久保留。`,
+      message: `${gaps.length} 项观察缺口已从新 Ready 周期的阻断中隔离；新权威 Go 将创建新尝试，原缺口证据永久保留。`,
       occurredAt: resolvedAt
     });
-    this.journal.append({ type: "observation-gap.resolved-by-restart", competitionId, data: { attemptId, gapIds: gaps.map((gap) => gap.id) } });
+    this.journal.append({ type: "observation-gap.resolved-by-restart", competitionId, data: { stageId, gapIds: gaps.map((gap) => gap.id) } });
+  }
+
+  private supersedeUnconfirmedCommandsByRestart(
+    competitionId: string,
+    stageId: string,
+    commands: RuntimeSnapshot["unconfirmedCommands"]
+  ): void {
+    if (commands.length === 0) return;
+    const payload = this.getPayload(competitionId);
+    this.savePayload(competitionId, {
+      ...payload,
+      resolvedCommandIds: [...new Set([...(payload.resolvedCommandIds ?? []), ...commands.map((command) => command.id)])]
+    });
+    const occurredAt = new Date().toISOString();
+    this.appendAttention(competitionId, {
+      id: `commands-superseded-by-restart:${stageId}:${randomUUID()}`,
+      category: "command",
+      severity: "warning",
+      title: "未决真实命令已由强制重赛隔离",
+      message: `${commands.length} 条失败或结果不确定的真实命令不再阻断新 Ready 周期；未判定其已执行，原命令状态与审计永久保留。`,
+      occurredAt,
+      stageId
+    });
+    this.journal.append({
+      type: "command.superseded-by-restart",
+      competitionId,
+      data: { stageId, commandIds: commands.map((command) => command.id) }
+    });
   }
 
   private inferSnapshotWallClockOrigin(competitionId: string, snapshot: AutomationSnapshot, fallback: number): number {
@@ -1679,7 +1726,7 @@ export class CompetitionService {
           "set-start-protection"
         );
       case "restart-stage":
-        return this.consumeConfirmation(competitionId, "restart-stage", action.confirmationToken, action.impactHash, action.attemptId, "restart-stage");
+        return this.consumeConfirmation(competitionId, "restart-stage", action.confirmationToken, action.impactHash, action.stageId, "restart-stage");
       case "scoreboard-override":
         return this.consumeConfirmation(
           competitionId,
@@ -1743,9 +1790,6 @@ export class CompetitionService {
     const workConnectionRecoveryState = this.workRuntimeManager.get(competitionId)?.connectionRecoveryState;
     const workConnectionRecoveryFailed = workConnectionRecoveryState === "failed";
     const openAttempt = snapshot?.attempts.findLast((attempt) => attempt.intakeOpen && !attempt.voided);
-    const currentAttempt = snapshot?.attempts.findLast((attempt) => attempt.stageId === snapshot.currentStageId && !attempt.voided);
-    const restartPhase = phase === "running" || phase === "tail-intake" || phase === "incident"
-      || phase === "paused" && (snapshot?.pausedFromPhase === "running" || snapshot?.pausedFromPhase === "tail-intake");
     const commandTargetStageId = snapshot?.plannedReadyStageId ?? snapshot?.currentStageId;
     const targetStageActions = snapshot?.actions.filter((action) => action.stageId === commandTargetStageId) ?? [];
     const previousGoIndex = targetStageActions.findLastIndex((action) => action.kind === "go" && (action.status === "acknowledged" || action.status === "referee-confirmed"));
@@ -1803,8 +1847,9 @@ export class CompetitionService {
         !refereeActionsUnlocked ? "请先发布比赛配置" : "当前没有开放的成绩接收窗口"),
       descriptor("end-stage", "提前结束本关", "关闭成绩窗口，未完成且未排除的选手记为 DNF。", refereeActionsUnlocked && Boolean(openAttempt) && ["running", "tail-intake"].includes(phase),
         !refereeActionsUnlocked ? "请先发布比赛配置" : "当前没有可结束的开放关卡"),
-      descriptor("restart-stage", "重赛本关", "作废当前尝试并退出有效榜单，保留证据、发送通知并重新执行完整 Ready 与倒数。", competition.status === "published" && Boolean(currentAttempt) && restartPhase,
-        competition.status !== "published" ? "比赛已结束，不能再重赛" : !currentAttempt ? "本关尚未 Go，不能重赛" : "下一关已进入 Ready 或当前阶段不能重赛"),
+      descriptor("restart-stage", "重赛本关", "强制隔离当前阻断并立即把当前关重置到 Ready；已有尝试作废，所有原始证据与审计保留。",
+        competition.status === "published" && hasRuntime && Boolean(snapshot?.currentStageId),
+        competition.status !== "published" ? "只有已发布且未结束的比赛可以重赛" : !hasRuntime ? "请先建立比赛连接或创建测试运行" : "当前运行没有可重置的关卡"),
       descriptor("set-start-protection", startProtectionUsed ? "将起跑保护重置为未使用" : "将起跑保护标记为已使用",
         startProtectionUsed ? "允许本关后续首次有效敏感期掉线再次触发起跑保护。" : "本关后续敏感期掉线不再自动延时或作废尝试。",
         refereeActionsUnlocked && hasRuntime && startProtectionEnabled && Boolean(snapshot?.currentStageId) && phase !== "review",

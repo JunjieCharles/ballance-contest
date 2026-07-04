@@ -669,6 +669,7 @@ export class CompetitionController {
   public observeAuthoritativeGo(stageId = this.stage.id): void {
     const stageIndex = this.stages.findIndex((stage) => stage.id === stageId);
     if (stageIndex < 0) throw new Error("UNKNOWN_STAGE");
+    if (this.restartPending && !this.isAcknowledged(this.goActionId)) return;
     const current = this.currentAttempt;
     if (current?.stageId === stageId && current.intakeOpen && this.isResultIntakePhase()) return;
     this.startAttemptForStage(stageId);
@@ -800,48 +801,69 @@ export class CompetitionController {
     this.bump();
   }
 
-  public issueStageRestartConfirmation(attemptId: string, ttlMs = 60_000): { token: string; impactHash: string; expiresAtMs: number } {
+  public issueStageRestartConfirmation(stageId: string, ttlMs = 60_000): { token: string; impactHash: string; expiresAtMs: number } {
     const attempt = this.currentAttempt;
-    if (!attempt || attempt.id !== attemptId || !this.stageRestartAvailable()) throw new Error("RESTART_NOT_AVAILABLE");
-    const impactHash = sha256({ attemptId: attempt.id, stageId: attempt.stageId, results: attempt.results });
+    if (stageId !== this.stage.id) throw new Error("RESTART_NOT_AVAILABLE");
+    const impactHash = sha256({
+      stageId,
+      phase: this.phase,
+      attempt: attempt ? { id: attempt.id, results: attempt.results } : null,
+      unresolvedActions: this.actions
+        .filter((action) => action.status === "pending" || action.status === "failed" || action.status === "uncertain")
+        .map((action) => ({ id: action.id, status: action.status })),
+      openIncidents: this.incidents.filter((incident) => incident.status === "open").map((incident) => incident.id),
+      permissionDenied: Boolean(this.permissionDeniedEvidence)
+    });
     const expiresAtMs = this.clock.now() + ttlMs;
     const token = this.tokenService.issue({
-      competitionId: this.configuration.competitionId, stageId: this.stage.id, attemptId: attempt.id,
-      stateVersion: this.stateVersion, targetId: attempt.id, impactHash, expiresAtMs, nonce: randomUUID()
+      competitionId: this.configuration.competitionId, stageId, attemptId: attempt?.id ?? "",
+      stateVersion: this.stateVersion, targetId: stageId, impactHash, expiresAtMs, nonce: randomUUID()
     });
     return { token, impactHash, expiresAtMs };
   }
 
-  public confirmStageRestart(input: { attemptId: string; impactHash: string; token: string; reason: string }): void {
+  public confirmStageRestart(input: { stageId: string; impactHash: string; token: string; reason: string }): void {
     if (!input.reason.trim()) throw new Error("RESTART_REASON_REQUIRED");
     const attempt = this.currentAttempt;
-    if (!attempt || attempt.id !== input.attemptId || !this.stageRestartAvailable()) throw new Error("RESTART_NOT_AVAILABLE");
+    if (input.stageId !== this.stage.id) throw new Error("RESTART_NOT_AVAILABLE");
     this.tokenService.consume(input.token, {
-      competitionId: this.configuration.competitionId, stageId: this.stage.id, attemptId: attempt.id,
-      stateVersion: this.stateVersion, targetId: attempt.id, impactHash: input.impactHash
+      competitionId: this.configuration.competitionId, stageId: this.stage.id, attemptId: attempt?.id ?? "",
+      stateVersion: this.stateVersion, targetId: this.stage.id, impactHash: input.impactHash
     }, this.clock.now());
-    attempt.voided = true;
-    this.closeIntake(attempt);
-    for (const incident of this.incidents) if (incident.attemptId === attempt.id && incident.status === "open") incident.status = "resolved";
+    if (attempt) {
+      attempt.voided = true;
+      this.closeIntake(attempt);
+    }
+    for (const action of this.actions) {
+      if (action.status !== "pending" && action.status !== "failed" && action.status !== "uncertain") continue;
+      action.status = "cancelled";
+      this.undeliveredActionIds.delete(action.id);
+    }
+    for (const incident of this.incidents) if (incident.status === "open") incident.status = "resolved";
+    this.permissionDeniedEvidence = undefined;
     this.automationEnabled = true;
     this.pausedFromPhase = undefined;
-    this.phase = "restart-preparing";
     this.restartPending = true;
     this.nextStagePending = false;
-    this.planReady(this.stageIndex, this.clock.now() + READY_NOTICE_LEAD_MS);
-    this.queueDueReadyNotice();
+    this.plannedReadyAtMs = undefined;
+    this.plannedReadyStageIndex = undefined;
+    this.noticeActionId = undefined;
+    this.waiting.clear();
+    this.absent.clear();
+    this.waitDeadlineAtMs = undefined;
+    this.readyAtMs = undefined;
     this.readyActionId = undefined;
     this.readyActionIds.length = 0;
     this.readyAnnouncementActionId = undefined;
     this.cheatOffActionId = undefined;
+    this.lastCheatOffAcknowledgedAtMs = undefined;
     this.goActionId = undefined;
-    this.queueAction("announce", `本轮将重赛：${input.reason.trim()}`);
-    this.bump();
-  }
-
-  private stageRestartAvailable(): boolean {
-    const effectivePhase = this.phase === "paused" ? this.pausedFromPhase : this.phase;
-    return effectivePhase === "running" || effectivePhase === "tail-intake" || this.phase === "incident";
+    this.countdownValue = undefined;
+    this.cheatWarningSent = false;
+    this.cheatEnabledAfterCurrentOff.clear();
+    this.startProtectionSensitiveStageId = undefined;
+    this.startProtectionUntilMs = undefined;
+    this.enterReady();
   }
 
   public drainActions(): readonly AutomationAction[] {

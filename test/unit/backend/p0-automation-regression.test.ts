@@ -117,11 +117,10 @@ describe("P0 centralized automation and command regression", () => {
     startRunning(controller, clock);
     const attempt = controller.snapshot().attempts[0];
     if (!attempt) throw new Error("missing attempt");
-    const confirmation = controller.issueStageRestartConfirmation(attempt.id);
-    expect(() => controller.confirmStageRestart({ attemptId: attempt.id, impactHash: confirmation.impactHash, token: "bad-token", reason: "bad" })).toThrow("INVALID_CONFIRMATION_TOKEN");
-    controller.confirmStageRestart({ attemptId: attempt.id, impactHash: confirmation.impactHash, token: confirmation.token, reason: "裁判重赛本关" });
+    const confirmation = controller.issueStageRestartConfirmation("s1");
+    expect(() => controller.confirmStageRestart({ stageId: "s1", impactHash: confirmation.impactHash, token: "bad-token", reason: "bad" })).toThrow("INVALID_CONFIRMATION_TOKEN");
+    controller.confirmStageRestart({ stageId: "s1", impactHash: confirmation.impactHash, token: confirmation.token, reason: "裁判重赛本关" });
     settle(controller);
-    clock.advanceBy(60_000); settle(controller);
     clock.advanceBy(5_000); settle(controller);
     clock.advanceBy(5_000); settle(controller);
     clock.advanceBy(5_000); settle(controller);
