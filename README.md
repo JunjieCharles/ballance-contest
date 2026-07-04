@@ -284,6 +284,7 @@ npm run build
 | `npm run lint` | ESLint 静态检查 |
 | `npm run typecheck` | TypeScript 类型检查 |
 | `npm test` | Vitest 单元、集成和非功能测试 |
+| `npm run test:coverage` | 运行同一组 Vitest 测试并生成文本及 `coverage/index.html` 覆盖率报告 |
 | `npm run build` | 构建全部共享包、服务和前端 |
 | `npm run test:e2e` | Edge 与 Chrome 浏览器旅程 |
 | `npm run test:mock-client` | 真实 MockClient 管道测试 |
@@ -291,6 +292,8 @@ npm run build
 | `npm run test:portable` | 在无系统 Node 环境验证便携包 |
 
 Playwright 的临时运行产物写入 `.runtime/playwright-results`，不属于项目源码或发布内容。
+
+`npm run test:coverage` 使用与 Vitest 同版本的 V8 provider，并把未被测试导入的生产源码也计入基线。该报告只反映 Vitest 单元、集成和非功能测试；Playwright 浏览器旅程、真实 MockClient、实服探针和 portable smoke 不会自动合并到这份覆盖率中。
 
 ### 生成便携包
 

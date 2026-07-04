@@ -129,6 +129,7 @@
 - 测试中启用工作或测试自动化会启动实时驱动定时器；关闭临时 SQLite 或删除测试数据前必须先关闭 `CompetitionService`，并把 Vitest 报告的测试结束后未处理异常视为门禁失败，不能因断言全部通过而忽略。
 - 白盒测试不得继续穿透已经移出的旧私有 Map；应直接通过新模块的窄公开端口构造运行时、注入日志和驱动时钟，并保留 API、恢复和浏览器旅程作为跨模块回归。
 - Vitest 并行 worker 数必须受控，避免 Windows/原生 SQLite 组合下因提交内存峰值导致 worker OOM；出现 `ERR_IPC_CHANNEL_CLOSED`、worker OOM 或未处理拒绝时整轮门禁按失败处理，不能只根据已打印的绿色断言判定通过。
+- Vitest 覆盖率使用与当前 Vitest 完全匹配的 `@vitest/coverage-v8` provider，并启用 `all` 纳入未被导入的生产源码；升级 Vitest 时必须同步 provider 版本。覆盖率只代表 Vitest 单元、集成和非功能测试，不得把 Playwright、真实 MockClient、实服探针或 portable smoke 宣称为已计入，除非另行完成并验证跨进程插桩合并。
 - 当前环境 `PATH` 找不到 `node`/`npm` 时，先从仓库 `.tools/node-v*-win-x64` 定位本地工具链并只为当前门禁命令补充 `PATH`；不得据此跳过门禁、修改全局环境或误用便携产物中的运行时。
 - 修改 `packages/contracts` 或 `packages/core` 后定向运行下游服务测试前，必须先重建对应 workspace；下游测试可能按包导出加载 `dist`，不能把旧构建造成的假失败或假通过当作当前源码结论。
 - 通过 `CompetitionService` 验证已发布工作模式日志摄入时必须使用独立临时 SQLite（或显式提供等价的已发布配置端口），并断言目标事件确实进入状态机；无数据库实例不会持久化发布配置，不能用“阶段恰好没变化”冒充日志链路回归。

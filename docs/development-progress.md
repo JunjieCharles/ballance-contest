@@ -109,6 +109,7 @@
 | 2026-07-04 | `npm run lint` | 通过 |
 | 2026-07-04 | `npm run typecheck` | 通过 |
 | 2026-07-04 | `npm test` | 30 个文件、204 项测试通过；新增覆盖起跑保护事件时间跨快照保持固定、与第二关新事件按真实发生时间排序，并保留本机裁判身份、HS 协议、起跑保护、断线、违规排除及既有流程主路径 |
+| 2026-07-04 | `npm run test:coverage` | V8 provider 覆盖同一组 204 项 Vitest 测试并包含未导入生产文件：全部源码语句/行 78.55%、分支 80.96%、函数 89.27%；服务端语句/行 86.72%，Core 92.53%，Web 0.59%。HTML 报告生成于 `coverage/index.html`；Playwright、真实 MockClient、实服探针和 portable smoke 不计入该数字 |
 | 2026-07-04 | `npm run build` | 通过 |
 | 2026-07-04 | `npm run test:e2e` | Edge 与 Chrome 共 14 项测试通过；覆盖起跑保护配置/确认、比赛连接单按钮、常驻重赛按钮和 Ready 时间分栏，并保留完整流程、成绩呈现、拖拽和日志窗主路径 |
 | 2026-07-04 | `npm run test:mock-client` | 真实 MockClient 版本、两次启动、日志续读、stdin、回显、预期退出标记与正常退出通过 |
