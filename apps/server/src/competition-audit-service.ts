@@ -82,6 +82,9 @@ export class CompetitionAuditService {
         ...(item.action ? { action: item.action } : {})
       }))
       : [...(this.memoryAttentionItems.get(competitionId) ?? [])].reverse();
+    const incidentOccurredAt = (createdAtMs: number): string => snapshot?.wallClockOriginMs === undefined
+      ? new Date().toISOString()
+      : new Date(snapshot.wallClockOriginMs + createdAtMs).toISOString();
     const dynamic: AttentionItem[] = [
       ...(snapshot?.blockers ?? []).map((blocker, index) => ({
         id: `blocker:${blocker.code}:${blocker.participantId ?? index}`,
@@ -102,7 +105,7 @@ export class CompetitionAuditService {
           severity: automaticProtection ? "warning" as const : "critical" as const,
           title: automaticProtection ? "起跑保护已自动执行" : "待处理事故",
           message: automaticProtection ? `尝试已按规则自动处理；证据：${value.evidence}` : `${value.type}：${value.evidence}`,
-          occurredAt: new Date().toISOString(),
+          occurredAt: incidentOccurredAt(value.createdAtMs),
           ...(value.type === "server-disconnect" ? { action: "restart-work" as const }
             : value.type === "timing-discontinuity" ? { action: "enable-automation" as const }
               : automaticProtection ? {} : { action: "restart-stage" as const }),
@@ -110,7 +113,9 @@ export class CompetitionAuditService {
         };
       })
     ];
-    return [...dynamic, ...stored].slice(0, 100);
+    return [...dynamic, ...stored]
+      .sort((left, right) => Date.parse(right.occurredAt) - Date.parse(left.occurredAt) || left.id.localeCompare(right.id))
+      .slice(0, 100);
   }
 
   public recordAutomationAttention(competitionId: string, action: AutomationAction): void {
