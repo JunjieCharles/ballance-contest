@@ -2,6 +2,7 @@
 !/server-windows/*.md
 !/server-windows/LICENSE
 /docs/archive/
+/docs/releases/
 *.bin
 node_modules/
 dist/

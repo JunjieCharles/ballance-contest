@@ -1,6 +1,6 @@
 ---
 name: release-publish
-description: Prepare a Ballance Contest Console release only when the user explicitly invokes this skill or clearly asks to create a release/tag/artifact. Use for adding a release git tag, building and validating the Windows portable package, creating a zip archive that excludes .mock-client-uuid, drafting release notes, and stopping before the user manually uploads and publishes the GitHub release. Do not use for normal development, routine gates, ordinary portable smoke tests, or regular commits.
+description: Prepare a Ballance Contest Console release only when the user explicitly invokes this skill or clearly asks to create a release/tag/artifact. Use for adding a release git tag, building and validating the Windows portable package, creating a zip archive that excludes .mock-client-uuid, drafting Chinese release notes, and stopping before the user manually uploads and publishes the GitHub release. Do not use for normal development, routine gates, ordinary portable smoke tests, or regular commits.
 ---
 
 # Release Publish
@@ -74,47 +74,50 @@ try {
 
 6. Generate release documentation:
    - Create or update `docs/releases/<tag>.md`.
+   - Write the document in Chinese.
    - Include: tag, commit SHA, date, gate results, portable zip path, SHA-256, notable changes, known limits, and manual publish checklist.
    - Do not claim formal tournament readiness unless target-server rehearsal is recorded.
+   - Treat `docs/releases/` as an ignored local release-notes workspace unless the user explicitly asks to track a release document.
 
 7. Stop for manual publication:
    - Tell the user to manually upload the zip and publish the release.
-   - Provide the local tag name, release doc path, zip path, and SHA-256.
+   - Provide the local tag name, Chinese release doc path, zip path, and SHA-256.
    - Mention that the tag has not been pushed and the release has not been published unless those actions were explicitly requested and completed.
 
 ## Release Document Template
 
 ```markdown
-# <tag> Release
+# <tag> 发布说明
 
-- Tag: `<tag>`
-- Commit: `<full-sha>`
-- Date: `<YYYY-MM-DD>`
-- Portable artifact: `<zip-path>`
-- SHA-256: `<hash>`
+- Tag：`<tag>`
+- 提交：`<full-sha>`
+- 日期：`<YYYY-MM-DD>`
+- 便携包：`<zip-path>`
+- SHA-256：`<hash>`
 
-## Verification
+## 验证
 
-- `npm run lint`: passed
-- `npm run typecheck`: passed
-- `npm test`: passed
-- `npm run build`: passed
-- `npm run test:e2e`: passed
-- `npm run test:mock-client`: passed
-- `npm run package:portable`: passed
-- `npm run test:portable`: passed
+- `npm run lint`：通过
+- `npm run typecheck`：通过
+- `npm test`：通过
+- `npm run build`：通过
+- `npm run test:e2e`：通过
+- `npm run test:mock-client`：通过
+- `npm run package:portable`：通过
+- `npm run test:portable`：通过
 
-## Changes
+## 主要变化
 
 - ...
 
-## Known Limits
+## 已知限制
 
-- Formal tournament readiness still requires target-server rehearsal unless separately recorded.
+- 除非另有现场验收记录，否则正式赛事可用性仍需要目标服务器彩排确认。
 
-## Manual Publish Checklist
+## 手动发布清单
 
-- Upload `<zip-path>` to the release page.
-- Publish release notes from this document.
-- Push `<tag>` only when the release is ready to be public.
+- 将 `<zip-path>` 上传到 release 页面。
+- 使用本文档内容发布 release notes。
+- 仅在确认 release 可以公开时推送 `<tag>`。
+- 手动发布 GitHub release。
 ```
