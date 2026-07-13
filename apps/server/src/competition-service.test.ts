@@ -4,6 +4,7 @@ import { join } from "node:path";
 import type { CompetitionConfig, ScenarioDefinition, ScenarioEvent } from "@ballance/contracts";
 import { CompetitionController } from "@ballance/core";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import type { CommandRecord } from "./command-queue.js";
 import type { CommandTransport } from "./mock-client.js";
 import { CompetitionService, seededBehaviorRandom } from "./competition-service.js";
 import { openDatabase, type OpenedDatabase } from "./storage/database.js";
@@ -210,7 +211,7 @@ describe("CompetitionService dynamic participants", () => {
     service.close();
   });
 
-  it("opens manual reconnect only after the single automatic restart fails", async () => {
+  it("keeps manual reconnect available while healthy and disabled during automatic recovery", async () => {
     dataRoot = mkdtempSync(join(tmpdir(), "ballance-auto-reconnect-failed-"));
     database = openDatabase(join(dataRoot, "console.sqlite"));
     const service = new CompetitionService(undefined, { database, dataRoot });
@@ -222,6 +223,7 @@ describe("CompetitionService dynamic participants", () => {
     const replaceClient = vi.fn(async () => { throw new Error("restart failed"); });
     (manager as unknown as { replaceClient(runtime: WorkRuntime): Promise<void> }).replaceClient = replaceClient;
 
+    expect(service.snapshot(record.id).runtime.availableActions.find((action) => action.action === "restart-work")).toMatchObject({ enabled: true });
     manager.ingestLine(runtime, "[07-03 09:53:51] The host hath bidden us farewell.  (5003: Connection dropped)");
     expect(service.snapshot(record.id).runtime.availableActions.find((action) => action.action === "restart-work")).toMatchObject({ enabled: false, disabledReason: "正在自动尝试恢复连接" });
     await vi.waitFor(() => expect(runtime.connectionRecoveryState).toBe("failed"));
@@ -229,6 +231,50 @@ describe("CompetitionService dynamic participants", () => {
     expect(replaceClient).toHaveBeenCalledTimes(1);
     expect(service.snapshot(record.id).runtime.availableActions.find((action) => action.action === "restart-work")).toMatchObject({ enabled: true });
     expect(runtime.controller.snapshot().blockers).toContainEqual(expect.objectContaining({ code: "INCIDENT_OPEN" }));
+    service.close();
+  });
+
+  it("automatically reconnects once when scheduled list receives no server echo", async () => {
+    dataRoot = mkdtempSync(join(tmpdir(), "ballance-list-no-echo-"));
+    database = openDatabase(join(dataRoot, "console.sqlite"));
+    const service = new CompetitionService(undefined, { database, dataRoot });
+    const record = service.create({ name: "List no echo", mode: "work", idempotencyKey: "create-list-no-echo" });
+    service.publish(record.id, 0, "publish-list-no-echo");
+    const manager = workRuntimeManager(service);
+    const runtime = manager.makeRuntime(record.id, service.snapshot(record.id).publishedConfig as CompetitionConfig, { write: async () => undefined });
+    runtime.customMapsRegistered = true;
+    manager.register(record.id, runtime);
+    const replaceClient = vi.fn(async () => undefined);
+    (manager as unknown as { replaceClient(runtime: WorkRuntime): Promise<void> }).replaceClient = replaceClient;
+    const timedOutList = (id: string): CommandRecord => ({
+      id,
+      idempotencyKey: id,
+      action: { type: "list" },
+      command: "list",
+      status: "timed_out",
+      createdAt: "2026-07-13T00:00:00.000Z",
+      updatedAt: "2026-07-13T00:00:01.000Z"
+    });
+    const handleNoEcho = (manager as unknown as { handleParticipantListNoEcho(runtime: WorkRuntime, record: CommandRecord): void }).handleParticipantListNoEcho.bind(manager);
+
+    handleNoEcho(runtime, timedOutList("list-timeout-first"));
+    await vi.waitFor(() => expect(replaceClient).toHaveBeenCalledTimes(1));
+    expect(runtime.connectionRecoveryState).toBe("automatic");
+    expect(service.snapshot(record.id).runtime.availableActions.find((action) => action.action === "restart-work"))
+      .toMatchObject({ enabled: false, disabledReason: "正在自动尝试恢复连接" });
+    expect(service.snapshot(record.id).runtime.attentionItems).toContainEqual(expect.objectContaining({ title: "list 无回显，正在自动重连", severity: "warning" }));
+
+    manager.ingestLine(runtime, "[07-13 08:00:00] Connected to server OK");
+    expect(runtime.connectionRecoveryState).toBeUndefined();
+    handleNoEcho(runtime, timedOutList("list-timeout-second"));
+
+    expect(runtime.connectionRecoveryState).toBe("failed");
+    expect(service.snapshot(record.id).runtime.availableActions.find((action) => action.action === "restart-work")).toMatchObject({ enabled: true });
+    expect(service.snapshot(record.id).runtime.attentionItems).toContainEqual(expect.objectContaining({
+      title: "自动恢复连接失败",
+      severity: "critical",
+      action: "restart-work"
+    }));
     service.close();
   });
 
@@ -314,6 +360,7 @@ describe("CompetitionService dynamic participants", () => {
     expect(snapshot.currentScoreboard.find((entry) => entry.playerId === "Beta")?.stages["custom-hs-final"])
       .toMatchObject({ status: "dnf", points: 0 });
     expect(service.getRawClientLogs(record.id).filter((line) => line.rawLine.includes("云端决赛图") || line.rawLine.includes(`"${prefix}.."`))).toHaveLength(4);
+    service.close();
   });
 
   it("binds an official server hash echo only after the current referee Ready", () => {

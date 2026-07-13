@@ -576,10 +576,12 @@ function ConsolePanel({ snapshot, canWrite, versionKey, startWork, enableAutomat
   const reconnect = availabilityFor(runtime, "restart-work");
   const hasOpenServerIncident = (runtime.incidents as Array<{ type?: string; status?: string }>).some((incident) => incident.type === "server-disconnect" && incident.status === "open");
   const useReconnect = snapshot.competition.mode === "test" || startConnection?.disabledReason === "比赛连接已经启动";
+  const reconnectDisabledReason = reconnect?.disabledReason;
   const connectionLabel = snapshot.competition.mode === "test" ? reconnect?.label ?? "模拟恢复连接"
     : !useReconnect ? startConnection?.label ?? "连接比赛服务器"
       : reconnect?.enabled ? reconnect.label
-        : hasOpenServerIncident ? reconnect?.disabledReason ?? "正在恢复比赛连接" : "比赛服务器已连接";
+        : reconnectDisabledReason && reconnectDisabledReason !== "当前没有待恢复的服务器连接阻断" ? reconnectDisabledReason
+          : hasOpenServerIncident ? reconnectDisabledReason ?? "正在恢复比赛连接" : "比赛服务器已连接";
   const confirmedAction = (
     label: string,
     actionId: RefereeActionId,

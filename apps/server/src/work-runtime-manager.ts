@@ -66,6 +66,7 @@ export interface WorkRuntime {
   customMapsRegistered?: boolean;
   connectionRecoveryState?: "automatic" | "manual" | "failed";
   connectionRecoveryTimer?: ReturnType<typeof setTimeout>;
+  listNoEchoRecovery?: { attempted: boolean };
 }
 
 export interface WorkRuntimeHost {
@@ -150,6 +151,7 @@ export class WorkRuntimeManager {
     const runtime = this.runtimes.get(competitionId);
     if (!runtime) throw new ServiceError("NOT_FOUND", "比赛连接尚未建立", 404);
     this.clearConnectionRecoveryTimer(runtime);
+    delete runtime.listNoEchoRecovery;
     runtime.connectionRecoveryState = "manual";
     try {
       await this.replaceClient(runtime);
@@ -377,11 +379,47 @@ export class WorkRuntimeManager {
   }
 
   public startParticipantReconciliation(runtime: WorkRuntime): void {
-    const requestList = () => { void runtime.commands.enqueue({ type: "list" }, `participant-list:${runtime.competitionId}:${Date.now()}`); };
+    const requestList = () => { void this.requestParticipantList(runtime); };
     runtime.initialListTimer = setTimeout(requestList, 1_000);
     runtime.initialListTimer.unref?.();
     runtime.listTimer = setInterval(requestList, 30_000);
     runtime.listTimer.unref?.();
+  }
+
+  private async requestParticipantList(runtime: WorkRuntime): Promise<void> {
+    const record = await runtime.commands.enqueue({ type: "list" }, `participant-list:${runtime.competitionId}:${Date.now()}`);
+    if (this.runtimes.get(runtime.competitionId) !== runtime) return;
+    if (record.status === "acknowledged") {
+      delete runtime.listNoEchoRecovery;
+      return;
+    }
+    if (record.status === "timed_out") this.handleParticipantListNoEcho(runtime, record);
+  }
+
+  private handleParticipantListNoEcho(runtime: WorkRuntime, record: CommandRecord): void {
+    if (runtime.connectionRecoveryState === "automatic" || runtime.connectionRecoveryState === "manual") return;
+    if (runtime.listNoEchoRecovery?.attempted) {
+      this.markConnectionRecoveryFailed(runtime, "自动重连后 list 命令仍未观察到服务器名单回显", "automatic");
+      return;
+    }
+    runtime.listNoEchoRecovery = { attempted: true };
+    runtime.controller.observeServerDisconnect("list 命令等待服务器名单回显超时");
+    runtime.connectionRecoveryState = "automatic";
+    this.host.appendAttention(runtime.competitionId, {
+      id: `participant-list-no-echo:${record.id}`,
+      category: "incident",
+      severity: "warning",
+      title: "list 无回显，正在自动重连",
+      message: "在线名单对账命令没有服务器回显；已冻结后续发令并自动重启一次比赛连接。",
+      occurredAt: record.updatedAt
+    });
+    this.saveSnapshot(runtime);
+    void this.replaceClient(runtime).then(() => {
+      if (runtime.connectionRecoveryState === "automatic") this.scheduleConnectionRecoveryTimeout(runtime, "automatic");
+      this.host.journal.append({ type: "work.mock-client-restarted", competitionId: runtime.competitionId, data: { server: runtime.server, source: "automatic", reason: "list-no-echo" } });
+    }).catch((error: unknown) => {
+      this.markConnectionRecoveryFailed(runtime, error instanceof Error ? error.message : "MockClient 自动重启失败", "automatic");
+    });
   }
 
   public beginListReconciliation(runtime: WorkRuntime, expected?: number): void {

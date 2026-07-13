@@ -1810,7 +1810,6 @@ export class CompetitionService {
     const hasOpenServerIncident = (snapshot?.incidents as readonly { type?: string; status?: string }[] | undefined)
       ?.some((incident) => incident.type === "server-disconnect" && incident.status === "open") ?? false;
     const workConnectionRecoveryState = this.workRuntimeManager.get(competitionId)?.connectionRecoveryState;
-    const workConnectionRecoveryFailed = workConnectionRecoveryState === "failed";
     const openAttempt = snapshot?.attempts.findLast((attempt) => attempt.intakeOpen && !attempt.voided);
     const commandTargetStageId = snapshot?.plannedReadyStageId ?? snapshot?.currentStageId;
     const targetStageActions = snapshot?.actions.filter((action) => action.stageId === commandTargetStageId) ?? [];
@@ -1835,8 +1834,10 @@ export class CompetitionService {
       descriptor("start-work", hasPersistedWorkRuntime ? "恢复比赛现场" : "连接比赛服务器", hasPersistedWorkRuntime ? "重新建立比赛连接，恢复持久化阶段、尝试、榜单和计划，并保持自动化暂停等待现场核对。" : "建立比赛服务器连接，并立即开始在线名单对账。", competition.mode === "work" && competition.status === "published" && !hasRuntime,
         competition.mode !== "work" ? "测试比赛不连接真实服务器" : competition.status !== "published" ? "请先发布比赛配置" : "比赛连接已经启动"),
       descriptor("restart-work", competition.mode === "work" ? "重新连接比赛服务器" : "模拟恢复连接", "恢复服务器事件源；连接成功后保持原阶段暂停，等待裁判恢复自动化。",
-        refereeActionsUnlocked && hasRuntime && hasOpenServerIncident && (competition.mode === "test" || workConnectionRecoveryFailed),
-        !refereeActionsUnlocked ? "请先发布比赛配置" : !hasRuntime ? "请先建立比赛连接或创建测试运行" : competition.mode === "work" && workConnectionRecoveryState === "manual" ? "正在重新连接比赛服务器" : competition.mode === "work" && hasOpenServerIncident && !workConnectionRecoveryFailed ? "正在自动尝试恢复连接" : "当前没有待恢复的服务器连接阻断"),
+        refereeActionsUnlocked && hasRuntime && (competition.mode === "work"
+          ? workConnectionRecoveryState !== "automatic" && workConnectionRecoveryState !== "manual"
+          : hasOpenServerIncident),
+        !refereeActionsUnlocked ? "请先发布比赛配置" : !hasRuntime ? "请先建立比赛连接或创建测试运行" : competition.mode === "work" && workConnectionRecoveryState === "manual" ? "正在重新连接比赛服务器" : competition.mode === "work" && workConnectionRecoveryState === "automatic" ? "正在自动尝试恢复连接" : "当前没有待恢复的服务器连接阻断"),
       descriptor(
         "enable-automation",
         phase === "paused" || snapshot?.pausedFromPhase ? "恢复自动化" : "启动自动化",
@@ -1867,7 +1868,7 @@ export class CompetitionService {
         !refereeActionsUnlocked ? "请先发布比赛配置" : "当前没有开放的成绩接收窗口"),
       descriptor("reschedule-stage-deadline", "关卡时限改期", "把当前关卡最晚结束时间改到指定时间，不改变下一次 Ready。", refereeActionsUnlocked && Boolean(openAttempt) && ["running", "tail-intake"].includes(phase),
         !refereeActionsUnlocked ? "请先发布比赛配置" : "当前没有开放的成绩接收窗口"),
-      descriptor("end-stage", "提前结束本关", "关闭成绩窗口，未完成且未排除的选手记为 DNF。", refereeActionsUnlocked && Boolean(openAttempt) && ["running", "tail-intake"].includes(phase),
+      descriptor("end-stage", "提前结束本关", "关闭成绩窗口；未完成选手不补造 DNF，裁判需要 DNF 时应在成绩页修订。", refereeActionsUnlocked && Boolean(openAttempt) && ["running", "tail-intake"].includes(phase),
         !refereeActionsUnlocked ? "请先发布比赛配置" : "当前没有可结束的开放关卡"),
       descriptor("restart-stage", "重赛本关", "强制隔离当前阻断并立即把当前关重置到 Ready；已有尝试作废，所有原始证据与审计保留。",
         competition.status === "published" && hasRuntime && Boolean(snapshot?.currentStageId),
