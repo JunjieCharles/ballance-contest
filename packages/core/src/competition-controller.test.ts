@@ -330,8 +330,8 @@ describe("CompetitionController", () => {
     const snapshot = controller.snapshot();
     expect(snapshot.automationEnabled).toBe(false);
     expect(snapshot.phase).toBe("tail-intake");
-    expect(snapshot.attempts[0]?.results).toHaveLength(5);
-    expect(snapshot.attempts[0]?.results.filter((result) => result.reason === "time-limit")).toHaveLength(4);
+    expect(snapshot.attempts[0]?.results).toHaveLength(1);
+    expect(snapshot.attempts[0]?.results.some((result) => result.reason === "time-limit")).toBe(false);
 
     controller.enable();
     expect(controller.snapshot()).toMatchObject({ phase: "tail-intake", automationEnabled: true });
@@ -375,7 +375,7 @@ describe("CompetitionController", () => {
     clock.set(80_000);
     controller.tick();
     expect(controller.snapshot().attempts[0]).toMatchObject({ intakeOpen: false, intakeClosedAtMs: 80_000 });
-    expect(controller.snapshot().attempts[0]?.results).toContainEqual(expect.objectContaining({ playerId: "p5", status: "dnf", reason: "time-limit" }));
+    expect(controller.snapshot().attempts[0]?.results.some((result) => result.playerId === "p5")).toBe(false);
   });
 
   it("uses pre-Go protection once, keeps the full two-minute delay, and emits exact newline suffixes", () => {

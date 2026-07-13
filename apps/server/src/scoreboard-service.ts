@@ -33,6 +33,7 @@ interface ScoreboardOverrideContext {
     input: ScoreboardOverrideInput
   ): void;
   savePayload(payload: ServiceSnapshotPayload): void;
+  rebaseActiveEngine(version: ScoreboardVersion): void;
   setNextVersion(nextVersion: number): void;
   bumpCompetitionVersion(): number;
   appendAttention(item: AttentionItem): void;
@@ -188,6 +189,7 @@ export class ScoreboardService {
     const payload = context.payload();
     context.savePayload({ ...payload, scoreboardRevisions: [...(payload.scoreboardRevisions ?? []), view] });
     this.saveVersions(competitionId, [version]);
+    context.rebaseActiveEngine(version);
     context.setNextVersion(versionNumber + 1);
     if (this.database) {
       this.database.sqlite.prepare("INSERT INTO overrides(id,competition_id,target_type,target_id,before_value,after_value,reason,actor,reversed_by,created_at) VALUES (?,?,?,?,?,?,?,?,?,?)")

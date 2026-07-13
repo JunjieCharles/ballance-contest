@@ -780,17 +780,6 @@ export class CompetitionController {
     if (!reason.trim()) throw new Error("END_STAGE_REASON_REQUIRED");
     const attempt = this.currentAttempt;
     if (!attempt?.intakeOpen) throw new Error("END_STAGE_NOT_AVAILABLE");
-    for (const participantId of this.participantIds) {
-      if (!this.absent.has(participantId) && !attempt.results.some((result) => result.playerId === participantId)) {
-        attempt.results.push({
-          playerId: participantId,
-          status: "dnf",
-          sourceId: `manual-end:${attempt.id}:${participantId}`,
-          receivedAtMs: this.clock.now(),
-          reason: reason.trim()
-        });
-      }
-    }
     this.closeIntake(attempt);
     if (this.stageIndex === this.stages.length - 1) this.phase = "review";
     else {
@@ -982,11 +971,6 @@ export class CompetitionController {
   }
 
   private closeAtDeadline(attempt: MutableAttempt): void {
-    for (const participantId of this.participantIds) {
-      if (!this.absent.has(participantId) && !attempt.results.some((result) => result.playerId === participantId)) {
-        attempt.results.push({ playerId: participantId, status: "dnf", sourceId: `deadline:${attempt.id}:${participantId}`, receivedAtMs: this.clock.now(), reason: "time-limit" });
-      }
-    }
     this.closeIntake(attempt);
     this.queueAction("announce", `${this.stage.map.toUpperCase()} 比赛时间已到`);
     if (this.stageIndex === this.stages.length - 1) this.phase = "review";

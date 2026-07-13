@@ -233,19 +233,20 @@ describe("local API", () => {
     ]) } } });
     const confirmationResponse = await app.inject({
       method: "POST", url: `/api/v1/competitions/${competitionId}/confirmations`, headers: auth(token),
-      payload: { kind: "scoreboard-override", target: "p1:s1", playerId: "p1", stageId: "s1", operation: "set-place", place: 1, rankPolicy: "shift" }
+      payload: { kind: "scoreboard-override", target: "p4:s1", playerId: "p4", stageId: "s1", operation: "set-place", place: 1, rankPolicy: "shift" }
     });
     const confirmation = confirmationResponse.json<{ data: { token: string; impactHash: string } }>().data;
     const revised = await app.inject({
       method: "POST", url: `/api/v1/competitions/${competitionId}/scoreboard/overrides`, headers: auth(token),
-      payload: { expectedStateVersion: 2, idempotencyKey: "review-s1", playerId: "p1", stageId: "s1", operation: "set-place", place: 1, rankPolicy: "shift", confirmationToken: confirmation.token, impactHash: confirmation.impactHash }
+      payload: { expectedStateVersion: 2, idempotencyKey: "review-s1", playerId: "p4", stageId: "s1", operation: "set-place", place: 1, rankPolicy: "shift", confirmationToken: confirmation.token, impactHash: confirmation.impactHash }
     });
     expect(revised.statusCode).toBe(200);
     const revisedVersion = revised.json<{ data: { version: number } }>().data.version;
     await app.inject({ method: "POST", url: `/api/v1/competitions/${competitionId}/test-runs/${runId}/automation/advance`, headers: auth(token), payload: { milliseconds: 90_000 } });
-    const continued = (await app.inject({ method: "GET", url: `/api/v1/competitions/${competitionId}/snapshot`, headers: auth(token) })).json<{ data: { scoreboardVersions: Array<{ version: number }> } }>().data.scoreboardVersions;
+    const continued = (await app.inject({ method: "GET", url: `/api/v1/competitions/${competitionId}/snapshot`, headers: auth(token) })).json<{ data: { scoreboardVersions: Array<{ version: number; entries: Array<{ playerId: string; stages: Record<string, { place?: number }> }> }> } }>().data.scoreboardVersions;
     expect(new Set(continued.map((version) => version.version)).size).toBe(continued.length);
     expect(continued.at(-1)?.version).toBeGreaterThan(revisedVersion);
+    expect(continued.at(-1)?.entries.find((entry) => entry.playerId === "p4")?.stages.s1).toMatchObject({ place: 1 });
 
     const recheckConfirmationResponse = await app.inject({
       method: "POST", url: `/api/v1/competitions/${competitionId}/confirmations`, headers: auth(token),

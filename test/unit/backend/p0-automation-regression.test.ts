@@ -85,8 +85,8 @@ describe("P0 centralized automation and command regression", () => {
     settle(controller);
     expect(controller.snapshot().currentStageId).toBe("s2");
     expect(controller.snapshot().attempts[0]).toMatchObject({ stageId: "s1", intakeOpen: false });
-    expect(controller.snapshot().attempts[0]?.results).toContainEqual(expect.objectContaining({ playerId: "p3", status: "dnf", reason: "time-limit" }));
-    expect(controller.recordResult({ stageId: "s1", playerId: "p3", status: "finished", sourceId: "s1-p3-after-ready" })).toBe("duplicate");
+    expect(controller.snapshot().attempts[0]?.results.some((result) => result.playerId === "p3")).toBe(false);
+    expect(controller.recordResult({ stageId: "s1", playerId: "p3", status: "finished", sourceId: "s1-p3-after-ready" })).toBe("intake-closed");
   });
 
   it("BE-CHEAT-001/002: excludes in-race cheat while leaving completed players untouched", () => {

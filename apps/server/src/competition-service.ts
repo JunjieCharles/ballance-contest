@@ -355,10 +355,10 @@ export class CompetitionService {
       : undefined);
     const workScoreboard = workRuntime?.engine.snapshot().scoreboardVersions.map(scoreboardView) ?? this.storedScoreboardVersions(id);
     const testScoreboard = testRun?.engine.scoreboardVersions ?? [];
-    const scoreboardVersions = this.applyPlayerAliases(config, [
+    const scoreboardVersions = this.applyPlayerAliases(config, this.mergeScoreboardVersions([
       ...(competition.mode === "test" ? testScoreboard : workScoreboard),
-      ...((competition.mode === "work" && !workRuntime) ? [] : payload.scoreboardRevisions ?? [])
-    ].sort((left, right) => left.version - right.version));
+      ...(payload.scoreboardRevisions ?? [])
+    ]));
     const baseRuntime = competition.mode === "test"
       ? testRun?.automation ?? automationView("test")
       : automationView(
@@ -1140,6 +1140,16 @@ export class CompetitionService {
           );
         },
         savePayload: (payload) => this.savePayload(competitionId, payload),
+        rebaseActiveEngine: (version) => {
+          const engine = testRuntime?.engine ?? this.workRuntimeManager.get(competitionId)?.engine;
+          if (!engine) return;
+          const snapshot = engine.snapshot();
+          engine.restore({
+            ...snapshot,
+            scoreboardVersions: this.mergeEngineScoreboardVersions([...snapshot.scoreboardVersions, version]),
+            currentScoreboard: version.entries
+          });
+        },
         setNextVersion: (nextVersion) => {
           if (testRuntime) testRuntime.engine.setNextScoreboardVersion(nextVersion);
           else this.workRuntimeManager.get(competitionId)?.engine.setNextScoreboardVersion(nextVersion);
@@ -1518,6 +1528,18 @@ export class CompetitionService {
       playerAliases: operational.playerAliases,
       participants: operational.participants
     };
+  }
+
+  private mergeScoreboardVersions(versions: readonly ScoreboardVersionView[]): ScoreboardVersionView[] {
+    const byVersion = new Map<number, ScoreboardVersionView>();
+    for (const version of versions) byVersion.set(version.version, version);
+    return [...byVersion.values()].sort((left, right) => left.version - right.version);
+  }
+
+  private mergeEngineScoreboardVersions(versions: readonly ScoreboardVersion[]): ScoreboardVersion[] {
+    const byVersion = new Map<number, ScoreboardVersion>();
+    for (const version of versions) byVersion.set(version.version, version);
+    return [...byVersion.values()].sort((left, right) => left.version - right.version);
   }
 
   private applyPlayerAliases(

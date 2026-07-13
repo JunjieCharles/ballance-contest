@@ -840,7 +840,7 @@ describe("CompetitionService dynamic participants", () => {
     service.close();
   });
 
-  it("records timeout DNF in results without inventing MockClient DNF lines", () => {
+  it("closes timed-out stages without inventing DNF results or MockClient DNF lines", () => {
     const service = new CompetitionService();
     const record = service.create({ name: "Timeout evidence", mode: "test", idempotencyKey: "timeout-evidence" });
     const definition: ScenarioDefinition = {
@@ -864,9 +864,9 @@ describe("CompetitionService dynamic participants", () => {
     const timedOut = results.filter((result) => result.reason === "time-limit");
     const explicitDnf = results.filter((result) => result.reason === "gave-up");
     const rawDnfLines = service.getRawClientLogs(record.id, 1_000).filter((line) => line.rawLine.includes("did not finish Level"));
-    expect(timedOut.length).toBeGreaterThan(0);
+    expect(timedOut).toHaveLength(0);
     expect(rawDnfLines).toHaveLength(explicitDnf.length);
-    expect(service.snapshot(record.id).runtime.attentionItems).toContainEqual(expect.objectContaining({ title: "关卡时限已到" }));
+    expect(service.snapshot(record.id).runtime.attentionItems.some((item) => item.id.startsWith("deadline:"))).toBe(false);
   });
 
   it("models player Warning as deterministic behavior instead of a scenario fault", () => {
