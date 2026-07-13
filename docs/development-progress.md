@@ -107,7 +107,7 @@
 
 | 日期 | 验证 | 结果 |
 | --- | --- | --- |
-| 2026-07-13 | `npm run lint` / `npm run typecheck` / `npm test` / `npm run build` | 通过；Vitest 30 个文件、207 项测试通过，覆盖人工修订后继续接收自动成绩不回滚上一关、关卡时限只关窗不补造 DNF、健康连接下人工重连可用，以及定期 `list` 无回显自动重连一次后仍无回显才阻断 |
+| 2026-07-13 | `npm run lint` / `npm run typecheck` / `npm test` / `npm run build` | 通过；Vitest 30 个文件、207 项测试通过，覆盖人工修订后继续接收自动成绩不回滚上一关、关卡时限只关窗不补造 DNF、健康连接下人工重连可用、定期 `list` 无回显自动重连一次后仍无回显才阻断，以及玩家页移除“本关状态”列 |
 | 2026-07-13 | `npm run test:e2e` | Edge 与 Chrome 共 14 项测试通过 |
 | 2026-07-13 | `npm run test:mock-client` | 真实 MockClient 管道通过，观察到 0 名普通玩家、1 名旁观者 |
 | 2026-07-13 | `npm run package:portable` / `npm run test:portable` | 便携包已重建；包内 Node v24.18.0 smoke 通过，测试结束后确认端口与包内进程已回收 |
