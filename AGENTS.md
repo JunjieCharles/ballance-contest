@@ -113,7 +113,7 @@
 - 便携冒烟为了证明“不依赖系统 Node”而收缩 `PATH` 时，仍须保留启动器实际依赖的 Windows PowerShell/System32 路径，并单独断言 `node` 不可解析；不能因测试环境删掉启动器依赖而把失败误判为服务启动超时。
 - 便携冒烟启动批处理时使用 `Start-ContestConsole.cmd` 的绝对路径；不要假定 `Start-Process cmd /c` 的 `WorkingDirectory` 一定参与批处理查找。启动失败必须捕获 stdout/stderr，冒烟结束后轮询确认正式端口和包内 Node 进程都已退出。
 - 启动或停止进程前确认 PID、可执行路径和命令行属于当前工作区或便携包。
-- Release 发布流程只在用户显式调用项目级 `release-publish` skill 或明确要求创建 release/tag/artifact 时执行；普通开发收尾、门禁、portable 冒烟或提交不得自动打 tag、生成 release 压缩包或发布文档。Release 文档默认写中文，并生成在已忽略的 `docs/releases/` 本地工作区，除非用户明确要求纳入版本控制。
+- Release 发布流程只在用户显式调用项目级 `release-publish` skill 或明确要求创建 release/tag/artifact 时执行；普通开发收尾、门禁、portable 冒烟或提交不得自动打 tag、推送 tag、生成 release 压缩包或发布文档。显式 release 流程在本地门禁、打包、压缩包校验和中文 release 文档生成后，应推送 release tag 到 `origin` 并复查远端可见；仍不得自动上传压缩包或发布 GitHub release。Release 文档默认写中文，并生成在已忽略的 `docs/releases/` 本地工作区，除非用户明确要求纳入版本控制。
 
 ## 测试与产物隔离
 

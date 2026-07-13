@@ -1,6 +1,6 @@
 ---
 name: release-publish
-description: Prepare a Ballance Contest Console release only when the user explicitly invokes this skill or clearly asks to create a release/tag/artifact. Use for adding a release git tag, building and validating the Windows portable package, creating a zip archive that excludes .mock-client-uuid, drafting Chinese release notes, and stopping before the user manually uploads and publishes the GitHub release. Do not use for normal development, routine gates, ordinary portable smoke tests, or regular commits.
+description: Prepare a Ballance Contest Console release only when the user explicitly invokes this skill or clearly asks to create a release/tag/artifact. Use for adding and pushing a release git tag, building and validating the Windows portable package, creating a zip archive that excludes .mock-client-uuid, drafting Chinese release notes, and stopping before the user manually uploads and publishes the GitHub release. Do not use for normal development, routine gates, ordinary portable smoke tests, or regular commits.
 ---
 
 # Release Publish
@@ -9,7 +9,7 @@ description: Prepare a Ballance Contest Console release only when the user expli
 
 Use this skill only for an explicit release request. Do not run it automatically at the end of development, testing, packaging, or documentation work.
 
-Before doing any release action, confirm the requested version/tag if it is not already explicit. Never push tags, upload artifacts, or publish a GitHub release unless the user separately asks for that exact remote action.
+Before doing any release action, confirm the requested version/tag if it is not already explicit. When this skill is explicitly invoked with a tag, push that tag to `origin` after all local release checks pass. Never upload artifacts or publish a GitHub release unless the user separately asks for that exact remote action.
 
 ## Workflow
 
@@ -31,7 +31,6 @@ Before doing any release action, confirm the requested version/tag if it is not 
 3. Create the tag locally after gates pass:
    - Prefer an annotated tag: `git tag -a <tag> -m "<tag>"`.
    - Do not overwrite an existing tag.
-   - Do not push the tag unless the user explicitly asks.
 
 4. Build the release zip from `dist/portable/BallanceContestConsole`:
    - Ensure `npm run package:portable` has just produced the package.
@@ -79,10 +78,17 @@ try {
    - Do not claim formal tournament readiness unless target-server rehearsal is recorded.
    - Treat `docs/releases/` as an ignored local release-notes workspace unless the user explicitly asks to track a release document.
 
-7. Stop for manual publication:
+7. Push the release tag:
+   - Run `git ls-remote --tags origin <tag>` first and stop if the tag already exists remotely with a different object.
+   - Run `git push origin <tag>`.
+   - Re-run `git ls-remote --tags origin <tag>` and record that the tag is visible on GitHub.
+   - Do not push `main` or any other branch unless the user explicitly asks.
+
+8. Stop for manual publication:
    - Tell the user to manually upload the zip and publish the release.
    - Provide the local tag name, Chinese release doc path, zip path, and SHA-256.
-   - Mention that the tag has not been pushed and the release has not been published unless those actions were explicitly requested and completed.
+   - Mention that the tag has been pushed when verification succeeds.
+   - Mention that the release artifact has not been uploaded and the GitHub release has not been published unless those actions were explicitly requested and completed.
 
 ## Release Document Template
 
@@ -118,6 +124,6 @@ try {
 
 - 将 `<zip-path>` 上传到 release 页面。
 - 使用本文档内容发布 release notes。
-- 仅在确认 release 可以公开时推送 `<tag>`。
+- 确认 `<tag>` 已推送到 GitHub。
 - 手动发布 GitHub release。
 ```
