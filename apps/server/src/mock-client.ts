@@ -3,6 +3,9 @@ import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { CONTEST_REFEREE_NAME, spectatorLoginName } from "@ballance/contracts";
 
+export const MOCK_CLIENT_DIAGNOSTIC_TAIL_BYTES = 64 * 1024;
+const DEFAULT_STDIN_WRITE_TIMEOUT_MS = 5_000;
+
 export interface MockClientLaunchOptions {
   executable: string;
   workingDirectory: string;
@@ -63,6 +66,20 @@ export interface MockClientExitInfo {
   expected: boolean;
 }
 
+export type MockClientSpawner = (options: MockClientLaunchOptions) => ChildProcessWithoutNullStreams;
+
+export interface ManagedMockClientDependencies {
+  spawn?: MockClientSpawner;
+  writeTimeoutMs?: number;
+}
+
+const spawnMockClient: MockClientSpawner = (options) => spawn(options.executable, buildMockClientArguments(options), {
+  cwd: options.workingDirectory,
+  shell: false,
+  windowsHide: true,
+  stdio: "pipe"
+});
+
 export class ManagedMockClient implements CommandTransport {
   private process: ChildProcessWithoutNullStreams | undefined;
   private readonly listeners = new Set<(line: string) => void>();
@@ -71,21 +88,25 @@ export class ManagedMockClient implements CommandTransport {
   private logOffset = 0;
   private logPending = "";
   private stopping = false;
+  private diagnosticTailBuffer = Buffer.alloc(0);
+  private diagnosticBytesRead = 0;
 
-  public constructor(private readonly options: MockClientLaunchOptions) {}
+  public constructor(
+    private readonly options: MockClientLaunchOptions,
+    private readonly dependencies: ManagedMockClientDependencies = {}
+  ) {}
 
   public start(): void {
     if (this.process) throw new Error("MockClient is already running");
     this.logOffset = existsSync(this.options.logPath) ? readFileSync(this.options.logPath, "utf8").length : 0;
     this.logPending = "";
     this.stopping = false;
-    const child = spawn(this.options.executable, buildMockClientArguments(this.options), {
-      cwd: this.options.workingDirectory,
-      shell: false,
-      windowsHide: true,
-      stdio: "pipe"
-    });
+    this.diagnosticTailBuffer = Buffer.alloc(0);
+    this.diagnosticBytesRead = 0;
+    const child = (this.dependencies.spawn ?? spawnMockClient)(this.options);
     this.process = child;
+    child.stdout.on("data", (chunk: Buffer | string) => this.consumeDiagnosticOutput(chunk));
+    child.stderr.on("data", (chunk: Buffer | string) => this.consumeDiagnosticOutput(chunk));
     this.startLogTail();
     child.on("exit", (code, signal) => {
       const expected = this.stopping;
@@ -97,6 +118,8 @@ export class ManagedMockClient implements CommandTransport {
   }
 
   public get isRunning(): boolean { return Boolean(this.process); }
+  public get diagnosticOutputTail(): string { return this.diagnosticTailBuffer.toString("utf8"); }
+  public get diagnosticOutputBytes(): number { return this.diagnosticBytesRead; }
 
   public onLine(listener: (line: string) => void): () => void {
     this.listeners.add(listener);
@@ -134,24 +157,69 @@ export class ManagedMockClient implements CommandTransport {
     this.logPending = "";
   }
 
-  public async write(command: string): Promise<void> {
-    if (!this.process?.stdin.writable) throw new Error("MockClient is not running");
-    await new Promise<void>((resolve, reject) => this.process?.stdin.write(`${command}\n`, (error) => error ? reject(error) : resolve()));
+  private consumeDiagnosticOutput(chunk: Buffer | string): void {
+    const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk, "utf8");
+    this.diagnosticBytesRead += buffer.length;
+    if (buffer.length >= MOCK_CLIENT_DIAGNOSTIC_TAIL_BYTES) {
+      this.diagnosticTailBuffer = Buffer.from(buffer.subarray(buffer.length - MOCK_CLIENT_DIAGNOSTIC_TAIL_BYTES));
+      return;
+    }
+    const retainedBytes = Math.min(this.diagnosticTailBuffer.length, MOCK_CLIENT_DIAGNOSTIC_TAIL_BYTES - buffer.length);
+    this.diagnosticTailBuffer = Buffer.concat([
+      this.diagnosticTailBuffer.subarray(this.diagnosticTailBuffer.length - retainedBytes),
+      buffer
+    ], retainedBytes + buffer.length);
+  }
+
+  public async write(command: string, timeoutMs = this.dependencies.writeTimeoutMs ?? DEFAULT_STDIN_WRITE_TIMEOUT_MS): Promise<void> {
+    const child = this.process;
+    if (!child?.stdin.writable) throw new Error("MockClient is not running");
+    await new Promise<void>((resolve, reject) => {
+      let settled = false;
+      const finish = (error?: Error | null): void => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timeout);
+        if (error) reject(error);
+        else resolve();
+      };
+      const timeout = setTimeout(() => finish(new Error("MockClient stdin write timed out")), Math.max(0, timeoutMs));
+      try {
+        child.stdin.write(`${command}\n`, (error) => finish(error));
+      } catch (error) {
+        finish(error instanceof Error ? error : new Error(String(error)));
+      }
+    });
   }
 
   public async stop(timeoutMs = 5_000): Promise<void> {
     const child = this.process;
     if (!child) return;
     this.stopping = true;
-    try {
-      await this.write("stop");
-    } catch (error) {
-      this.stopping = false;
-      throw error;
-    }
     await new Promise<void>((resolve, reject) => {
-      const timeout = setTimeout(() => reject(new Error("MockClient graceful stop timed out")), timeoutMs);
-      child.once("exit", () => { clearTimeout(timeout); resolve(); });
+      let settled = false;
+      const onExit = (): void => finish();
+      const finish = (error?: Error): void => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timeout);
+        child.off("exit", onExit);
+        if (error) {
+          this.stopping = false;
+          reject(error);
+        } else {
+          resolve();
+        }
+      };
+      const timeout = setTimeout(() => finish(new Error("MockClient graceful stop timed out")), Math.max(0, timeoutMs));
+      child.once("exit", onExit);
+      if (child.exitCode !== null || child.signalCode !== null) {
+        finish();
+        return;
+      }
+      void this.write("stop", Math.max(0, timeoutMs)).catch((error: unknown) => {
+        finish(error instanceof Error ? error : new Error(String(error)));
+      });
     });
   }
 }

@@ -38,7 +38,7 @@
 | D-DEFAULT | `Asia/Shanghai`、小型计分、`1.bmmo.win`、SR1–13、裁判 `ContestConsole` | 默认值与正常旅程 |
 | D-MIXED | 原版 SR、原版 HS、32 位 MD5 自制图混排，最后计分名次 3 | 模式、排序与非 15 阈值 |
 | D-PLAYERS | 30 名选手，含中文、大小写变体、同名、前导 `*`、重连 ID | 身份与性能 |
-| D-FAKE-MOCK | 可控制 stdout/stderr、日志、回显、退出码和延迟的假 MockClient | 命令与恢复 |
+| D-FAKE-MOCK | 可控制并持续产生 stdout/stderr、日志、回显、退出码、阻塞写入和延迟的假 MockClient | 命令、反压与恢复 |
 | D-SCENARIO | 三轮混合 SR/HS、5 名玩家、最后计分名次 3 的高级回放夹具 | 逐事件自动回归，不进入普通行为场景库 |
 | D-BEHAVIOR | 普通、高手、低手/DNF、捣乱和混合玩家行为定义，不含 Ready/Go/换轮事件 | 测试模式可视化主流程；比赛流程只由裁判状态机推进 |
 | D-REFERENCE | [2025 SR1–SR13 参考日志](../fixtures/replay/2025-grandprix-sr1-13/README.md) | 非门禁格式研究与人工排查 |
@@ -88,6 +88,7 @@
 | BE-MODE-003 | P0 | BE 3.3 | 在两种模式间调用对方专属接口并尝试发布后切换 | 返回“能力不支持”或状态冲突；模式不发生变化 |
 | BE-PROC-001 | P0 | BE 3.4 | 模拟连接成功、拒绝、版本不兼容、权限变化、两种断线文本、定期 `list` 无服务器回显和不同退出码 | `Disconnected from server.`、5003 `Connection dropped` 与定期 `list` 无回显都产生连接可疑/断开事故；只自动重启一次，15 秒无成功证据、再次退出或重启后 `list` 仍无回显后才开放人工重新连接，不循环重启；健康连接时人工重连入口可用 |
 | BE-PROC-002 | P0 | BE 3.4、9.4 | 正常 stop 无响应后请求强制终止 | 未获高风险确认不终止；令牌有效后只结束已验证的托管进程并审计 |
+| BE-PROC-003 | P0 | BE 3.4、14.1 | 在反复 `list`、增量日志读取期间让 stdout 与 stderr 分别持续输出超过 1 MiB，再执行 stop | 两条管道始终被排空且诊断尾部有界；40 次写入、末行日志读取和 stop 都在总预算内完成，无反压卡死 |
 | BE-COMPAT-001 | P1 | BE 3.5、14.4 | 使用已验证、未知和格式不同的 MockClient 版本 | 保存版本；未知版本只能观察；确认后使用对应适配器，领域层不依赖散落正则 |
 
 ### 4.2 配置、版本与玩家身份
@@ -175,7 +176,7 @@
 | ID | P | 需求 | 操作与数据 | 预期结果 |
 | --- | --- | --- | --- | --- |
 | BE-CMD-001 | P0 | BE 9.1 | 提交 Bulletin/Notice/Announce、Ready、倒计时、重开、Kick 及含 shell 元字符的字段 | 类型化动作由版本适配器转换；玩家处置无 Crash/DNF，普通入口不执行原始文本或 shell |
-| BE-CMD-002 | P0 | BE 9.2 | 控制写入、回显、明确失败、无回显超时 | 状态严格为 queued→sent→acknowledged/failed/timed_out/uncertain；sent 不冒充成功 |
+| BE-CMD-002 | P0 | BE 9.2 | 控制阻塞写入、同步/异步回显、明确失败、无回显超时和迟到写回调 | 总超时从 transport 写入前开始；结果为 acknowledged/failed/timed_out/uncertain，sent 不冒充成功，超时后的迟到回调不能改写终态 |
 | BE-CMD-006 | P0 | BE 3.1、9.2、12.4 | 在 stdin 写入尚未返回时同步产生 Go 回显；再恢复带/不带权威尝试证据的 sent Go | 同步回显不丢失；有证据恢复为 acknowledged，无证据才变 uncertain |
 | BE-CMD-007 | P0 | BE 3.1、9.2 | 返回精确权限不足反馈 | 当前命令 failed、自动化暂停并显示 ContestConsole 权限阻断，不自动重试 |
 | BE-CMD-008 | P0 | BE 7.5、9.2、12.4 | 分别让 Kick/原始命令/地图注册进入 uncertain 和 failed，逐条确认、放弃失败或重发，再重启服务 | 自动化阻断但成绩/时限/list 继续；uncertain 只可确认已执行或重发，failed 只可确认不再执行或重发；原记录状态不改，新重发独立审计，处置后及重启后不再阻断 |

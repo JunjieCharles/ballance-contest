@@ -204,33 +204,36 @@ export class CommandQueue {
       this.tail = this.tail.then(async () => {
         await new Promise<void>((done) => {
           let settled = false;
-          let timeout: ReturnType<typeof setTimeout> | undefined;
+          let settleAfterWriteTimeout: ReturnType<typeof setTimeout> | undefined;
+          const commandTimeoutMs = typeof this.timeoutMs === "function" ? this.timeoutMs(action) : this.timeoutMs;
           const settle = (final: CommandRecord): void => {
             if (settled) return;
             settled = true;
-            if (timeout) clearTimeout(timeout);
+            clearTimeout(commandTimeout);
+            if (settleAfterWriteTimeout) clearTimeout(settleAfterWriteTimeout);
             if (this.pending?.record.id === record.id) this.pending = undefined;
             resolve(final);
             done();
           };
           this.pending = { encoded, record, resolve: settle };
+          const commandTimeout = setTimeout(() => {
+            if (this.pending?.record.id !== record.id) return;
+            settle(this.update(record, encoded.critical ? "uncertain" : "timed_out"));
+          }, Math.max(0, commandTimeoutMs));
           void (async () => {
             try {
               await this.transport.write(encoded.command);
               if (settled) return;
               this.update(record, "sent");
               if (encoded.acknowledgeAfterWriteMs !== undefined) {
-                timeout = setTimeout(() => {
+                settleAfterWriteTimeout = setTimeout(() => {
                   const responseLine = encoded.onSettle?.() ?? "MockClient 已接受本地命令，权限观察窗口内未返回失败";
                   settle(this.update(record, "acknowledged", responseLine));
                 }, encoded.acknowledgeAfterWriteMs);
                 return;
               }
-              timeout = setTimeout(() => {
-                if (this.pending?.record.id !== record.id) return;
-                settle(this.update(record, encoded.critical ? "uncertain" : "timed_out"));
-              }, typeof this.timeoutMs === "function" ? this.timeoutMs(action) : this.timeoutMs);
             } catch {
+              if (settled) return;
               settle(this.update(record, "failed"));
             }
           })();

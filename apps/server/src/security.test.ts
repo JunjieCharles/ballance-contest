@@ -1,15 +1,26 @@
 import { createServer } from "node:net";
-import { describe, expect, it } from "vitest";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { buildApp } from "./app.js";
 import { assertRawCommandAllowed } from "./referee-action-service.js";
 
 describe("local security and process ownership", () => {
+  let dataRoot = "";
+
+  beforeEach(() => { dataRoot = mkdtempSync(join(tmpdir(), "ballance-security-")); });
+  afterEach(() => {
+    if (dataRoot) rmSync(dataRoot, { recursive: true, force: true });
+    dataRoot = "";
+  });
+
   it("rejects forcenextrestart even through the high-risk raw command path", () => {
     expect(() => assertRawCommandAllowed(" forcenextrestart ")).toThrow(/服务器所有地图/);
     expect(() => assertRawCommandAllowed("list")).not.toThrow();
   });
   it("rejects cross-site writes even when a bearer token is present", async () => {
-    const app = await buildApp({ bootstrapToken: "bootstrap", serveStatic: false });
+    const app = await buildApp({ bootstrapToken: "bootstrap", serveStatic: false, dataRoot });
     try {
       const session = await app.inject({ method: "POST", url: "/api/v1/sessions/bootstrap", payload: { bootstrapToken: "bootstrap", tabId: "tab" } });
       const token = session.json<{ token: string }>().token;
@@ -28,6 +39,7 @@ describe("local security and process ownership", () => {
     let shutdowns = 0;
     const app = await buildApp({
       bootstrapToken: "bootstrap", serveStatic: false,
+      dataRoot,
       devShutdown: { token: "a-secure-development-token", onShutdown: () => { shutdowns += 1; } }
     });
     try {
@@ -49,7 +61,7 @@ describe("local security and process ownership", () => {
       if (error && typeof error === "object" && "code" in error && error.code === "EADDRINUSE") return false;
       throw error;
     });
-    const app = await buildApp({ bootstrapToken: "bootstrap", serveStatic: false });
+    const app = await buildApp({ bootstrapToken: "bootstrap", serveStatic: false, dataRoot });
     try {
       await expect(app.listen({ host: "127.0.0.1", port: 38623 })).rejects.toMatchObject({ code: "EADDRINUSE" });
       expect(app.server.address()).toBeNull();
@@ -60,7 +72,7 @@ describe("local security and process ownership", () => {
   });
 
   it("does not expose files outside the built web root through encoded separators", async () => {
-    const app = await buildApp({ bootstrapToken: "bootstrap" });
+    const app = await buildApp({ bootstrapToken: "bootstrap", dataRoot });
     try {
       for (const path of ["/..%2f..%2fpackage.json", "/%2e%2e%5cpackage.json", "/..%252f..%252fpackage.json"]) {
         const response = await app.inject({ method: "GET", url: path });

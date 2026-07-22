@@ -30,6 +30,36 @@ describe("CommandQueue", () => {
     expect((await queue.enqueue({ type: "go", map: "level 1", mode: "sr" }, "sync-go")).status).toBe("acknowledged");
   });
 
+  it("starts the command timeout before transport.write and ignores a late write failure", async () => {
+    const writes: string[] = [];
+    const statusChanges: string[] = [];
+    let rejectBlockedWrite: ((error: Error) => void) | undefined;
+    const transport: CommandTransport = {
+      write: async (command) => {
+        writes.push(command);
+        if (command === "unverifiable-command") {
+          await new Promise<void>((_resolve, reject) => { rejectBlockedWrite = reject; });
+          return;
+        }
+        queueMicrotask(() => queue.observeLine("1 player(s) online:"));
+      }
+    };
+    const queue = new CommandQueue(transport, 25, (record) => statusChanges.push(record.status));
+
+    const first = await Promise.race([
+      queue.enqueue({ type: "raw", command: "unverifiable-command" }, "blocked-write"),
+      new Promise<never>((_resolve, reject) => setTimeout(() => reject(new Error("command timeout did not cover transport.write")), 500))
+    ]);
+    expect(first.status).toBe("uncertain");
+    expect((await queue.enqueue({ type: "list" }, "after-blocked-write")).status).toBe("acknowledged");
+
+    rejectBlockedWrite?.(new Error("late write failure"));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(first.status).toBe("uncertain");
+    expect(statusChanges).not.toContain("failed");
+    expect(writes).toEqual(["unverifiable-command", "list"]);
+  });
+
   it("routes later commands to a replacement MockClient transport", async () => {
     const first = new FakeTransport();
     const second = new FakeTransport();
@@ -53,7 +83,7 @@ describe("CommandQueue", () => {
 
   it("writes custom map names once with the required hidden level zero", async () => {
     const transport = new FakeTransport();
-    const queue = new CommandQueue(transport, 100);
+    const queue = new CommandQueue(transport, 1_000);
     const result = await queue.enqueue({ type: "set-map", mapHash: "E90B2F535C8BF881E9CB83129FBA241D", displayName: "Contest Map With Spaces" }, "set-map");
     expect(result.status).toBe("acknowledged");
     expect(transport.writes).toEqual(["setmap e90b2f535c8bf881e9cb83129fba241d 0 Contest Map With Spaces"]);
@@ -72,7 +102,7 @@ describe("CommandQueue", () => {
 
   it("sends setmap for official maps with zero-padded level label", async () => {
     const transport = new FakeTransport();
-    const queue = new CommandQueue(transport, 100);
+    const queue = new CommandQueue(transport, 1_000);
     const result = await queue.enqueue({ type: "set-official-map", level: 3, displayName: "Level_03" }, "official-map");
     expect(result.status).toBe("acknowledged");
     expect(transport.writes).toEqual(["setmap level 3 Level_03"]);
@@ -211,7 +241,7 @@ describe("CommandQueue", () => {
 
   it("collects listmap entries and returns them as JSON in responseLine", async () => {
     const transport = new FakeTransport();
-    const queue = new CommandQueue(transport, 100);
+    const queue = new CommandQueue(transport, 1_000);
     transport.onWrite = () => {
       setTimeout(() => queue.observeLine("[07-02 17:40:48] a364b408fffaab4344806b427e37f1a7: Level_01"), 0);
       setTimeout(() => queue.observeLine("[07-02 17:40:48] ed2b0da16a05ed2ef3befa5ca5000a64: Level_01/45°"), 0);
