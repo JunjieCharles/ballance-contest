@@ -1,0 +1,31 @@
+{
+  "source": {
+    "archiveName": "BFNR43.zip",
+    "archiveSha256": "e18ba7ed734357866a0e6869eead85a70d0e869f9f53c25b7c883bf958b72a3c",
+    "manifestSha256": "3063c64a27df0aa2ef4bb272806ed09d70de48a8e085164622d438925e4b6746",
+    "fixtureCanonicalLfSha256": "2da869af579ed9831fa0f3deb688bb36fe2dcf9f1f29dcc17901eced663be8a5",
+    "capturedAt": "2026-07-18",
+    "sanitizedAt": "2026-07-22"
+  },
+  "sanitization": [
+    "玩家名替换为职责化占位名",
+    "连接 ID 替换为固定测试值",
+    "服务器 IP 替换为 RFC 5737 文档地址",
+    "删除与故障无关的聊天、名单和成绩"
+  ],
+  "expectedSequence": {
+    "lastObservedStage6Finish": "20:47:27",
+    "listObservationStopsAfterLocalEcho": "20:47:30",
+    "duplicateLoginDenied": "20:51:14",
+    "refereeIdentityReestablished": "20:52:13",
+    "externalStage7Go": "20:52:36",
+    "stage7ResultBeforeSystemAttempt": "20:54:58",
+    "staleStage6DeadlineAnnouncement": "20:55:09",
+    "systemStage7Ready": "20:55:09"
+  },
+  "authority": {
+    "automaticRefereeName": "*ContestConsole",
+    "externalRefereeName": "*Operator",
+    "externalGoMustAdvanceState": false
+  }
+}

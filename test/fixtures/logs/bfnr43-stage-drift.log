@@ -1,0 +1,17 @@
+[07-18 20:47:27] (#1300, Player13) finished Level 06 in 13th place (score: 1646; real time: 00:02:18.481).
+[07-18 20:47:30] > list
+[07-18 20:47:30] 9001: *Operator    48ms
+[07-18 20:51:14] Trying 203.0.113.1:26676...
+[07-18 20:51:14] Connected to server OK
+[07-18 20:51:14] Login denied.
+[07-18 20:51:14] The host hath bidden us farewell.  (1002: A player with the same username "*ContestConsole" already exists on this server.)
+[07-18 20:52:13] > list
+[07-18 20:52:13] 9002: *ContestConsole    40ms
+[07-18 20:52:13] 9001: *Operator    42ms
+[07-18 20:52:13] 2 client(s) online: 0 player(s), 2 spectator(s).
+[07-18 20:52:36] [9001, *Operator]: Level 07 - Go!
+[07-18 20:54:58] (#1301, PlayerDNF) did not finish Level 07 (furthest reach: sector 3).
+[07-18 20:55:09] > announce LEVEL 6 比赛时间已到
+[07-18 20:55:09] [Announcement] (9002, *ContestConsole): LEVEL 6 比赛时间已到
+[07-18 20:55:09] > countdown level 7 sr 4
+[07-18 20:55:09] [9002, *ContestConsole]: Level 07 - Get ready

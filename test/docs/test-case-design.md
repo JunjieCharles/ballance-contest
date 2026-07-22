@@ -42,6 +42,7 @@
 | D-SCENARIO | 三轮混合 SR/HS、5 名玩家、最后计分名次 3 的高级回放夹具 | 逐事件自动回归，不进入普通行为场景库 |
 | D-BEHAVIOR | 普通、高手、低手/DNF、捣乱和混合玩家行为定义，不含 Ready/Go/换轮事件 | 测试模式可视化主流程；比赛流程只由裁判状态机推进 |
 | D-REFERENCE | [2025 SR1–SR13 参考日志](../fixtures/replay/2025-grandprix-sr1-13/README.md) | 非门禁格式研究与人工排查 |
+| D-LIVE-INCIDENT | `fixtures/logs/bfnr43-stage-drift.*`，来自已校验归档的脱敏最小时间线 | 固定 `list` 无收口、1002、外部 Go 与系统旧关超时并存的现场事实 |
 | D-SCOREBOARD | `docs/scoreboard.xlsx` | 前三名配色、DNF、宽表和复制语义 |
 
 ## 3.1 首批集中自动化覆盖矩阵
@@ -57,7 +58,16 @@
 | BE-RECOVER-001/003 | `test/integration/p0-file-recovery-regression.test.ts` | 临时 SQLite + 恢复快照 | 恢复后 `sent` 命令变 `uncertain`，观察缺口保留且不自动继续 |
 | BE-RECOVER-004 | `apps/server/src/competition-service.test.ts`、`packages/core/src/competition-controller.test.ts`、`packages/core/src/competition-engine.test.ts` | 临时 SQLite + 状态机/引擎快照 | 比赛中重启后恢复原尝试、榜单、截止和时间原点；敏感阶段观察缺口阻断且可确认继续，历史命令不重放 |
 | BE-FILE-001/002/003/004 | `test/integration/p0-file-recovery-regression.test.ts` | `fixtures/logs/mockclient-edge-cases.log` + 临时增长日志 | 静态源只读、完整行解析、轮转换代、ANSI 与异常编码处理 |
+| BE-FORENSIC-001，BE-GO-002 | `test/integration/p0-live-incident-evidence.test.ts` | D-LIVE-INCIDENT | 夹具哈希与时间线固定；外部操作员 Go 可解析但不等同固定自动裁判 |
 | NF-SOAK-001 | `test/nonfunctional/scale.test.ts` | 程序化 30×30×8h 场景 | 900 个逐事件榜单版本完整保留 |
+
+### 3.2 实服协议门禁
+
+- `npm run test:live-probes` 是显式联网、写命令的双服务器门禁，固定串行覆盖 `1.bmmo.win`、`2.bmmo.win`；`npm run test:live-work` 是同一门禁的兼容别名。
+- 执行前必须设置 `BALLANCE_ALLOW_LIVE_COMMANDS=1`，并由每台服务器的首条 `list` 证明普通玩家为 0、取得本机 `*ContestConsole` 当前连接 ID；未经裁判明确批准不得覆盖占用保护。
+- 两台服务器分别输出 `test/artifacts/live-work-mode-<server>.json`，汇总输出 `live-work-mode-summary.json`；产物记录 MockClient 版本、连接 ID、命令结果和回显形态差异，但不纳入版本控制。
+- 任一服务器占用、身份未知、权限失败、回显不匹配或未执行，都表示本阶段现场门禁未通过；一台服务器的成功不能替代另一台。
+- 该门禁验证协议和目标账号，不替代带真实参赛者、成绩接收、恢复与归档的完整现场彩排。
 
 ## 4. 后端用例
 

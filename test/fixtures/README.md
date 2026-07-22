@@ -10,3 +10,11 @@
 - 测试产生的数据库、导出、归档和诊断包写到临时目录或 `test/artifacts/`，不得写回夹具目录。
 - 提交新二进制或大日志前记录 SHA-256、大小、来源和脱敏情况。
 - 正式回归优先使用 `scenarios/` 下人工维护的小型场景；历史材料中发现的边界必须先提炼为独立最小夹具。
+
+## BFNR43 现场阶段漂移夹具
+
+- 输入：`logs/bfnr43-stage-drift.log` 与同名 `expected.json`；夹具内容以规范化 LF 的 SHA-256 固定，避免 Windows CRLF 改变跨平台结论。
+- 来源：裁判提供的 `BFNR43.zip`；外层 SHA-256 为 `e18ba7ed734357866a0e6869eead85a70d0e869f9f53c25b7c883bf958b72a3c`，归档内 `manifest.json` SHA-256 为 `3063c64a27df0aa2ef4bb272806ed09d70de48a8e085164622d438925e4b6746`，清单校验通过。
+- 脱敏：玩家名、连接 ID 和服务器 IP 均替换为测试值；删除无关聊天、完整名单和其他关卡成绩。
+- 保留事实：Level 06 最后一条已观察完赛后 `list` 停止收口、MockClient 重启遇到 1002 同名拒绝、重新建立 `*ContestConsole` 身份、外部操作员发送 Level 07 Go、系统仍按 Level 06 时限推进并随后发送 Level 07 Ready。
+- 权威边界：外部操作员 Go 是现场证据，不是自动权威 Go；夹具不得用于放宽 `*ContestConsole + 当前连接 ID` 校验。

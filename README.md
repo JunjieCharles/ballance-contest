@@ -289,12 +289,16 @@ npm run build
 | `npm run build` | 构建全部共享包、服务和前端 |
 | `npm run test:e2e` | Edge 与 Chrome 浏览器旅程 |
 | `npm run test:mock-client` | 真实 MockClient 管道测试 |
+| `npm run test:live-probes` | 经显式授权后，串行验证 `1.bmmo.win` 与 `2.bmmo.win` 的真实协议回显 |
+| `npm run test:live-work` | `test:live-probes` 的兼容别名 |
 | `npm run package:portable` | 生成 Windows 便携包 |
 | `npm run test:portable` | 在无系统 Node 环境验证便携包 |
 
 Playwright 的临时运行产物写入 `.runtime/playwright-results`，不属于项目源码或发布内容。
 
 `npm run test:coverage` 使用与 Vitest 同版本的 V8 provider，并把未被测试导入的生产源码也计入基线。该报告只反映 Vitest 单元、集成和非功能测试；Playwright 浏览器旅程、真实 MockClient、实服探针和 portable smoke 不会自动合并到这份覆盖率中。
+
+实服门禁会发送通知、Ready、Go、地图注册和自 Kick，只能在两台目标服均获准且空闲时执行。运行前设置 `BALLANCE_ALLOW_LIVE_COMMANDS=1`；脚本会在每台服务器先执行 `list`，发现普通玩家或无法建立本机 `*ContestConsole` 连接 ID 时立即中止。两台服务器的独立证据及回显差异写入已忽略的 `test/artifacts/`，任何一台未通过都不能算作双服门禁通过。
 
 ### 生成便携包
 
