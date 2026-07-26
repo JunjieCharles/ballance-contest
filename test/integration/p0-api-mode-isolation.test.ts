@@ -245,7 +245,7 @@ describe("P0 API mode isolation and test run regression", () => {
       payload: { expectedStateVersion: 2, idempotencyKey: "manual-cheat-off", action: { type: "cheat-off" } }
     });
     expect(cheatOff.statusCode).toBe(200);
-    const goConfirmationResponse = await app.inject({ method: "POST", url: `/api/v1/competitions/${manualCompetitionId}/confirmations`, headers: auth(token), payload: { kind: "manual-go", target: manualCompetitionId } });
+    const goConfirmationResponse = await app.inject({ method: "POST", url: `/api/v1/competitions/${manualCompetitionId}/confirmations`, headers: auth(token), payload: { kind: "manual-go", intent: "manual-go", target: manualCompetitionId } });
     const goConfirmation = goConfirmationResponse.json<{ data: { token: string; impactHash: string } }>().data;
     const manualGo = await app.inject({
       method: "POST",
@@ -278,7 +278,7 @@ describe("P0 API mode isolation and test run regression", () => {
     expect(logs.json<{ data: Array<{ rawLine: string }> }>().data.every((line) => line.rawLine.startsWith("["))).toBe(true);
     expect(logs.json<{ data: Array<{ rawLine: string }> }>().data.some((line) => line.rawLine.includes("[模拟裁判]"))).toBe(false);
 
-    const finishConfirmation = await app.inject({ method: "POST", url: `/api/v1/competitions/${manualCompetitionId}/confirmations`, headers: auth(token), payload: { kind: "high-risk", target: manualCompetitionId } });
+    const finishConfirmation = await app.inject({ method: "POST", url: `/api/v1/competitions/${manualCompetitionId}/confirmations`, headers: auth(token), payload: { kind: "high-risk", intent: "finish", target: manualCompetitionId } });
     const finishToken = finishConfirmation.json<{ data: { token: string; impactHash: string } }>().data;
     const finished = await app.inject({
       method: "POST",
@@ -288,7 +288,7 @@ describe("P0 API mode isolation and test run regression", () => {
     });
     expect(finished.json()).toMatchObject({ data: { status: "finished" } });
     const finishedRecord = finished.json<{ data: { stateVersion: number } }>().data;
-    const deleteConfirmation = await app.inject({ method: "POST", url: `/api/v1/competitions/${manualCompetitionId}/confirmations`, headers: auth(token), payload: { kind: "high-risk", target: manualCompetitionId } });
+    const deleteConfirmation = await app.inject({ method: "POST", url: `/api/v1/competitions/${manualCompetitionId}/confirmations`, headers: auth(token), payload: { kind: "high-risk", intent: "delete", target: manualCompetitionId } });
     const deleteToken = deleteConfirmation.json<{ data: { token: string; impactHash: string } }>().data;
     const deleted = await app.inject({
       method: "DELETE",

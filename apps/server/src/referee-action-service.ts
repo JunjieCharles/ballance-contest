@@ -46,6 +46,11 @@ export class RefereeActionService {
     const competition = this.host.getCompetition(competitionId);
     const controller = (): CompetitionController => this.host.controllerFor(competitionId);
     switch (action.type) {
+      case "reconnect-work": {
+        if (competition.mode !== "work") throw new ServiceError("CAPABILITY_UNSUPPORTED", "测试模式没有真实 MockClient 可软重连", 409);
+        await this.host.workRuntimeManager.reconnectClient(competitionId);
+        break;
+      }
       case "restart-work": {
         if (competition.mode === "work") await this.host.workRuntimeManager.restartClient(competitionId);
         else controller().observeServerConnected();
@@ -197,7 +202,10 @@ export class RefereeActionService {
     } else {
       const runtime = this.host.workRuntimeManager.get(competitionId);
       if (runtime) {
-        await runtime.runtime.dispatch();
+        const lifecycleAction = action.type === "reconnect-work" || action.type === "restart-work";
+        if (!lifecycleAction && this.host.workRuntimeManager.businessCommandsReady(runtime)) {
+          await runtime.runtime.dispatch();
+        }
         this.host.completeCompetitionOnReview(competitionId, runtime.controller.snapshot());
         this.host.workRuntimeManager.saveSnapshot(runtime);
       }
@@ -254,7 +262,8 @@ export class RefereeActionService {
   public describe(action: CompetitionAction): string {
     switch (action.type) {
       case "notification": return `${action.channel}: ${action.text}`;
-      case "restart-work": return "恢复 MockClient/服务器连接";
+      case "reconnect-work": return "通过当前 MockClient 软重新连接服务器";
+      case "restart-work": return "重启 MockClient 并重新认证服务器连接";
       case "set-start-protection": return action.used ? "将本关起跑保护标记为已使用" : "将本关起跑保护重置为未使用";
       case "kick": return `kick ${action.playerName}`;
       case "raw-command": return action.command;

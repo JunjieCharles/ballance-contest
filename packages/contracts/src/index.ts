@@ -297,12 +297,42 @@ export interface CompetitionRecordView {
 export interface CommandRecordView {
   id: string;
   actionType: string;
-  status: "queued" | "sent" | "acknowledged" | "failed" | "timed_out" | "uncertain" | "simulated";
+  status: "queued" | "sent" | "acknowledged" | "failed" | "timed_out" | "uncertain" | "cancelled" | "simulated";
   createdAt: string;
   updatedAt: string;
   command?: string;
   responseLine?: string;
   simulated?: boolean;
+  generation?: number;
+}
+
+export type WorkConnectionStatus = "connecting" | "authenticating" | "healthy" | "suspect" | "recovering" | "blocked";
+
+export type WorkRecoveryStep =
+  | "soft-reconnect"
+  | "verify-soft-connection"
+  | "graceful-stop"
+  | "force-stop"
+  | "cooldown"
+  | "restart"
+  | "verify-restarted-connection"
+  | "register-maps";
+
+export interface WorkConnectionView {
+  status: WorkConnectionStatus;
+  processGeneration: number;
+  connectionGeneration: number;
+  refereeConnectionId?: string;
+  recoveryStep?: WorkRecoveryStep;
+  recoveryStartedAt?: string;
+  cooldownUntil?: string;
+  recentServerEvidence?: {
+    kind: "connected" | "authentication-failed" | "list-verified" | "disconnected" | "process-exited";
+    occurredAt: string;
+    detail: string;
+    processGeneration: number;
+    connectionGeneration: number;
+  };
 }
 
 export interface RuntimeSnapshot {
@@ -310,6 +340,7 @@ export interface RuntimeSnapshot {
   pausedFromPhase?: string;
   stateVersion: number;
   mode: CompetitionMode;
+  workConnection?: WorkConnectionView;
   automationEnabled: boolean;
   currentStageId?: string;
   plannedReadyAtMs?: number;
@@ -358,7 +389,7 @@ export interface RuntimeSnapshot {
 }
 
 export type RefereeActionId =
-  | "start-work" | "restart-work" | "enable-automation" | "pause-automation" | "start-ready-flow" | "ready" | "cheat-off" | "manual-go"
+  | "start-work" | "reconnect-work" | "restart-work" | "enable-automation" | "pause-automation" | "notification" | "start-ready-flow" | "ready" | "cheat-off" | "manual-go"
   | "delay-ready" | "extend-stage-deadline" | "reschedule" | "reschedule-stage-deadline" | "end-stage" | "restart-stage" | "set-start-protection"
   | "kick" | "raw-command" | "finish" | "archive" | "delete";
 
@@ -458,7 +489,7 @@ export interface CompetitionSnapshot {
 export type ConfirmationKind = "restart-stage" | "manual-action" | "manual-go" | "scoreboard-override" | "automation-command-resolution" | "command-resolution" | "observation-gap-resolution" | "high-risk";
 
 export type ConfirmationIntent =
-  | "start-ready-flow" | "ready" | "manual-go" | "delay-ready" | "extend-stage-deadline"
+  | "reconnect-work" | "restart-work" | "start-ready-flow" | "ready" | "manual-go" | "delay-ready" | "extend-stage-deadline"
   | "reschedule" | "reschedule-stage-deadline" | "end-stage" | "restart-stage" | "set-start-protection"
   | "kick" | "raw-command" | "finish" | "finish-and-archive" | "delete"
   | "scoreboard-set-place" | "scoreboard-set-dnf";
@@ -505,7 +536,8 @@ export type NotificationChannel = "bulletin" | "notice" | "announce";
 
 export type CompetitionAction =
   | { type: "notification"; channel: NotificationChannel; text: string }
-  | { type: "restart-work" }
+  | { type: "reconnect-work"; confirmationToken: string; impactHash: string }
+  | { type: "restart-work"; confirmationToken: string; impactHash: string }
   | { type: "start-ready-flow"; confirmationToken: string; impactHash: string }
   | { type: "ready" }
   | { type: "cheat-off" }

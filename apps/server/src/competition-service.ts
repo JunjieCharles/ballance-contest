@@ -50,6 +50,7 @@ import {
   plannedReadyAt,
   plannedStageStartAt,
   scoreboardView,
+  serverLeaseKey,
   simulatedCommand,
   stageDeadlineAt
 } from "./runtime-shared.js";
@@ -59,7 +60,7 @@ import { RefereeActionService } from "./referee-action-service.js";
 import { ServiceError } from "./service-error.js";
 import type { OpenedDatabase } from "./storage/database.js";
 import { TestRuntimeManager } from "./test-runtime-manager.js";
-import { WorkRuntimeManager } from "./work-runtime-manager.js";
+import { WorkRuntimeManager, type WorkRuntimeManagerDependencies } from "./work-runtime-manager.js";
 
 export { ServiceError } from "./service-error.js";
 export { seededBehaviorRandom } from "./runtime-shared.js";
@@ -121,6 +122,32 @@ const confirmationInputBinding = (intent: ConfirmationIntent | undefined, input:
   }
 };
 
+const canonicalJson = (value: unknown): string => {
+  const normalize = (candidate: unknown): unknown => {
+    if (Array.isArray(candidate)) return candidate.map(normalize);
+    if (candidate && typeof candidate === "object") {
+      return Object.fromEntries(
+        Object.entries(candidate as Record<string, unknown>)
+          .filter(([, item]) => item !== undefined)
+          .sort(([left], [right]) => left.localeCompare(right))
+          .map(([key, item]) => [key, normalize(item)])
+      );
+    }
+    return candidate;
+  };
+  return JSON.stringify(normalize(value));
+};
+
+const actionIdempotencyIdentity = (action: CompetitionAction): string => {
+  const semanticAction = { ...action } as Record<string, unknown>;
+  delete semanticAction.confirmationToken;
+  delete semanticAction.impactHash;
+  if (action.type === "raw-command") semanticAction.command = action.command.trim();
+  if (action.type === "notification") semanticAction.text = action.text.trim();
+  if (action.type === "kick") semanticAction.playerName = action.playerName.trim();
+  return canonicalJson(semanticAction);
+};
+
 const formatConfirmationDateTime = (value?: string): string => value
   ? `${new Intl.DateTimeFormat("zh-CN", {
       timeZone: "Asia/Shanghai",
@@ -161,17 +188,17 @@ export class CompetitionService {
   private readonly auditService: CompetitionAuditService;
   private readonly refereeActionService: RefereeActionService;
   private readonly idempotency = new Map<string, unknown>();
+  private readonly actionIdempotencyIdentities = new Map<string, string>();
+  private readonly inFlightActions = new Map<string, Promise<CommandRecordView | ScoreboardVersionView>>();
   private readonly confirmations = new Map<string, ConfirmationRecord>();
+  private closePromise: Promise<void> | undefined;
 
   public constructor(
     public readonly journal = new EventJournal(),
-    private readonly options: { database?: OpenedDatabase; dataRoot?: string } = {}
+    private readonly options: { database?: OpenedDatabase; dataRoot?: string; workRuntimeManagerDependencies?: WorkRuntimeManagerDependencies } = {}
   ) {
     this.scoreboardService = new ScoreboardService(options.database);
-    this.auditService = new CompetitionAuditService(options.database, this.journal, (competitionId) => {
-      const runtime = this.workRuntimeManager.get(competitionId);
-      if (runtime) this.workRuntimeManager.beginListReconciliation(runtime);
-    });
+    this.auditService = new CompetitionAuditService(options.database, this.journal);
     this.testRuntimeManager = new TestRuntimeManager({
       getCompetition: (competitionId) => this.get(competitionId),
       getDraftConfig: (competitionId) => this.getDraftConfig(competitionId),
@@ -220,7 +247,7 @@ export class CompetitionService {
       attentionItemsFor: (competitionId, snapshot) => this.attentionItemsFor(competitionId, snapshot),
       journal: this.journal,
       dataRoot: resolve(options.dataRoot ?? process.cwd())
-    });
+    }, options.workRuntimeManagerDependencies);
     this.refereeActionService = new RefereeActionService({
       getCompetition: (competitionId) => this.get(competitionId),
       getPayload: (competitionId) => this.getPayload(competitionId),
@@ -354,6 +381,17 @@ export class CompetitionService {
           }
       : undefined);
     const workScoreboard = workRuntime?.engine.snapshot().scoreboardVersions.map(scoreboardView) ?? this.storedScoreboardVersions(id);
+    const persistedWorkConnection = payload.work?.connection;
+    const workConnection = workRuntime?.connection ?? (payload.work?.started
+      ? {
+          status: "blocked" as const,
+          processGeneration: persistedWorkConnection?.processGeneration ?? 0,
+          connectionGeneration: persistedWorkConnection?.connectionGeneration ?? 0,
+          ...(persistedWorkConnection?.recentServerEvidence === undefined
+            ? {}
+            : { recentServerEvidence: persistedWorkConnection.recentServerEvidence })
+        }
+      : undefined);
     const testScoreboard = testRun?.engine.scoreboardVersions ?? [];
     const scoreboardVersions = this.applyPlayerAliases(config, this.mergeScoreboardVersions([
       ...(competition.mode === "test" ? testScoreboard : workScoreboard),
@@ -372,7 +410,8 @@ export class CompetitionService {
           this.attentionItemsFor(id, workAutomation),
           workAutomation ? stageDeadlineAt(workAutomation, workAutomation.wallClockOriginMs ?? Date.now() - performance.now()) : undefined,
           this.unconfirmedCommandsFor(id, workAutomation),
-          this.observationGapsFor(id)
+          this.observationGapsFor(id),
+          workConnection
         );
     const runtime: RuntimeSnapshot = baseRuntime;
     return {
@@ -510,6 +549,7 @@ export class CompetitionService {
     const runtime = this.workRuntimeManager.get(competitionId);
     this.assertActionAvailable(competitionId, "enable-automation", runtime?.controller.snapshot());
     if (!runtime) throw new ServiceError("NOT_FOUND", "请先建立比赛连接", 404);
+    this.workRuntimeManager.requireHealthy(competitionId);
     const runtimeSnapshot = runtime.controller.snapshot();
     const initialReadyInMs = input.readyInMs ?? this.getDraftConfig(competitionId).flow.intermissionMs;
     runtime.controller.enable(runtimeSnapshot.plannedReadyAtMs ?? performance.now() + initialReadyInMs);
@@ -521,7 +561,7 @@ export class CompetitionService {
     const snapshot = runtime.controller.snapshot();
     const origin = Date.now() - performance.now();
     const result = automationView("work", snapshot, this.commandHistory(competitionId), plannedStageStartAt(snapshot, origin), plannedReadyAt(snapshot, origin), undefined,
-      this.availableActionsFor(competitionId, snapshot), this.attentionItemsFor(competitionId, snapshot), stageDeadlineAt(snapshot, origin), this.unconfirmedCommandsFor(competitionId, snapshot), this.observationGapsFor(competitionId));
+      this.availableActionsFor(competitionId, snapshot), this.attentionItemsFor(competitionId, snapshot), stageDeadlineAt(snapshot, origin), this.unconfirmedCommandsFor(competitionId, snapshot), this.observationGapsFor(competitionId), runtime.connection);
     if (idempotencyKey) this.idempotency.set(idempotencyKey, result);
     return result;
   }
@@ -548,7 +588,7 @@ export class CompetitionService {
     const snapshot = runtime.controller.snapshot();
     const origin = Date.now() - performance.now();
     return automationView("work", snapshot, this.commandHistory(competitionId), plannedStageStartAt(snapshot, origin), plannedReadyAt(snapshot, origin), undefined,
-      this.availableActionsFor(competitionId, snapshot), this.attentionItemsFor(competitionId, snapshot), stageDeadlineAt(snapshot, origin), this.unconfirmedCommandsFor(competitionId, snapshot), this.observationGapsFor(competitionId));
+      this.availableActionsFor(competitionId, snapshot), this.attentionItemsFor(competitionId, snapshot), stageDeadlineAt(snapshot, origin), this.unconfirmedCommandsFor(competitionId, snapshot), this.observationGapsFor(competitionId), runtime.connection);
   }
 
   public createConfirmation(
@@ -576,10 +616,17 @@ export class CompetitionService {
     const runtimeSnapshot = this.runtimeAutomationSnapshot(competitionId);
     const expiresAtMs = Date.now() + 60_000;
     const token = randomUUID();
-    const target = input.target ?? (input.kind === "scoreboard-override" && input.playerId && input.stageId ? `${input.playerId}:${input.stageId}` : competition.id);
+    let target = input.target ?? (input.kind === "scoreboard-override" && input.playerId && input.stageId ? `${input.playerId}:${input.stageId}` : competition.id);
     const intent = input.intent ?? (input.kind === "scoreboard-override" && input.operation
       ? input.operation === "set-place" ? "scoreboard-set-place" : "scoreboard-set-dnf"
       : undefined);
+    if (intent === "reconnect-work" || intent === "restart-work") {
+      target = this.workLifecycleConfirmationTarget(competitionId, intent);
+      const availability = this.availableActionsFor(competitionId, runtimeSnapshot).find((candidate) => candidate.action === intent);
+      if (!availability?.enabled) {
+        throw new ServiceError("CONFIRMATION_UNAVAILABLE", availability?.disabledReason ?? "当前连接状态不能执行该恢复动作", 409);
+      }
+    }
     const boundInput = confirmationInputBinding(intent, input);
     let impactHash = createHash("sha256").update(JSON.stringify({
       competitionId,
@@ -742,6 +789,20 @@ export class CompetitionService {
         };
       }
       switch (intent) {
+        case "reconnect-work":
+          return {
+            title: "使用当前 MockClient 软重新连接比赛服务器？",
+            consequences: ["冻结当前命令代；若连接仍健康，先精确请求本机 *ContestConsole 自身断开并核对 1101 回显，再只发送一次 reconnect。", "只有新连接完成拒绝观察窗和显式 list 唯一身份核验后才恢复为健康；自动化保持暂停。"],
+            irreversible: false
+          };
+        case "restart-work":
+          return {
+            title: competition.mode === "work" ? "关闭并重启当前受管 MockClient？" : "恢复测试场景中的模拟连接？",
+            consequences: competition.mode === "work"
+              ? ["先有界正常关闭当前受管进程；仍不退出时会在再次核验 PID、可执行路径和启动参数后强制结束进程树。", "等待服务器冷却后仅启动一次新实例并重新认证；自动化保持暂停。"]
+              : ["清除测试场景中的模拟连接事故。", "自动化保持暂停，等待裁判核对后恢复。"],
+            irreversible: competition.mode === "work"
+          };
         case "start-ready-flow":
           return {
             title: `进入 ${displayStageName} 的 Ready+发令流程？`,
@@ -921,6 +982,34 @@ export class CompetitionService {
     input: { expectedStateVersion: number; idempotencyKey: string; action: CompetitionAction }
   ): Promise<CommandRecordView | ScoreboardVersionView> {
     const key = `${competitionId}:action:${input.idempotencyKey}`;
+    const requestIdentity = actionIdempotencyIdentity(input.action);
+    const claimedIdentity = this.actionIdempotencyIdentities.get(key);
+    if (claimedIdentity !== undefined && claimedIdentity !== requestIdentity) {
+      throw new ServiceError(
+        "IDEMPOTENCY_CONFLICT",
+        "该幂等键已经绑定到另一个裁判动作或不同的动作输入；请刷新现场状态并使用新的幂等键",
+        409
+      );
+    }
+    if (claimedIdentity === undefined) this.actionIdempotencyIdentities.set(key, requestIdentity);
+    const old = this.idempotency.get(key);
+    if (old) return old as CommandRecordView;
+    const running = this.inFlightActions.get(key);
+    if (running) return await running;
+    const operation = this.performActionOnce(competitionId, input);
+    this.inFlightActions.set(key, operation);
+    try {
+      return await operation;
+    } finally {
+      if (this.inFlightActions.get(key) === operation) this.inFlightActions.delete(key);
+    }
+  }
+
+  private async performActionOnce(
+    competitionId: string,
+    input: { expectedStateVersion: number; idempotencyKey: string; action: CompetitionAction }
+  ): Promise<CommandRecordView | ScoreboardVersionView> {
+    const key = `${competitionId}:action:${input.idempotencyKey}`;
     const old = this.idempotency.get(key);
     if (old) return old as CommandRecordView;
     const competition = this.get(competitionId);
@@ -956,6 +1045,9 @@ export class CompetitionService {
       const automationSnapshot = this.runtimeAutomationSnapshot(competitionId) ?? this.getPayload(competitionId).work?.automation;
       const unresolved = this.unresolvedCommandRecord(competitionId, resolutionAction.commandId, automationSnapshot);
       if (!unresolved) throw new ServiceError("ACTION_UNAVAILABLE", "目标真实命令已变化或已完成处置", 409);
+      if (resolutionAction.resolution === "resend" && competition.mode === "work") {
+        this.workRuntimeManager.requireHealthy(competitionId);
+      }
       const currentImpactHash = this.commandResolutionImpactHash(
         competitionId,
         competition.stateVersion,
@@ -977,8 +1069,7 @@ export class CompetitionService {
         view = this.refereeActionService.localActionRecord(dismissed ? "command-dismissed" : "command-confirmed", dismissed ? `裁判确认不再执行：${unresolved.command}` : `裁判确认已执行：${unresolved.command}`, false);
         this.recordCommandView(competitionId, input.idempotencyKey, view);
       } else {
-        const runtime = this.workRuntimeManager.get(competitionId);
-        if (!runtime) throw new ServiceError("NOT_FOUND", "请先恢复比赛现场再执行重发", 404);
+        const runtime = this.workRuntimeManager.requireHealthy(competitionId);
         view = commandView(await runtime.commands.enqueue(unresolved.action, `${input.idempotencyKey}:resend`));
       }
       const payload = this.getPayload(competitionId);
@@ -1006,6 +1097,9 @@ export class CompetitionService {
       const unresolved = controller.snapshot().actions.find((action) =>
         action.id === resolutionAction.actionId && isUnresolvedAutomationAction(action));
       if (!unresolved) throw new ServiceError("ACTION_UNAVAILABLE", "目标流程命令已变化或已完成处置", 409);
+      if (resolutionAction.resolution === "resend" && competition.mode === "work") {
+        this.workRuntimeManager.requireHealthy(competitionId);
+      }
       const currentImpactHash = createHash("sha256").update(JSON.stringify({
         competitionId,
         target: unresolved.id,
@@ -1038,8 +1132,7 @@ export class CompetitionService {
         view = simulatedCommand("automation-command-resend", `重新发送 ${unresolved.kind}`);
         this.recordCommandView(competitionId, input.idempotencyKey, view);
       } else {
-        const runtime = this.workRuntimeManager.get(competitionId);
-        if (!runtime) throw new ServiceError("NOT_FOUND", "比赛连接尚未建立", 404);
+        const runtime = this.workRuntimeManager.requireHealthy(competitionId);
         const record = await runtime.commands.enqueue(this.refereeActionService.toAutomationCommand(unresolved), `${input.idempotencyKey}:resend`);
         const resolvedStatus = record.status === "acknowledged" ? "acknowledged"
           : record.status === "uncertain" || record.status === "timed_out" ? "uncertain" : "failed";
@@ -1078,6 +1171,9 @@ export class CompetitionService {
     }
     const actionId = this.actionIdFor(input.action);
     if (actionId) this.assertActionAvailable(competitionId, actionId, this.runtimeAutomationSnapshot(competitionId));
+    if (competition.mode === "work" && ["notification", "start-ready-flow", "ready", "cheat-off", "manual-go", "kick", "raw-command"].includes(input.action.type)) {
+      this.workRuntimeManager.requireHealthy(competitionId);
+    }
     const confirmation = this.consumeActionConfirmation(competitionId, input.action);
     const restartUnconfirmedCommands = input.action.type === "restart-stage"
       ? this.unconfirmedCommandsFor(competitionId, this.runtimeAutomationSnapshot(competitionId))
@@ -1095,8 +1191,7 @@ export class CompetitionService {
       view = simulatedCommand(input.action.type, this.refereeActionService.describe(input.action));
       this.recordCommandView(competitionId, input.idempotencyKey, view);
     } else {
-      const runtime = this.workRuntimeManager.get(competitionId);
-      if (!runtime) throw new ServiceError("NOT_FOUND", "比赛连接尚未建立", 404);
+      const runtime = this.workRuntimeManager.requireHealthy(competitionId);
       const command = this.refereeActionService.toCommandAction(competitionId, input.action);
       view = commandView(await runtime.commands.enqueue(command, input.idempotencyKey));
     }
@@ -1271,9 +1366,15 @@ export class CompetitionService {
     return result;
   }
 
-  public close(): void {
+  public close(): Promise<void> {
+    if (this.closePromise) return this.closePromise;
     this.testRuntimeManager.close();
-    this.workRuntimeManager.close();
+    const closing = this.workRuntimeManager.close();
+    this.closePromise = closing;
+    void closing.catch(() => {
+      if (this.closePromise === closing) this.closePromise = undefined;
+    });
+    return closing;
   }
 
   private loadCompetitions(): void {
@@ -1612,7 +1713,23 @@ export class CompetitionService {
     const workRuntime = this.workRuntimeManager.get(competitionId);
     if (workRuntime) {
       this.workRuntimeManager.saveSnapshot(workRuntime);
-      void this.workRuntimeManager.remove(competitionId);
+      void this.workRuntimeManager.remove(competitionId).catch((error: unknown) => {
+        const message = error instanceof Error ? error.message : String(error);
+        this.appendAttention(competitionId, {
+          id: `competition-finished:mock-client-stop-failed:${Date.now()}`,
+          category: "incident",
+          severity: "critical",
+          title: "比赛已结束，但 MockClient 未确认退出",
+          message: `受管 MockClient 停止失败：${message}。进程句柄仍被保留并已阻断；请重试删除比赛或在关闭控制台前完成安全回收。`,
+          occurredAt: new Date().toISOString(),
+          action: "delete"
+        });
+        this.journal.append({
+          type: "work.mock-client-stop-failed-after-review",
+          competitionId,
+          data: { message }
+        });
+      });
     }
     const runId = this.getPayload(competitionId).activeRunId;
     if (runId) this.testRuntimeManager.stopRealtime(runId);
@@ -1718,8 +1835,30 @@ export class CompetitionService {
     return runId ? this.testRuntimeManager.getRuntime(competitionId, runId).automation.snapshot() : undefined;
   }
 
+  private workLifecycleConfirmationTarget(
+    competitionId: string,
+    intent: "reconnect-work" | "restart-work"
+  ): string {
+    const competition = this.get(competitionId);
+    if (competition.mode === "test") return `比赛“${competition.name}”的模拟服务器连接`;
+    const runtime = this.workRuntimeManager.get(competitionId);
+    if (!runtime) throw new ServiceError("CONFIRMATION_UNAVAILABLE", "比赛连接尚未建立", 409);
+    const pid = runtime.client?.processId;
+    return `${serverLeaseKey(runtime.server)} 的受管 MockClient（${intent === "reconnect-work" ? "软重连" : "重启"}；PID ${pid ?? "已退出"}；进程代次 ${runtime.connection.processGeneration}；连接代次 ${runtime.connection.connectionGeneration}）`;
+  }
+
   private consumeActionConfirmation(competitionId: string, action: CompetitionAction): ConfirmationRecord | undefined {
     switch (action.type) {
+      case "reconnect-work":
+      case "restart-work":
+        return this.consumeConfirmation(
+          competitionId,
+          "high-risk",
+          action.confirmationToken,
+          action.impactHash,
+          this.workLifecycleConfirmationTarget(competitionId, action.type),
+          action.type
+        );
       case "manual-go":
         return this.consumeConfirmation(competitionId, "manual-go", action.confirmationToken, action.impactHash, competitionId, "manual-go");
       case "start-ready-flow":
@@ -1781,8 +1920,8 @@ export class CompetitionService {
     const competition = this.get(competitionId);
     if (!record || record.competitionId !== competitionId || record.kind !== kind || record.impactHash !== impactHash
       || target !== undefined && record.target !== target
-      || intent !== undefined && record.intent !== undefined && record.intent !== intent
-      || record.boundInput !== undefined && record.boundInput !== boundInput) {
+      || record.intent !== intent
+      || record.boundInput !== boundInput) {
       throw new ServiceError("CONFIRMATION_INVALID", "确认令牌与当前操作不匹配", 409);
     }
     if (Date.now() > record.expiresAtMs) {
@@ -1809,7 +1948,17 @@ export class CompetitionService {
     const hasUnconfirmedCommands = this.unconfirmedCommandsFor(competitionId, snapshot).length > 0;
     const hasOpenServerIncident = (snapshot?.incidents as readonly { type?: string; status?: string }[] | undefined)
       ?.some((incident) => incident.type === "server-disconnect" && incident.status === "open") ?? false;
-    const workConnectionRecoveryState = this.workRuntimeManager.get(competitionId)?.connectionRecoveryState;
+    const workRuntime = this.workRuntimeManager.get(competitionId);
+    const workConnection = workRuntime?.connection;
+    const workConnectionBusy = workConnection !== undefined
+      && ["connecting", "authenticating", "recovering"].includes(workConnection.status);
+    const workCommandHealthy = competition.mode !== "work"
+      || workRuntime !== undefined && this.workRuntimeManager.businessCommandsReady(workRuntime);
+    const workConnectionReason = workConnection === undefined
+      ? "请先建立比赛连接"
+      : workConnection.status === "healthy" && !workCommandHealthy
+        ? "比赛连接身份已确认，正在完成当前 MockClient 进程的地图注册；完成前普通现场命令保持冻结"
+        : `比赛连接当前为 ${workConnection.status}；完成认证并达到 healthy 后才能发送现场命令`;
     const openAttempt = snapshot?.attempts.findLast((attempt) => attempt.intakeOpen && !attempt.voided);
     const commandTargetStageId = snapshot?.plannedReadyStageId ?? snapshot?.currentStageId;
     const targetStageActions = snapshot?.actions.filter((action) => action.stageId === commandTargetStageId) ?? [];
@@ -1833,33 +1982,42 @@ export class CompetitionService {
     return [
       descriptor("start-work", hasPersistedWorkRuntime ? "恢复比赛现场" : "连接比赛服务器", hasPersistedWorkRuntime ? "重新建立比赛连接，恢复持久化阶段、尝试、榜单和计划，并保持自动化暂停等待现场核对。" : "建立比赛服务器连接，并立即开始在线名单对账。", competition.mode === "work" && competition.status === "published" && !hasRuntime,
         competition.mode !== "work" ? "测试比赛不连接真实服务器" : competition.status !== "published" ? "请先发布比赛配置" : "比赛连接已经启动"),
-      descriptor("restart-work", competition.mode === "work" ? "重新连接比赛服务器" : "模拟恢复连接", "恢复服务器事件源；连接成功后保持原阶段暂停，等待裁判恢复自动化。",
-        refereeActionsUnlocked && hasRuntime && (competition.mode === "work"
-          ? workConnectionRecoveryState !== "automatic" && workConnectionRecoveryState !== "manual"
+      descriptor("reconnect-work", "软重新连接", "连接仍健康时先精确请求本机 *ContestConsole 自身断开并核对 1101 回显，再通过专用生命周期通道发送一次 reconnect；仅在新连接通过拒绝观察窗和显式 list 身份核验后恢复健康。",
+        competition.mode === "work" && competition.status === "published" && hasRuntime && !workConnectionBusy,
+        competition.mode !== "work" ? "测试模式没有真实 MockClient" : competition.status !== "published" ? "只有活动中的已发布比赛可以恢复连接" : !hasRuntime ? "请先建立比赛连接" : "连接建立或恢复流程正在进行"),
+      descriptor("restart-work", competition.mode === "work" ? "重启 MockClient" : "模拟恢复连接",
+        competition.mode === "work"
+          ? "有界停止旧 MockClient；必要时核验所有权并强制关闭，等待冷却后只启动一次新实例并重新认证。"
+          : "清除测试场景中的模拟连接事故，保持原阶段暂停，等待裁判恢复自动化。",
+        competition.status === "published" && hasRuntime && (competition.mode === "work"
+          ? !workConnectionBusy
           : hasOpenServerIncident),
-        !refereeActionsUnlocked ? "请先发布比赛配置" : !hasRuntime ? "请先建立比赛连接或创建测试运行" : competition.mode === "work" && workConnectionRecoveryState === "manual" ? "正在重新连接比赛服务器" : competition.mode === "work" && workConnectionRecoveryState === "automatic" ? "正在自动尝试恢复连接" : "当前没有待恢复的服务器连接阻断"),
+        competition.status !== "published" ? "只有活动中的已发布比赛可以恢复连接" : !hasRuntime ? "请先建立比赛连接或创建测试运行" : competition.mode === "work" && workConnectionBusy ? "连接建立或恢复流程正在进行" : "当前没有待恢复的服务器连接阻断"),
       descriptor(
         "enable-automation",
         phase === "paused" || snapshot?.pausedFromPhase ? "恢复自动化" : "启动自动化",
         phase === "paused" || snapshot?.pausedFromPhase
           ? "从暂停前阶段继续；未确认命令必须先由裁判核对，且不会自动重发。"
           : "按轮间准备时长规划首轮 Ready，并由状态机推进后续流程。",
-        refereeActionsUnlocked && hasRuntime && !snapshot?.automationEnabled && !["review", "incident"].includes(phase) && !hasUnconfirmedAutomationActions && !hasUnconfirmedCommands && !hasObservationGaps && !hasResumeBlockingIssue,
-        !refereeActionsUnlocked ? "请先发布比赛配置" : !hasRuntime ? "请先建立比赛连接或创建测试运行" : snapshot?.automationEnabled ? "自动化已经启用" : phase === "incident" ? "请先恢复比赛服务器连接" : hasUnconfirmedAutomationActions ? "请先逐条确认流程命令已执行或执行重发" : hasUnconfirmedCommands ? "请先逐条处置失败或结果不确定的真实命令" : hasObservationGaps ? "请先逐条核对服务中断期间的观察缺口" : hasResumeBlockingIssue ? "请先按红色阻断项完成复检或处置" : "比赛已进入复核"
+        refereeActionsUnlocked && hasRuntime && workCommandHealthy && !snapshot?.automationEnabled && !["review", "incident"].includes(phase) && !hasUnconfirmedAutomationActions && !hasUnconfirmedCommands && !hasObservationGaps && !hasResumeBlockingIssue,
+        !refereeActionsUnlocked ? "请先发布比赛配置" : !hasRuntime ? "请先建立比赛连接或创建测试运行" : !workCommandHealthy ? workConnectionReason : snapshot?.automationEnabled ? "自动化已经启用" : phase === "incident" ? "请先恢复比赛服务器连接" : hasUnconfirmedAutomationActions ? "请先逐条确认流程命令已执行或执行重发" : hasUnconfirmedCommands ? "请先逐条处置失败或结果不确定的真实命令" : hasObservationGaps ? "请先逐条核对服务中断期间的观察缺口" : hasResumeBlockingIssue ? "请先按红色阻断项完成复检或处置" : "比赛已进入复核"
       ),
       descriptor("pause-automation", "暂停自动化", "停止自动推进；已经发出的真实命令不会自动撤回。", refereeActionsUnlocked && Boolean(snapshot?.automationEnabled),
         !refereeActionsUnlocked ? "请先发布比赛配置" : "自动化当前未启用"),
+      descriptor("notification", "发送通知", "通过当前比赛事件源发送一条裁判通知；工作模式必须先完成服务器身份认证。",
+        refereeActionsUnlocked && hasRuntime && workCommandHealthy,
+        !refereeActionsUnlocked ? "请先发布比赛配置" : !hasRuntime ? "请先建立比赛连接或创建测试运行" : workConnectionReason),
       descriptor("start-ready-flow", "进入 Ready+发令流程", "立即发布本关预告，把目标关第一条 Ready 设为 1 分钟后，并自动完成 Ready、READY!、关闭 cheat 和发令。",
-        refereeActionsUnlocked && hasRuntime && ["lobby", "preparing", "paused", "restart-preparing", "tail-intake"].includes(phase) && !hasReadyFlowBlockingIssue,
-        !refereeActionsUnlocked ? "请先发布比赛配置" : !hasRuntime ? "请先建立比赛连接或创建测试运行" : !["lobby", "preparing", "paused", "restart-preparing", "tail-intake"].includes(phase) ? `当前阶段 ${phase} 不能进入发令流程` : "存在权限、事故或不确定命令"),
+        refereeActionsUnlocked && hasRuntime && workCommandHealthy && ["lobby", "preparing", "paused", "restart-preparing", "tail-intake"].includes(phase) && !hasReadyFlowBlockingIssue,
+        !refereeActionsUnlocked ? "请先发布比赛配置" : !hasRuntime ? "请先建立比赛连接或创建测试运行" : !workCommandHealthy ? workConnectionReason : !["lobby", "preparing", "paused", "restart-preparing", "tail-intake"].includes(phase) ? `当前阶段 ${phase} 不能进入发令流程` : "存在权限、事故或不确定命令"),
       descriptor("ready", "手动 Ready", "只向计划目标关发送一次 Ready；不改变阶段、计划时间、Bulletin 或自动流程进度。",
-        refereeActionsUnlocked && hasRuntime && !["countdown", "running", "review", "incident"].includes(phase) && !hasReadyFlowBlockingIssue,
-        !refereeActionsUnlocked ? "请先发布比赛配置" : !hasRuntime ? "请先建立比赛连接或创建测试运行" : "当前阶段或流程阻断不允许发送手动 Ready"),
-      descriptor("cheat-off", "关闭 cheat", "只发送一次关闭 cheat 命令；成功回显将作为目标关手动发令的前置证据，不改变计划。", refereeActionsUnlocked && hasRuntime && !["review", "incident"].includes(phase) && !hasUnconfirmedAutomationActions,
-        !refereeActionsUnlocked ? "请先发布比赛配置" : !hasRuntime ? "请先建立比赛连接或创建测试运行" : "当前阶段不可发送"),
+        refereeActionsUnlocked && hasRuntime && workCommandHealthy && !["countdown", "running", "review", "incident"].includes(phase) && !hasReadyFlowBlockingIssue,
+        !refereeActionsUnlocked ? "请先发布比赛配置" : !hasRuntime ? "请先建立比赛连接或创建测试运行" : !workCommandHealthy ? workConnectionReason : "当前阶段或流程阻断不允许发送手动 Ready"),
+      descriptor("cheat-off", "关闭 cheat", "只发送一次关闭 cheat 命令；成功回显将作为目标关手动发令的前置证据，不改变计划。", refereeActionsUnlocked && hasRuntime && workCommandHealthy && !["review", "incident"].includes(phase) && !hasUnconfirmedAutomationActions,
+        !refereeActionsUnlocked ? "请先发布比赛配置" : !hasRuntime ? "请先建立比赛连接或创建测试运行" : !workCommandHealthy ? workConnectionReason : "当前阶段不可发送"),
       descriptor("manual-go", "手动发令", "不等待计划时间并立即触发仅作用于相同地图玩家的真实 3/2/1；只有权威 Go 回显后才创建尝试和设置本关时间。",
-        refereeActionsUnlocked && hasRuntime && !manualGoPhaseBlocked && cheatOffConfirmed && !hasPendingCommands && !hasBlockingIssue,
-        !refereeActionsUnlocked ? "请先发布比赛配置" : !hasRuntime ? "请先建立比赛连接或创建测试运行" : manualGoPhaseBlocked ? `当前阶段 ${phase} 不能重复发令` : !cheatOffConfirmed ? "目标关尚无关闭 cheat 成功回显" : hasPendingCommands ? "仍有命令等待回显" : "存在权限、连接或未决命令阻断"),
+        refereeActionsUnlocked && hasRuntime && workCommandHealthy && !manualGoPhaseBlocked && cheatOffConfirmed && !hasPendingCommands && !hasBlockingIssue,
+        !refereeActionsUnlocked ? "请先发布比赛配置" : !hasRuntime ? "请先建立比赛连接或创建测试运行" : !workCommandHealthy ? workConnectionReason : manualGoPhaseBlocked ? `当前阶段 ${phase} 不能重复发令` : !cheatOffConfirmed ? "目标关尚无关闭 cheat 成功回显" : hasPendingCommands ? "仍有命令等待回显" : "存在权限、连接或未决命令阻断"),
       descriptor("delay-ready", "Ready 延后 1 分钟", "将下一次已安排的 Ready 时间顺延 1 分钟。", refereeActionsUnlocked && snapshot?.plannedReadyAtMs !== undefined && ["preparing", "pre-start-wait", "tail-intake", "restart-preparing"].includes(phase),
         !refereeActionsUnlocked ? "请先发布比赛配置" : "当前没有可延后的 Ready 计划"),
       descriptor("reschedule", "Ready 改期", "把下一次 Ready 改到指定时间，不改变本关时限。", refereeActionsUnlocked && snapshot?.plannedReadyAtMs !== undefined && ["preparing", "pre-start-wait", "tail-intake", "restart-preparing"].includes(phase),
@@ -1877,10 +2035,10 @@ export class CompetitionService {
         startProtectionUsed ? "允许本关后续首次有效敏感期掉线再次触发起跑保护。" : "本关后续敏感期掉线不再自动延时或作废尝试。",
         refereeActionsUnlocked && hasRuntime && startProtectionEnabled && Boolean(snapshot?.currentStageId) && phase !== "review",
         !startProtectionEnabled ? "比赛配置未启用起跑保护" : !refereeActionsUnlocked ? "请先发布比赛配置" : !hasRuntime ? "请先建立比赛连接或创建测试运行" : "比赛已进入复核"),
-      descriptor("kick", "Kick 玩家", "从服务器移除目标玩家；结果不确定时不会自动重试。", refereeActionsUnlocked && competition.mode === "work" && hasRuntime,
-        !refereeActionsUnlocked ? "请先发布比赛配置" : competition.mode !== "work" ? "测试模式不发送真实 Kick" : "请先建立比赛连接"),
-      descriptor("raw-command", "发送原始命令", "原样发送一条 MockClient 命令；结果不确定时不会自动重试。", refereeActionsUnlocked && competition.mode === "work" && hasRuntime,
-        !refereeActionsUnlocked ? "请先发布比赛配置" : competition.mode !== "work" ? "测试模式不发送真实命令" : "请先建立比赛连接"),
+      descriptor("kick", "Kick 玩家", "从服务器移除目标玩家；结果不确定时不会自动重试。", refereeActionsUnlocked && competition.mode === "work" && hasRuntime && workCommandHealthy,
+        !refereeActionsUnlocked ? "请先发布比赛配置" : competition.mode !== "work" ? "测试模式不发送真实 Kick" : !hasRuntime ? "请先建立比赛连接" : workConnectionReason),
+      descriptor("raw-command", "发送原始命令", "原样发送一条 MockClient 命令；结果不确定时不会自动重试。", refereeActionsUnlocked && competition.mode === "work" && hasRuntime && workCommandHealthy,
+        !refereeActionsUnlocked ? "请先发布比赛配置" : competition.mode !== "work" ? "测试模式不发送真实命令" : !hasRuntime ? "请先建立比赛连接" : workConnectionReason),
       descriptor("finish", "结束比赛", "停止运行并固定比赛为已结束状态，之后可归档。", refereeActionsUnlocked && !["finished", "archived"].includes(competition.status),
         !refereeActionsUnlocked ? "请先发布比赛配置" : "比赛已经结束"),
       descriptor("archive", "生成归档", "基于明确榜单版本生成不可变归档。", ["finished", "archived"].includes(competition.status), "请先结束比赛"),
@@ -1904,7 +2062,7 @@ export class CompetitionService {
 
   private actionIdFor(action: CompetitionAction): RefereeActionId | undefined {
     switch (action.type) {
-      case "restart-work": case "start-ready-flow": case "ready": case "cheat-off": case "manual-go": case "reschedule": case "reschedule-stage-deadline": case "delay-ready":
+      case "reconnect-work": case "restart-work": case "notification": case "start-ready-flow": case "ready": case "cheat-off": case "manual-go": case "reschedule": case "reschedule-stage-deadline": case "delay-ready":
       case "extend-stage-deadline": case "end-stage": case "restart-stage": case "set-start-protection": case "kick": case "raw-command":
         return action.type;
       default: return undefined;

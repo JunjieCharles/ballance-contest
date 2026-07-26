@@ -17,8 +17,7 @@ export class CompetitionAuditService {
 
   public constructor(
     private readonly database: OpenedDatabase | undefined,
-    private readonly journal: EventJournal,
-    private readonly onListSent: (competitionId: string) => void
+    private readonly journal: EventJournal
   ) {}
 
   public rawClientLogs(competitionId: string, limit: number): readonly RawClientLogLine[] {
@@ -156,7 +155,6 @@ export class CompetitionAuditService {
     const memory = this.memoryCommands.get(competitionId) ?? new Map<string, CommandRecord>();
     memory.set(record.id, { ...record, action: { ...record.action } });
     this.memoryCommands.set(competitionId, memory);
-    if (record.action.type === "list" && record.status === "queued") this.onListSent(competitionId);
     if (record.status === "uncertain" || record.status === "failed" || record.status === "timed_out") {
       const permissionDenied = Boolean(record.responseLine && isPermissionDeniedLine(record.responseLine));
       const blocksFlow = permissionDenied || requiresExplicitCommandResolution(record.action)

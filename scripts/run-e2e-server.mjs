@@ -11,6 +11,17 @@ const app = await buildApp({
 await app.listen({ host: "127.0.0.1", port });
 console.log(`E2E server listening at ${origin}`);
 
+let shutdown;
 for (const signal of ["SIGINT", "SIGTERM"]) {
-  process.on(signal, () => void app.close().finally(() => process.exit(0)));
+  process.on(signal, () => {
+    shutdown ??= app.close();
+    console.log(`E2E server received ${signal}; waiting for managed runtime shutdown`);
+    void shutdown.then(() => {
+      console.log("E2E server shutdown complete");
+      process.exit(0);
+    }, (error) => {
+      console.error(error);
+      process.exit(1);
+    });
+  });
 }

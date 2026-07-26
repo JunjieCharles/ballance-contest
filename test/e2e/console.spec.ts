@@ -1,3 +1,11 @@
+import type {
+  ActionAvailability,
+  CompetitionSnapshot,
+  ConfirmationSummary,
+  RefereeActionId,
+  WorkConnectionStatus,
+  WorkConnectionView
+} from "@ballance/contracts";
 import type { Page } from "@playwright/test";
 import { expect, test } from "@playwright/test";
 
@@ -32,6 +40,113 @@ const createCompetition = async (page: Page, name: string, mode: "work" | "test"
   await expect(page.getByLabel("比赛名称")).toHaveValue(name);
   await expect(page.locator("header")).toContainText("实时已连接");
   await expect(page.getByRole("button", { name: "发布比赛" })).toBeEnabled();
+};
+
+const selectedCompetitionSnapshot = async (page: Page, competitionName: string): Promise<{ competitionId: string; snapshot: CompetitionSnapshot }> =>
+  page.evaluate(async (name) => {
+    const stored = sessionStorage.getItem("ballance-console-session");
+    if (!stored) throw new Error("missing local session");
+    const session = JSON.parse(stored) as { token: string };
+    const headers = { authorization: `Bearer ${session.token}` };
+    const competitions = await (await fetch("/api/v1/competitions", { headers })).json() as { data: Array<{ id: string; name: string }> };
+    const competitionId = competitions.data.find((competition) => competition.name === name)?.id;
+    if (!competitionId) throw new Error("missing competition");
+    const response = await fetch(`/api/v1/competitions/${competitionId}/snapshot`, { headers });
+    if (!response.ok) throw new Error(`snapshot failed ${response.status}`);
+    const payload = await response.json() as { data: CompetitionSnapshot };
+    return { competitionId, snapshot: payload.data };
+  }, competitionName);
+
+const connectionReason = (status: WorkConnectionStatus): string =>
+  `比赛连接当前为 ${status}；完成认证并达到 healthy 后才能发送现场命令`;
+
+const withWorkActionMatrix = (
+  actions: readonly ActionAvailability[],
+  status: WorkConnectionStatus,
+  options: { offline?: boolean; mapsRegistering?: boolean } = {}
+): ActionAvailability[] => {
+  const lifecycleEnabled = !options.offline && ["healthy", "suspect", "blocked"].includes(status);
+  const liveWritesEnabled = !options.offline && status === "healthy" && !options.mapsRegistering;
+  const liveWriteReason = options.mapsRegistering
+    ? "当前 MockClient 正在注册比赛地图；完成前不能发送现场命令"
+    : connectionReason(status);
+  const liveActions = new Set<RefereeActionId>([
+    "notification", "start-ready-flow", "ready", "cheat-off", "manual-go", "kick", "raw-command"
+  ]);
+  const resolved = (action: ActionAvailability, enabled: boolean, disabledReason: string): ActionAvailability => {
+    const result = { ...action, enabled };
+    if (enabled) delete result.disabledReason;
+    else result.disabledReason = disabledReason;
+    return result;
+  };
+  return actions.map((action) => {
+    if (action.action === "start-work") return resolved({
+      ...action,
+      label: options.offline ? "恢复比赛现场" : "连接比赛服务器"
+    }, Boolean(options.offline), "比赛连接已经启动");
+    if (action.action === "reconnect-work" || action.action === "restart-work") {
+      return resolved(action, lifecycleEnabled, options.offline ? "请先建立比赛连接" : "连接建立或恢复流程正在进行");
+    }
+    if (liveActions.has(action.action)) return resolved(action, liveWritesEnabled, liveWriteReason);
+    return action;
+  });
+};
+
+const workConnectionFixture = (
+  status: WorkConnectionStatus,
+  processGeneration: number,
+  connectionGeneration: number
+): WorkConnectionView => ({
+  status,
+  processGeneration,
+  connectionGeneration,
+  ...(["healthy", "suspect"].includes(status) ? { refereeConnectionId: `judge-${connectionGeneration}` } : {}),
+  ...(status === "recovering" ? {
+    recoveryStep: "cooldown" as const,
+    recoveryStartedAt: "2026-07-22T10:00:00.000Z",
+    cooldownUntil: "2026-07-22T10:00:30.000Z"
+  } : {}),
+  recentServerEvidence: {
+    kind: status === "blocked" ? "authentication-failed" : status === "healthy" ? "list-verified" : "connected",
+    occurredAt: "2026-07-22T10:00:00.000Z",
+    detail: `${status} fixture evidence`,
+    processGeneration,
+    connectionGeneration
+  }
+});
+
+const confirmationFixture = (
+  input: { kind: ConfirmationSummary["kind"]; intent?: string; target?: string },
+  stateVersion: number
+): ConfirmationSummary => {
+  const reconnect = input.intent === "reconnect-work";
+  const restart = input.intent === "restart-work";
+  return {
+    token: `fixture-${input.intent ?? input.kind}`,
+    kind: input.kind,
+    expiresAt: "2099-01-01T00:00:00.000Z",
+    target: input.target ?? "fixture-target",
+    stateVersion,
+    impactHash: `fixture-hash-${input.intent ?? input.kind}`,
+    summary: "browser fixture confirmation",
+    effect: {
+      title: reconnect
+        ? "使用当前 MockClient 软重新连接比赛服务器？"
+        : restart
+          ? "关闭并重启当前受管 MockClient？"
+          : input.kind === "automation-command-resolution"
+            ? "确认流程命令已经执行？"
+            : "确认不再执行这条失败命令？",
+      target: input.target ?? "fixture-target",
+      currentPhase: "paused",
+      consequences: reconnect
+        ? ["冻结当前命令代；若连接仍健康，先精确请求本机 *ContestConsole 自身断开并核对 1101 回显，再只发送一次 reconnect。", "完成显式 list 身份核验后恢复健康。"]
+        : restart
+          ? ["有界关闭并在必要时强制结束受管进程树。", "冷却后只启动一次新实例并重新认证。"]
+          : ["只记录裁判的本地处置，不发送新命令。"],
+      irreversible: restart
+    }
+  };
 };
 
 const accelerateActiveTestRun = async (page: Page, competitionName: string, milliseconds = 9_000_000): Promise<string> =>
@@ -167,6 +282,205 @@ test("hides test controls in work mode and keeps official-stage actions clear of
     && scoringBox.y < actionsBox.y + actionsBox.height
     && scoringBox.y + scoringBox.height > actionsBox.y;
   expect(overlaps).toBe(false);
+});
+
+test("renders every work connection state and invalidates lifecycle confirmations on generation changes", async ({ page }, testInfo) => {
+  await page.goto("/#token=e2e-bootstrap-token");
+  await expect(page.getByText(/已取得控制权|只读标签页/)).toBeVisible();
+  await acquireControl(page);
+  const name = `E2E 工作连接六态 ${testInfo.project.name}`;
+  await createCompetition(page, name, "work");
+  await page.getByRole("button", { name: "发布比赛" }).click();
+  await expect(page.locator(".competition-list button.selected")).toContainText("published");
+  const fixture = await selectedCompetitionSnapshot(page, name);
+  let mockedSnapshot = structuredClone(fixture.snapshot);
+  const originalActions = structuredClone(fixture.snapshot.runtime.availableActions);
+  const confirmationIntents: string[] = [];
+
+  await page.route(`**/api/v1/competitions/${fixture.competitionId}/snapshot`, async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ data: mockedSnapshot })
+    });
+  });
+  await page.route(`**/api/v1/competitions/${fixture.competitionId}/confirmations`, async (route) => {
+    const input = route.request().postDataJSON() as { kind: ConfirmationSummary["kind"]; intent?: string; target?: string };
+    if (input.intent) confirmationIntents.push(input.intent);
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ data: confirmationFixture(input, mockedSnapshot.competition.stateVersion) })
+    });
+  });
+
+  const applyConnection = async (
+    status: WorkConnectionStatus,
+    processGeneration: number,
+    connectionGeneration: number,
+    offline = false
+  ): Promise<void> => {
+    mockedSnapshot = {
+      ...mockedSnapshot,
+      runtime: {
+        ...mockedSnapshot.runtime,
+        workConnection: workConnectionFixture(status, processGeneration, connectionGeneration),
+        availableActions: withWorkActionMatrix(originalActions, status, { offline })
+      }
+    };
+    await page.locator(".competition-list button.selected").click();
+    const connectionPanel = page.getByRole("region", { name: "工作模式连接状态" });
+    await expect(connectionPanel).toHaveClass(new RegExp(`connection-${status}`));
+    await expect(connectionPanel).toContainText(`进程代次${processGeneration}`);
+    await expect(connectionPanel).toContainText(`连接代次${connectionGeneration}`);
+  };
+
+  await page.getByRole("button", { name: "控制台", exact: true }).click();
+  const operatorPanel = page.locator(".grid.two > .panel").first();
+  const playerActionPanel = page.getByRole("heading", { name: "玩家处置" }).locator("..");
+  await playerActionPanel.getByLabel("原始命令").fill("scores");
+  const statusCases: ReadonlyArray<{ status: WorkConnectionStatus; label: string; lifecycleEnabled: boolean }> = [
+    { status: "connecting", label: "正在连接", lifecycleEnabled: false },
+    { status: "authenticating", label: "正在认证", lifecycleEnabled: false },
+    { status: "healthy", label: "连接健康", lifecycleEnabled: true },
+    { status: "suspect", label: "连接可疑", lifecycleEnabled: true },
+    { status: "recovering", label: "正在恢复", lifecycleEnabled: false },
+    { status: "blocked", label: "连接已阻断", lifecycleEnabled: true }
+  ];
+  for (const [index, item] of statusCases.entries()) {
+    await applyConnection(item.status, 3, 20 + index);
+    const connectionPanel = page.getByRole("region", { name: "工作模式连接状态" });
+    await expect(connectionPanel.getByText(item.label, { exact: true })).toBeVisible();
+    await expect(operatorPanel.getByRole("button", { name: "软重新连接", exact: true })).toBeEnabled({ enabled: item.lifecycleEnabled });
+    await expect(operatorPanel.getByRole("button", { name: "重启 MockClient", exact: true })).toBeEnabled({ enabled: item.lifecycleEnabled });
+    const liveWritesEnabled = item.status === "healthy";
+    await expect(operatorPanel.getByRole("button", { name: "发送", exact: true })).toBeEnabled({ enabled: liveWritesEnabled });
+    await expect(operatorPanel.getByRole("button", { name: "手动 Ready", exact: true })).toBeEnabled({ enabled: liveWritesEnabled });
+    await expect(operatorPanel.getByRole("button", { name: "关闭 cheat", exact: true })).toBeEnabled({ enabled: liveWritesEnabled });
+    await expect(playerActionPanel.getByRole("button", { name: "发送原始命令", exact: true })).toBeEnabled({ enabled: liveWritesEnabled });
+    if (!liveWritesEnabled) await expect(operatorPanel).toContainText(connectionReason(item.status));
+    if (item.status === "recovering") {
+      await expect(connectionPanel).toContainText("等待服务器冷却");
+      await expect(connectionPanel).toContainText("冷却至：");
+    }
+  }
+
+  await applyConnection("healthy", 4, 31);
+  await operatorPanel.getByRole("button", { name: "软重新连接", exact: true }).click();
+  const reconnectConfirmation = operatorPanel.getByRole("group", { name: "软重新连接确认" });
+  await expect(reconnectConfirmation).toContainText("使用当前 MockClient 软重新连接比赛服务器？");
+  await expect(reconnectConfirmation).toContainText("先精确请求本机 *ContestConsole 自身断开并核对 1101 回显");
+  await reconnectConfirmation.getByRole("button", { name: "取消" }).click();
+  await operatorPanel.getByRole("button", { name: "重启 MockClient", exact: true }).click();
+  const restartConfirmation = operatorPanel.getByRole("group", { name: "重启 MockClient确认" });
+  await expect(restartConfirmation).toContainText("关闭并重启当前受管 MockClient？");
+  await expect(restartConfirmation).toContainText("强制结束受管进程树");
+  expect(confirmationIntents).toEqual(["reconnect-work", "restart-work"]);
+
+  // Keep competition/runtime versions unchanged: only the connection generations invalidate this confirmation.
+  await applyConnection("healthy", 5, 32);
+  await expect(restartConfirmation).toHaveCount(0);
+  await expect(operatorPanel.getByText("judge-32", { exact: true })).toBeVisible();
+
+  await applyConnection("blocked", 5, 32, true);
+  await expect(operatorPanel.getByRole("button", { name: "恢复比赛现场", exact: true })).toBeEnabled();
+  await expect(operatorPanel.getByRole("button", { name: "软重新连接", exact: true })).toHaveCount(0);
+  await expect(operatorPanel.getByRole("button", { name: "重启 MockClient", exact: true })).toHaveCount(0);
+  await expect(page.getByRole("region", { name: "工作模式连接状态" })).toContainText("尚未由本次 list 确认");
+});
+
+test("disables connection-bound resends while keeping local command disposition available", async ({ page }, testInfo) => {
+  await page.goto("/#token=e2e-bootstrap-token");
+  await expect(page.getByText(/已取得控制权|只读标签页/)).toBeVisible();
+  await acquireControl(page);
+  const name = `E2E 连接阻断命令处置 ${testInfo.project.name}`;
+  await createCompetition(page, name, "work");
+  await page.getByRole("button", { name: "发布比赛" }).click();
+  await expect(page.locator(".competition-list button.selected")).toContainText("published");
+  const fixture = await selectedCompetitionSnapshot(page, name);
+  let mockedSnapshot: CompetitionSnapshot = {
+    ...structuredClone(fixture.snapshot),
+    runtime: {
+      ...structuredClone(fixture.snapshot.runtime),
+      workConnection: workConnectionFixture("blocked", 7, 41),
+      availableActions: withWorkActionMatrix(fixture.snapshot.runtime.availableActions, "blocked"),
+      unconfirmedAutomationActions: [{ id: "flow-uncertain", kind: "ready", stageId: "sr-1", status: "uncertain" }],
+      unconfirmedCommands: [{
+        id: "raw-failed",
+        actionType: "raw",
+        status: "failed",
+        command: "scores",
+        createdAt: "2026-07-22T10:00:00.000Z"
+      }]
+    }
+  };
+  await page.route(`**/api/v1/competitions/${fixture.competitionId}/snapshot`, async (route) => {
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ data: mockedSnapshot }) });
+  });
+  await page.route(`**/api/v1/competitions/${fixture.competitionId}/confirmations`, async (route) => {
+    const input = route.request().postDataJSON() as { kind: ConfirmationSummary["kind"]; intent?: string; target?: string };
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ data: confirmationFixture(input, mockedSnapshot.competition.stateVersion) })
+    });
+  });
+
+  await page.getByRole("button", { name: "控制台", exact: true }).click();
+  await page.locator(".competition-list button.selected").click();
+  const flowPanel = page.locator(".unconfirmed-command-panel").filter({ hasText: "未确认流程命令" });
+  const commandPanel = page.locator(".unconfirmed-command-panel").filter({ hasText: "未确认真实命令" });
+  await expect(flowPanel.getByRole("button", { name: "确认已执行", exact: true })).toBeEnabled();
+  await expect(commandPanel.getByRole("button", { name: "确认不再执行", exact: true })).toBeEnabled();
+  await expect(flowPanel.getByRole("button", { name: "执行重发", exact: true })).toBeDisabled();
+  await expect(commandPanel.getByRole("button", { name: "执行重发", exact: true })).toBeDisabled();
+  await expect(flowPanel).toContainText("当前连接为连接已阻断；完成服务器身份核验后才能重发真实命令");
+  await expect(commandPanel).toContainText("当前连接为连接已阻断；完成服务器身份核验后才能重发真实命令");
+
+  await flowPanel.getByRole("button", { name: "确认已执行", exact: true }).click();
+  const localConfirmation = flowPanel.getByRole("group", { name: "确认已执行确认" });
+  await expect(localConfirmation).toContainText("只记录裁判的本地处置，不发送新命令。");
+  await localConfirmation.getByRole("button", { name: "取消" }).click();
+
+  const operatorPanel = page.locator(".grid.two > .panel").first();
+  const playerActionPanel = page.getByRole("heading", { name: "玩家处置" }).locator("..");
+  await playerActionPanel.getByLabel("原始命令").fill("scores");
+  await expect(operatorPanel.getByRole("button", { name: "发送", exact: true })).toBeDisabled();
+  await expect(operatorPanel.getByRole("button", { name: "手动 Ready", exact: true })).toBeDisabled();
+  await expect(operatorPanel.getByRole("button", { name: "关闭 cheat", exact: true })).toBeDisabled();
+  await expect(playerActionPanel.getByRole("button", { name: "发送原始命令", exact: true })).toBeDisabled();
+  await expect(operatorPanel).toContainText(connectionReason("blocked"));
+
+  mockedSnapshot = {
+    ...mockedSnapshot,
+    runtime: {
+      ...mockedSnapshot.runtime,
+      workConnection: {
+        ...workConnectionFixture("healthy", 7, 42),
+        recoveryStep: "register-maps"
+      },
+      availableActions: withWorkActionMatrix(fixture.snapshot.runtime.availableActions, "healthy", { mapsRegistering: true })
+    }
+  };
+  await page.locator(".competition-list button.selected").click();
+  await expect(flowPanel.getByRole("button", { name: "执行重发", exact: true })).toBeDisabled();
+  await expect(commandPanel.getByRole("button", { name: "执行重发", exact: true })).toBeDisabled();
+  await expect(flowPanel).toContainText("当前 MockClient 正在完成地图注册；完成前不能重发真实命令");
+  await expect(operatorPanel.getByRole("button", { name: "发送", exact: true })).toBeDisabled();
+  await expect(operatorPanel).toContainText("当前 MockClient 正在注册比赛地图；完成前不能发送现场命令");
+
+  mockedSnapshot = {
+    ...mockedSnapshot,
+    runtime: {
+      ...mockedSnapshot.runtime,
+      workConnection: workConnectionFixture("healthy", 7, 42),
+      availableActions: withWorkActionMatrix(fixture.snapshot.runtime.availableActions, "healthy")
+    }
+  };
+  await page.locator(".competition-list button.selected").click();
+  await expect(flowPanel.getByRole("button", { name: "执行重发", exact: true })).toBeEnabled();
+  await expect(commandPanel.getByRole("button", { name: "执行重发", exact: true })).toBeEnabled();
+  await expect(operatorPanel.getByRole("button", { name: "发送", exact: true })).toBeEnabled();
 });
 
 test("runs the 20-player sandbox from the console and edits a score without losing the player", async ({ page }, testInfo) => {

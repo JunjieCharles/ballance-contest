@@ -1,8 +1,9 @@
 import { randomUUID } from "node:crypto";
+import { performance } from "node:perf_hooks";
 import type { CommandTransport } from "./mock-client.js";
 import type { NotificationChannel } from "@ballance/contracts";
 
-export type CommandStatus = "queued" | "sent" | "acknowledged" | "failed" | "timed_out" | "uncertain";
+export type CommandStatus = "queued" | "sent" | "acknowledged" | "failed" | "timed_out" | "uncertain" | "cancelled";
 export type CommandAction =
   | { type: "list" }
   | { type: "set-map"; mapHash: string; displayName: string }
@@ -28,6 +29,8 @@ export interface CommandRecord {
   createdAt: string;
   updatedAt: string;
   responseLine?: string;
+  /** Missing only on records restored from a version that predates connection generations. */
+  generation?: number;
 }
 
 const cleanText = (text: string): string => {
@@ -80,11 +83,10 @@ export const isPermissionDeniedLine = (line: string): boolean => line.includes(P
 const encode = (
   action: CommandAction,
   refereeConnectionId: () => string | undefined = () => undefined
-): { command: string; critical: boolean; acknowledgeAfterWriteMs?: number; acknowledge: (line: string) => boolean; onSettle?: () => string } => {
+): { command: string; acknowledgeAfterWriteMs?: number; acknowledge: (line: string) => boolean; onSettle?: () => string } => {
   switch (action.type) {
     case "list": return {
       command: "list",
-      critical: false,
       acknowledge: (line) => /player\(s\) online:|client\(s\) online:\s*\d+ player\(s\)/.test(line)
     };
     case "set-map": {
@@ -92,7 +94,6 @@ const encode = (
       if (!/^[0-9a-f]{32}$/.test(mapHash)) throw new Error("setmap requires a complete 32-character MD5");
       return {
         command: `setmap ${mapHash} 0 ${cleanText(action.displayName)}`,
-        critical: false,
         // setmap has no success echo, but its permission failure is asynchronous.
         // Keep a short observation window before treating the accepted stdin write as success.
         acknowledgeAfterWriteMs: 500,
@@ -101,7 +102,6 @@ const encode = (
     }
     case "set-official-map": return {
       command: `setmap level ${action.level} ${cleanText(action.displayName)}`,
-      critical: false,
       acknowledgeAfterWriteMs: 500,
       acknowledge: () => false
     };
@@ -110,7 +110,6 @@ const encode = (
       const label = action.channel === "announce" ? "Announcement" : action.channel === "notice" ? "Notice" : "Bulletin";
       return {
         command: `${action.channel} ${text}`,
-        critical: false,
         acknowledge: (line) => {
           if (action.channel === "bulletin") return line.endsWith(`[${label}] *ContestConsole: ${text}`);
           const match = new RegExp(`\\[${label}\\] \\(\\d+, \\*ContestConsole\\): (.*)$`).exec(line);
@@ -121,12 +120,10 @@ const encode = (
     }
     case "ready": return {
       command: `countdown ${cleanText(action.map)} ${action.mode} 4`,
-      critical: false,
       acknowledge: (line) => isContestRefereeEcho(line, refereeConnectionId()) && /Get ready$/.test(line) && mapEchoMatches(line, action.map, action.mapName, action.mode)
     };
     case "cheat-off": return {
       command: "cheat off",
-      critical: false,
       acknowledge: (line) => {
         const connectionId = /\(#?(\d+),\s*\*ContestConsole\) toggled cheat off globally!$/.exec(line)?.[1];
         const expected = refereeConnectionId();
@@ -135,14 +132,12 @@ const encode = (
     };
     case "go": return {
       command: `countdown ${cleanText(action.map)} ${action.mode}`,
-      critical: true,
       acknowledge: (line) => isContestRefereeEcho(line, refereeConnectionId()) && / - Go!$/.test(line) && mapEchoMatches(line, action.map, action.mapName, action.mode)
     };
     case "listmap": {
       const seen = new Set<string>();
       return {
         command: "listmap",
-        critical: false,
         acknowledgeAfterWriteMs: 500,
         acknowledge: (line) => {
           const match = /([0-9a-f]{32}):\s*(\S+)/i.exec(line);
@@ -152,7 +147,7 @@ const encode = (
         onSettle: () => JSON.stringify([...seen])
       };
     }
-    case "scores": return { command: `scores ${action.mode} ${cleanText(action.map)}`, critical: false, acknowledge: (line) => /place|score|ranking/i.test(line) };
+    case "scores": return { command: `scores ${action.mode} ${cleanText(action.map)}`, acknowledge: (line) => /place|score|ranking/i.test(line) };
     case "kick": {
       const playerName = cleanText(action.playerName);
       const reason = cleanText(action.reason);
@@ -160,24 +155,41 @@ const encode = (
       const selfKicked = `The host hath bidden us farewell.  (1101: Kicked by *ContestConsole (${reason}).)`;
       return {
         command: `kick ${playerName} ${reason}`,
-        critical: true,
         acknowledge: (line) => disconnected.test(line) || playerName === "*ContestConsole" && line.endsWith(selfKicked)
       };
     }
     case "raw": {
       const command = cleanText(action.command);
       if (/^forcenextrestart$/i.test(command)) throw new Error("forcenextrestart is disabled because it makes the next Go apply to every map");
-      return { command, critical: true, acknowledge: () => false };
+      return { command, acknowledge: () => false };
     }
   }
 };
 
+type EncodedCommand = ReturnType<typeof encode>;
+
+interface CommandTask {
+  encoded: EncodedCommand;
+  record: CommandRecord;
+  generation: number;
+  deadlineAtMs: number;
+  writeStarted: boolean;
+  settled: boolean;
+  timeout?: ReturnType<typeof setTimeout>;
+  settleAfterWriteTimeout?: ReturnType<typeof setTimeout>;
+  onWriteStart?: (record: CommandRecord) => void;
+  resolveResult: (record: CommandRecord) => void;
+  finishTurn?: () => void;
+}
+
 export class CommandQueue {
   private readonly records = new Map<string, CommandRecord>();
   private tail: Promise<void> = Promise.resolve();
-  private pending: { encoded: ReturnType<typeof encode>; record: CommandRecord; resolve: (record: CommandRecord) => void } | undefined;
+  private readonly tasks = new Map<string, CommandTask>();
+  private pending: CommandTask | undefined;
   private transport: CommandTransport;
   private refereeConnectionId: string | undefined;
+  private connectionGeneration = 1;
 
   public constructor(
     transport: CommandTransport,
@@ -185,81 +197,159 @@ export class CommandQueue {
     private readonly onChange?: (record: CommandRecord) => void
   ) { this.transport = transport; }
 
-  public replaceTransport(transport: CommandTransport): void {
-    this.transport = transport;
+  public get generation(): number { return this.connectionGeneration; }
+
+  public advanceGeneration(transport?: CommandTransport): number {
+    this.connectionGeneration += 1;
+    if (transport) this.transport = transport;
     this.refereeConnectionId = undefined;
+    for (const task of this.tasks.values()) {
+      if (task.generation >= this.connectionGeneration || task.settled) continue;
+      if (!task.writeStarted) {
+        this.settleTask(task, "cancelled");
+        continue;
+      }
+      const status: CommandStatus = requiresExplicitCommandResolution(task.record.action) ? "uncertain" : "timed_out";
+      this.settleTask(task, status);
+    }
+    return this.connectionGeneration;
   }
 
-  public setRefereeConnectionId(connectionId: string | undefined): void { this.refereeConnectionId = connectionId; }
+  public replaceTransport(transport: CommandTransport): void {
+    this.advanceGeneration(transport);
+  }
 
-  public enqueue(action: CommandAction, idempotencyKey: string): Promise<CommandRecord> {
+  public setRefereeConnectionId(connectionId: string | undefined, generation = this.connectionGeneration): boolean {
+    if (generation !== this.connectionGeneration) return false;
+    this.refereeConnectionId = connectionId;
+    return true;
+  }
+
+  public enqueue(action: CommandAction, idempotencyKey: string, onWriteStart?: (record: CommandRecord) => void): Promise<CommandRecord> {
     const old = this.records.get(idempotencyKey);
     if (old) return Promise.resolve(old);
     const encoded = encode(action, () => this.refereeConnectionId);
+    const commandTimeoutMs = typeof this.timeoutMs === "function" ? this.timeoutMs(action) : this.timeoutMs;
+    const deadlineAtMs = performance.now() + Math.max(0, commandTimeoutMs);
     const now = new Date().toISOString();
-    const record: CommandRecord = { id: randomUUID(), idempotencyKey, action, command: encoded.command, status: "queued", createdAt: now, updatedAt: now };
+    const generation = this.connectionGeneration;
+    const record: CommandRecord = {
+      id: randomUUID(),
+      idempotencyKey,
+      action,
+      command: encoded.command,
+      status: "queued",
+      createdAt: now,
+      updatedAt: now,
+      generation
+    };
     this.records.set(idempotencyKey, record);
     this.onChange?.(record);
     const result = new Promise<CommandRecord>((resolve) => {
-      this.tail = this.tail.then(async () => {
-        await new Promise<void>((done) => {
-          let settled = false;
-          let settleAfterWriteTimeout: ReturnType<typeof setTimeout> | undefined;
-          const commandTimeoutMs = typeof this.timeoutMs === "function" ? this.timeoutMs(action) : this.timeoutMs;
-          const settle = (final: CommandRecord): void => {
-            if (settled) return;
-            settled = true;
-            clearTimeout(commandTimeout);
-            if (settleAfterWriteTimeout) clearTimeout(settleAfterWriteTimeout);
-            if (this.pending?.record.id === record.id) this.pending = undefined;
-            resolve(final);
-            done();
-          };
-          this.pending = { encoded, record, resolve: settle };
-          const commandTimeout = setTimeout(() => {
-            if (this.pending?.record.id !== record.id) return;
-            settle(this.update(record, encoded.critical ? "uncertain" : "timed_out"));
-          }, Math.max(0, commandTimeoutMs));
-          void (async () => {
-            try {
-              await this.transport.write(encoded.command);
-              if (settled) return;
-              this.update(record, "sent");
-              if (encoded.acknowledgeAfterWriteMs !== undefined) {
-                settleAfterWriteTimeout = setTimeout(() => {
-                  const responseLine = encoded.onSettle?.() ?? "MockClient 已接受本地命令，权限观察窗口内未返回失败";
-                  settle(this.update(record, "acknowledged", responseLine));
-                }, encoded.acknowledgeAfterWriteMs);
-                return;
-              }
-            } catch {
-              if (settled) return;
-              settle(this.update(record, "failed"));
-            }
-          })();
-        });
-      });
+      const task: CommandTask = {
+        encoded,
+        record,
+        generation,
+        deadlineAtMs,
+        writeStarted: false,
+        settled: false,
+        ...(onWriteStart === undefined ? {} : { onWriteStart }),
+        resolveResult: resolve
+      };
+      this.tasks.set(record.id, task);
+      task.timeout = setTimeout(() => {
+        if (task.settled) return;
+        this.settleTask(task, this.timeoutStatus(task));
+      }, Math.max(0, deadlineAtMs - performance.now()));
+      this.tail = this.tail.then(() => this.runTask(task));
     });
     return result;
   }
 
-  public observeLine(line: string): CommandRecord | undefined {
-    const modernIdentity = /(?:^|\] )(\d+):\s+\*ContestConsole\s+-?\d+ms/.exec(line)?.[1];
-    const legacyIdentity = /(?:^|\] )\*ContestConsole \(#(\d+)\)$/.exec(line)?.[1];
-    if (modernIdentity || legacyIdentity) this.refereeConnectionId = modernIdentity ?? legacyIdentity;
+  public observeLine(line: string, generation = this.connectionGeneration): CommandRecord | undefined {
+    if (generation !== this.connectionGeneration) return undefined;
     const pending = this.pending;
-    if (!pending) return undefined;
+    if (!pending || pending.generation !== generation || pending.settled) return undefined;
     if (isPermissionDeniedLine(line)) {
-      const record = this.update(pending.record, "failed", line);
-      pending.resolve(record);
-      return record;
+      return this.settleTask(pending, "failed", line);
     }
     if (pending.encoded.acknowledge(line)) {
-      const record = this.update(pending.record, "acknowledged", line);
-      pending.resolve(record);
-      return record;
+      return this.settleTask(pending, "acknowledged", line);
     }
     return undefined;
+  }
+
+  private runTask(task: CommandTask): Promise<void> {
+    if (task.settled) return Promise.resolve();
+    if (task.generation !== this.connectionGeneration) {
+      this.settleTask(task, "cancelled");
+      return Promise.resolve();
+    }
+    if (performance.now() >= task.deadlineAtMs) {
+      this.settleTask(task, "cancelled");
+      return Promise.resolve();
+    }
+    return new Promise<void>((done) => {
+      task.finishTurn = done;
+      this.pending = task;
+      try {
+        task.onWriteStart?.(task.record);
+      } catch {
+        this.settleTask(task, "failed");
+        return;
+      }
+      if (task.settled || task.generation !== this.connectionGeneration) return;
+      if (performance.now() >= task.deadlineAtMs) {
+        this.settleTask(task, "cancelled");
+        return;
+      }
+      task.writeStarted = true;
+      this.update(task.record, "sent");
+      if (task.settled || task.generation !== this.connectionGeneration) return;
+      const transport = this.transport;
+      let write: Promise<void>;
+      try {
+        write = transport.write(task.encoded.command);
+      } catch {
+        if (!task.settled && task.generation === this.connectionGeneration) this.settleTask(task, this.timeoutStatus(task));
+        return;
+      }
+      void write.then(() => {
+        if (task.settled || task.generation !== this.connectionGeneration) return;
+        if (task.encoded.acknowledgeAfterWriteMs !== undefined) {
+          task.settleAfterWriteTimeout = setTimeout(() => {
+            if (task.settled || task.generation !== this.connectionGeneration) return;
+            const responseLine = task.encoded.onSettle?.() ?? "MockClient 已接受本地命令，权限观察窗口内未返回失败";
+            this.settleTask(task, "acknowledged", responseLine);
+          }, task.encoded.acknowledgeAfterWriteMs);
+        }
+      }, () => {
+        if (task.settled || task.generation !== this.connectionGeneration) return;
+        this.settleTask(task, this.timeoutStatus(task));
+      });
+    });
+  }
+
+  private timeoutStatus(task: CommandTask): CommandStatus {
+    if (!task.writeStarted) return "cancelled";
+    return requiresExplicitCommandResolution(task.record.action) ? "uncertain" : "timed_out";
+  }
+
+  private settleTask(
+    task: CommandTask,
+    status: CommandStatus,
+    responseLine?: string
+  ): CommandRecord {
+    if (task.settled) return task.record;
+    task.settled = true;
+    if (task.timeout) clearTimeout(task.timeout);
+    if (task.settleAfterWriteTimeout) clearTimeout(task.settleAfterWriteTimeout);
+    if (this.pending?.record.id === task.record.id) this.pending = undefined;
+    this.tasks.delete(task.record.id);
+    const record = this.update(task.record, status, responseLine);
+    task.resolveResult(record);
+    task.finishTurn?.();
+    return record;
   }
 
   private update(record: CommandRecord, status: CommandStatus, responseLine?: string): CommandRecord {

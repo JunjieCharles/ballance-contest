@@ -26,6 +26,7 @@ export const commandView = (record: CommandRecord): CommandRecordView => ({
   createdAt: record.createdAt,
   updatedAt: record.updatedAt,
   command: record.command,
+  ...(record.generation === undefined ? {} : { generation: record.generation }),
   ...(record.responseLine === undefined ? {} : { responseLine: record.responseLine })
 });
 
@@ -70,7 +71,8 @@ export const automationView = (
   attentionItems: readonly AttentionItem[] = [],
   deadlineAt?: string,
   unconfirmedCommands: RuntimeSnapshot["unconfirmedCommands"] = [],
-  observationGaps: RuntimeSnapshot["observationGaps"] = []
+  observationGaps: RuntimeSnapshot["observationGaps"] = [],
+  workConnection?: RuntimeSnapshot["workConnection"]
 ): RuntimeSnapshot => {
   const wallClockOriginMs = snapshot?.wallClockOriginMs;
   const currentReady = snapshot && wallClockOriginMs !== undefined ? currentStageReadyAt(snapshot, wallClockOriginMs) : undefined;
@@ -80,6 +82,7 @@ export const automationView = (
   ...(snapshot?.pausedFromPhase === undefined ? {} : { pausedFromPhase: snapshot.pausedFromPhase }),
   stateVersion: snapshot?.stateVersion ?? 0,
   mode,
+  ...(workConnection === undefined ? {} : { workConnection }),
   automationEnabled: snapshot?.automationEnabled ?? false,
   ...(snapshot?.currentStageId === undefined ? {} : { currentStageId: snapshot.currentStageId }),
   ...(snapshot?.plannedReadyAtMs === undefined ? {} : { plannedReadyAtMs: snapshot.plannedReadyAtMs }),

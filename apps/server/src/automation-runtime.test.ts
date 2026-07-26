@@ -103,4 +103,24 @@ describe("automation runtimes", () => {
       blockers: [expect.objectContaining({ code: "COMMAND_UNCONFIRMED", severity: "critical" })]
     });
   });
+
+  it("propagates a generation-cancelled queued action without creating an unconfirmed-command blocker", async () => {
+    const { controller } = makeController();
+    const port: CommandQueuePort = {
+      enqueue: async (command, idempotencyKey) => ({
+        id: idempotencyKey, idempotencyKey, action: command, command: command.type,
+        status: command.type === "ready" ? "cancelled" : "acknowledged",
+        createdAt: "2026-07-22T00:00:00Z", updatedAt: "2026-07-22T00:00:00Z"
+      })
+    };
+    const runtime = new WorkAutomationRuntime(controller, port);
+    controller.enable(0);
+    await runtime.dispatch();
+    controller.tick();
+    await runtime.dispatch();
+
+    expect(controller.snapshot()).toMatchObject({ phase: "paused", automationEnabled: false });
+    expect(controller.snapshot().actions).toContainEqual(expect.objectContaining({ kind: "ready", status: "cancelled" }));
+    expect(controller.snapshot().blockers.some((blocker) => blocker.code === "COMMAND_UNCONFIRMED")).toBe(false);
+  });
 });

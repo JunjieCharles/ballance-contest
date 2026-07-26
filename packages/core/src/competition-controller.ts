@@ -648,7 +648,7 @@ export class CompetitionController {
     }
   }
 
-  public acknowledgeAction(actionId: string, status: "acknowledged" | "failed" | "uncertain"): void {
+  public acknowledgeAction(actionId: string, status: "acknowledged" | "failed" | "uncertain" | "cancelled"): void {
     const action = this.actions.find((candidate) => candidate.id === actionId);
     if (!action || action.status !== "pending") return;
     action.status = status;

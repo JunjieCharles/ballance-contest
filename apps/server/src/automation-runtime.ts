@@ -2,7 +2,7 @@ import type { AutomationAction, CompetitionController } from "@ballance/core";
 import type { CommandAction, CommandQueue, CommandRecord } from "./command-queue.js";
 
 export interface CommandQueuePort {
-  enqueue(action: CommandAction, idempotencyKey: string): Promise<CommandRecord>;
+  enqueue(action: CommandAction, idempotencyKey: string, onWriteStart?: (record: CommandRecord) => void): Promise<CommandRecord>;
 }
 
 const toCommand = (action: AutomationAction): CommandAction => {
@@ -29,6 +29,8 @@ export class WorkAutomationRuntime {
         action.id,
         record.status === "acknowledged" || notification && record.status === "timed_out"
           ? "acknowledged"
+          : record.status === "cancelled"
+            ? "cancelled"
           : record.status === "uncertain" || record.status === "timed_out"
             ? "uncertain"
             : "failed"

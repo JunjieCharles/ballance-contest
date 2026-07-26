@@ -42,7 +42,7 @@ export const buildApp = async (options: BuildAppOptions): Promise<FastifyInstanc
   const sessions = new SessionManager(options.bootstrapToken);
   await app.register(websocket);
   app.addHook("onClose", async () => {
-    service.close();
+    await service.close();
     database?.close();
   });
 
@@ -108,7 +108,13 @@ export const buildApp = async (options: BuildAppOptions): Promise<FastifyInstanc
   if (options.devShutdown) {
     app.post<{ Body: { token: string } }>("/api/v1/dev/shutdown", async (request) => {
       if (request.body.token !== options.devShutdown?.token) throw new ServiceError("DEV_SHUTDOWN_REJECTED", "开发实例关闭令牌无效", 403);
-      setImmediate(() => { void options.devShutdown?.onShutdown(); });
+      setImmediate(() => {
+        try {
+          void Promise.resolve(options.devShutdown?.onShutdown()).catch((error: unknown) => app.log.error(error));
+        } catch (error) {
+          app.log.error(error);
+        }
+      });
       return { accepted: true };
     });
   }

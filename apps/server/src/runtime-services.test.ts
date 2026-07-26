@@ -24,7 +24,7 @@ describe("extracted runtime services", () => {
 
   it("keeps in-memory logs and attention isolated by competition", () => {
     const journal = new EventJournal();
-    const audit = new CompetitionAuditService(undefined, journal, () => undefined);
+    const audit = new CompetitionAuditService(undefined, journal);
     audit.appendRawLog("competition-a", "mock-client", "line-a");
     audit.appendRawLog("competition-b", "test-referee", "line-b");
     audit.appendAttention("competition-a", {
@@ -47,7 +47,7 @@ describe("extracted runtime services", () => {
 
   it("keeps resolved start-protection time stable and orders it with later events", () => {
     const journal = new EventJournal();
-    const audit = new CompetitionAuditService(undefined, journal, () => undefined);
+    const audit = new CompetitionAuditService(undefined, journal);
     const wallClockOriginMs = Date.UTC(2026, 6, 3, 1, 45, 0);
     const protectionOccurredAt = new Date(wallClockOriginMs + 60_000).toISOString();
     const laterOccurredAt = new Date(wallClockOriginMs + 120_000).toISOString();

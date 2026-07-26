@@ -2,7 +2,7 @@ import { type ChildProcessWithoutNullStreams } from "node:child_process";
 import { EventEmitter } from "node:events";
 import { appendFileSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, win32 } from "node:path";
 import { PassThrough, Writable } from "node:stream";
 import { describe, expect, it } from "vitest";
 import {
@@ -10,8 +10,13 @@ import {
   consumeMockClientLogChunk,
   ManagedMockClient,
   MOCK_CLIENT_DIAGNOSTIC_TAIL_BYTES,
-  resolveMockClientUuid
+  resolveMockClientUuid,
+  type ManagedMockClientDependencies,
+  type MockClientLaunchOptions,
+  type MockClientProcessInspection
 } from "./mock-client.js";
+
+let nextFakePid = 20_000;
 
 class FakeChildProcess extends EventEmitter {
   public readonly stdout = new PassThrough();
@@ -19,13 +24,15 @@ class FakeChildProcess extends EventEmitter {
   public exitCode: number | null = null;
   public signalCode: NodeJS.Signals | null = null;
 
-  public constructor(public readonly stdin: Writable = new PassThrough()) { super(); }
+  public constructor(public readonly stdin: Writable = new PassThrough(), public readonly pid = nextFakePid += 1) { super(); }
 
   public emitExit(code = 0, signal: NodeJS.Signals | null = null): void {
     this.exitCode = code;
     this.signalCode = signal;
     this.emit("exit", code, signal);
   }
+
+  public kill(): boolean { return true; }
 }
 
 class BlockedWritable extends Writable {
@@ -54,14 +61,30 @@ const managedOptions = {
 const createManagedClient = (
   child: FakeChildProcess,
   writeTimeoutMs = 50,
-  options = managedOptions
+  options = managedOptions,
+  dependencies: ManagedMockClientDependencies = {}
 ): ManagedMockClient => new ManagedMockClient(
   options,
   {
     spawn: () => child as unknown as ChildProcessWithoutNullStreams,
-    writeTimeoutMs
+    writeTimeoutMs,
+    ...dependencies
   }
 );
+
+const quoteWindowsArgument = (value: string): string => `"${value.replaceAll("\"", "\\\"")}"`;
+
+const ownedInspection = (
+  options: MockClientLaunchOptions,
+  pid: number,
+  overrides: Partial<MockClientProcessInspection> = {}
+): MockClientProcessInspection => {
+  const executablePath = win32.isAbsolute(options.executable)
+    ? win32.normalize(options.executable)
+    : win32.resolve(options.workingDirectory, options.executable);
+  const commandLine = [executablePath, ...buildMockClientArguments(options)].map(quoteWindowsArgument).join(" ");
+  return { pid, executablePath, commandLine, ...overrides };
+};
 
 describe("MockClient launch", () => {
   const options = { executable: "MockClient.exe", workingDirectory: "C:/mock", server: "1.bmmo.win", refereeName: "ContestConsole", uuid: "uuid", logPath: "C:/data/logs/mock.log" };
@@ -73,6 +96,49 @@ describe("MockClient launch", () => {
   });
   it("ignores configurable names and always uses the fixed server identity", () => {
     expect(buildMockClientArguments({ ...options, refereeName: "**Referee" })[3]).toBe("*ContestConsole");
+  });
+
+  it("observes the asynchronous ChildProcess error after a failed spawn", async () => {
+    const child = new FakeChildProcess(new PassThrough(), 0);
+    const client = createManagedClient(child);
+
+    expect(() => client.start()).toThrow("valid managed process PID");
+    expect(() => child.emit("error", new Error("spawn EACCES"))).not.toThrow();
+    expect(client.diagnosticOutputTail).toContain("spawn EACCES");
+    expect(client.isRunning).toBe(false);
+  });
+
+  it("turns a pre-spawn ChildProcess error with an assigned PID into one controlled unexpected exit", () => {
+    const child = new FakeChildProcess();
+    const client = createManagedClient(child);
+    const exits: Array<{ code: number | null; expected: boolean }> = [];
+    client.onExit((info) => exits.push({ code: info.code, expected: info.expected }));
+    client.start();
+
+    expect(() => child.emit("error", new Error("spawn EIO"))).not.toThrow();
+    expect(client.isRunning).toBe(false);
+    expect(exits).toEqual([{ code: null, expected: false }]);
+
+    child.emitExit(1);
+    expect(exits).toEqual([{ code: null, expected: false }]);
+  });
+
+  it("retains the owned process handle for a non-terminal error after spawn was confirmed", () => {
+    const child = new FakeChildProcess();
+    const client = createManagedClient(child);
+    const exits: Array<{ code: number | null; expected: boolean }> = [];
+    client.onExit((info) => exits.push({ code: info.code, expected: info.expected }));
+    client.start();
+    child.emit("spawn");
+
+    expect(() => child.emit("error", new Error("kill EPERM"))).not.toThrow();
+    expect(client.isRunning).toBe(true);
+    expect(client.captureProcess()).toMatchObject({ pid: child.pid });
+    expect(exits).toEqual([]);
+
+    child.emitExit(1);
+    expect(client.isRunning).toBe(false);
+    expect(exits).toEqual([{ code: 1, expected: false }]);
   });
 
   it("reads a persisted UUID from a local file when present", () => {
@@ -162,6 +228,77 @@ describe("MockClient launch", () => {
     child.emitExit();
   });
 
+  it("sends lifecycle reconnect directly and bounds its complete write", async () => {
+    const stdin = new BlockedWritable();
+    const child = new FakeChildProcess(stdin);
+    const client = createManagedClient(child, 1_000);
+    client.start();
+
+    await expect(client.reconnect(25)).rejects.toThrow("MockClient reconnect timed out");
+
+    stdin.release();
+    child.emitExit();
+  });
+
+  it("opens exact self-kick observation before writing a healthy soft-reconnect disconnect", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "mock-client-soft-disconnect-"));
+    const logPath = join(directory, "mock-client.log");
+    writeFileSync(logPath, "", "utf8");
+    const stdin = new PassThrough();
+    const child = new FakeChildProcess(stdin);
+    const commands: string[] = [];
+    let pending = "";
+    stdin.on("data", (chunk: Buffer) => {
+      const lines = `${pending}${chunk.toString("utf8")}`.split("\n");
+      pending = lines.pop() ?? "";
+      for (const command of lines) {
+        commands.push(command);
+        if (command === "kick *ContestConsole contest-console-soft-reconnect") {
+          appendFileSync(
+            logPath,
+            "[07-22 12:00:01] The host hath bidden us farewell.  (1101: Kicked by *ContestConsole (contest-console-soft-reconnect).)\n",
+            "utf8"
+          );
+        }
+      }
+    });
+    const client = createManagedClient(child, 1_000, { ...managedOptions, logPath });
+
+    try {
+      client.start();
+      await expect(client.disconnectForReconnect(1_000)).resolves.toMatch(/1101: Kicked by \*ContestConsole/);
+      expect(commands).toEqual(["kick *ContestConsole contest-console-soft-reconnect"]);
+    } finally {
+      child.emitExit();
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("accepts exact self-kick evidence without waiting for a late stdin callback", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "mock-client-soft-disconnect-late-write-"));
+    const logPath = join(directory, "mock-client.log");
+    writeFileSync(logPath, "", "utf8");
+    const stdin = new BlockedWritable();
+    const child = new FakeChildProcess(stdin);
+    const client = createManagedClient(child, 1_000, { ...managedOptions, logPath });
+
+    try {
+      client.start();
+      const disconnecting = client.disconnectForReconnect(1_000);
+      appendFileSync(
+        logPath,
+        "[07-22 12:00:01] The host hath bidden us farewell.  (1101: Kicked by *ContestConsole (contest-console-soft-reconnect).)\n",
+        "utf8"
+      );
+      await expect(disconnecting).resolves.toMatch(/contest-console-soft-reconnect/);
+      stdin.release();
+      await new Promise((resolve) => setImmediate(resolve));
+    } finally {
+      if (client.isRunning) child.emitExit();
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
   it("bounds the complete graceful stop while the stop write is blocked", async () => {
     const stdin = new BlockedWritable();
     const child = new FakeChildProcess(stdin);
@@ -172,5 +309,194 @@ describe("MockClient launch", () => {
 
     stdin.release();
     child.emitExit();
+  });
+
+  it("uses the byte end of a non-ASCII history file and never replays historical log bytes", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "mock-client-unicode-offset-"));
+    const logPath = join(directory, "mock-client.log");
+    writeFileSync(logPath, "历史记录：第六关\n", "utf8");
+    const child = new FakeChildProcess();
+    const client = createManagedClient(child, 50, { ...managedOptions, logPath });
+    const lines: string[] = [];
+    client.onLine((line) => lines.push(line));
+
+    try {
+      client.start();
+      appendFileSync(logPath, "新连接：第七关\n", "utf8");
+      await expect.poll(() => lines, { timeout: 1_000 }).toEqual(["新连接：第七关"]);
+    } finally {
+      child.emitExit();
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("force-stops only the captured owned child after graceful stop times out", async () => {
+    const stdin = new BlockedWritable();
+    const child = new FakeChildProcess(stdin);
+    let terminated = false;
+    let killCalls = 0;
+    const client = createManagedClient(child, 1_000, managedOptions, {
+      inspectProcess: async () => terminated ? undefined : ownedInspection(managedOptions, child.pid),
+      killProcessTree: async (pid) => {
+        expect(pid).toBe(child.pid);
+        killCalls += 1;
+        terminated = true;
+        setImmediate(() => child.emitExit(0));
+      },
+      processPollIntervalMs: 1
+    });
+    const exits: boolean[] = [];
+    client.onExit((info) => exits.push(info.expected));
+    client.start();
+    const processRef = client.captureProcess();
+    expect(processRef).toMatchObject({ pid: child.pid });
+
+    await expect(client.stop(10)).rejects.toThrow("graceful stop timed out");
+    await expect(client.forceStopOwnedProcessTree(processRef!, 100)).resolves.toBeUndefined();
+
+    expect(killCalls).toBe(1);
+    expect(client.isRunning).toBe(false);
+    expect(exits).toEqual([true]);
+    stdin.release();
+  });
+
+  it("treats the same captured child exiting during the first ownership inspection as stopped", async () => {
+    const child = new FakeChildProcess();
+    let killCalls = 0;
+    const client = createManagedClient(child, 50, managedOptions, {
+      inspectProcess: async () => {
+        child.emitExit(0);
+        return undefined;
+      },
+      killProcessTree: async () => { killCalls += 1; }
+    });
+    client.start();
+    const processRef = client.captureProcess()!;
+
+    await expect(client.forceStopOwnedProcessTree(processRef, 100)).resolves.toBeUndefined();
+    expect(killCalls).toBe(0);
+    expect(client.isRunning).toBe(false);
+  });
+
+  it("treats the same captured child exiting during the ownership recheck as stopped", async () => {
+    const child = new FakeChildProcess();
+    let inspections = 0;
+    let killCalls = 0;
+    const client = createManagedClient(child, 50, managedOptions, {
+      inspectProcess: async () => {
+        inspections += 1;
+        if (inspections === 1) return ownedInspection(managedOptions, child.pid);
+        child.emitExit(0);
+        return undefined;
+      },
+      killProcessTree: async () => { killCalls += 1; }
+    });
+    client.start();
+    const processRef = client.captureProcess()!;
+
+    await expect(client.forceStopOwnedProcessTree(processRef, 100)).resolves.toBeUndefined();
+    expect(killCalls).toBe(0);
+    expect(client.isRunning).toBe(false);
+  });
+
+  it("refuses ownership mismatches without invoking the process-tree killer", async () => {
+    const child = new FakeChildProcess();
+    let killCalls = 0;
+    const exits: boolean[] = [];
+    const client = createManagedClient(child, 50, managedOptions, {
+      inspectProcess: async () => ownedInspection(managedOptions, child.pid, { executablePath: "C:\\Other\\MockClient.exe" }),
+      killProcessTree: async () => { killCalls += 1; }
+    });
+    client.onExit((info) => exits.push(info.expected));
+    client.start();
+
+    try {
+      await expect(client.forceStopOwnedProcessTree(client.captureProcess()!, 100)).rejects.toThrow("different executable");
+      expect(killCalls).toBe(0);
+      expect(client.isRunning).toBe(true);
+    } finally {
+      child.emitExit();
+    }
+    expect(exits).toEqual([false]);
+  });
+
+  it("refuses a changed server argument without invoking the process-tree killer", async () => {
+    const child = new FakeChildProcess();
+    let killCalls = 0;
+    const otherServer = { ...managedOptions, server: "2.bmmo.win" };
+    const client = createManagedClient(child, 50, managedOptions, {
+      inspectProcess: async () => ownedInspection(otherServer, child.pid),
+      killProcessTree: async () => { killCalls += 1; }
+    });
+    client.start();
+
+    try {
+      await expect(client.forceStopOwnedProcessTree(client.captureProcess()!, 100)).rejects.toThrow("different -s argument");
+      expect(killCalls).toBe(0);
+    } finally {
+      child.emitExit();
+    }
+  });
+
+  it("refuses a PID mismatch without invoking the process-tree killer", async () => {
+    const child = new FakeChildProcess();
+    let killCalls = 0;
+    const client = createManagedClient(child, 50, managedOptions, {
+      inspectProcess: async () => ownedInspection(managedOptions, child.pid + 1),
+      killProcessTree: async () => { killCalls += 1; }
+    });
+    client.start();
+
+    try {
+      await expect(client.forceStopOwnedProcessTree(client.captureProcess()!, 100)).rejects.toThrow("different PID");
+      expect(killCalls).toBe(0);
+    } finally {
+      child.emitExit();
+    }
+  });
+
+  it("refuses a stale process reference even if Windows has reused the PID for a new child", async () => {
+    const reusedPid = nextFakePid += 1;
+    const first = new FakeChildProcess(new PassThrough(), reusedPid);
+    const second = new FakeChildProcess(new PassThrough(), reusedPid);
+    const children = [first, second];
+    let killCalls = 0;
+    const client = new ManagedMockClient(managedOptions, {
+      spawn: () => children.shift() as unknown as ChildProcessWithoutNullStreams,
+      inspectProcess: async () => ownedInspection(managedOptions, reusedPid),
+      killProcessTree: async () => { killCalls += 1; }
+    });
+    client.start();
+    const staleRef = client.captureProcess()!;
+    first.emitExit();
+    client.start();
+
+    try {
+      expect(client.processGeneration).not.toBe(staleRef.generation);
+      await expect(client.forceStopOwnedProcessTree(staleRef, 100)).rejects.toThrow("no longer current");
+      expect(killCalls).toBe(0);
+    } finally {
+      second.emitExit();
+    }
+  });
+
+  it("bounds termination verification and ignores a late child exit", async () => {
+    const child = new FakeChildProcess();
+    const client = createManagedClient(child, 50, managedOptions, {
+      inspectProcess: async () => ownedInspection(managedOptions, child.pid),
+      killProcessTree: async () => undefined,
+      processPollIntervalMs: 1
+    });
+    const exits: boolean[] = [];
+    client.onExit((info) => exits.push(info.expected));
+    client.start();
+    const processRef = client.captureProcess()!;
+    const startedAt = Date.now();
+
+    await expect(client.forceStopOwnedProcessTree(processRef, 25)).rejects.toThrow(/timeout|did not exit/);
+    expect(Date.now() - startedAt).toBeLessThan(500);
+    child.emitExit(1);
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(exits).toEqual([true]);
   });
 });

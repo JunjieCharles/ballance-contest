@@ -30,7 +30,9 @@ import type {
   ScenarioDefinition,
   ScoreboardTableCell,
   StageConfig,
-  TestScenarioSummary
+  TestScenarioSummary,
+  WorkConnectionStatus,
+  WorkRecoveryStep
 } from "@ballance/contracts";
 import { formatUtc8DateTime, toUtc8Input, utc8InputToIso } from "./time.js";
 
@@ -82,6 +84,36 @@ const phaseLabel: Record<string, string> = {
   review: "比赛复核", paused: "已暂停", finished: "已结束", archived: "已归档"
 };
 
+const workConnectionStatusLabel: Record<WorkConnectionStatus, string> = {
+  connecting: "正在连接",
+  authenticating: "正在认证",
+  healthy: "连接健康",
+  suspect: "连接可疑",
+  recovering: "正在恢复",
+  blocked: "连接已阻断"
+};
+
+const workRecoveryStepLabel: Record<WorkRecoveryStep, string> = {
+  "soft-reconnect": "软重新连接",
+  "verify-soft-connection": "核验软重连",
+  "graceful-stop": "正常关闭旧 MockClient",
+  "force-stop": "强制关闭旧 MockClient",
+  cooldown: "等待服务器冷却",
+  restart: "启动新 MockClient",
+  "verify-restarted-connection": "重新认证并核验名单",
+  "register-maps": "注册比赛地图"
+};
+
+type WorkServerEvidenceKind = NonNullable<NonNullable<RuntimeSnapshot["workConnection"]>["recentServerEvidence"]>["kind"];
+
+const workServerEvidenceLabel: Record<WorkServerEvidenceKind, string> = {
+  connected: "收到服务器连接回显",
+  "authentication-failed": "服务器拒绝认证",
+  "list-verified": "裁判身份与名单核验完成",
+  disconnected: "服务器连接断开",
+  "process-exited": "MockClient 进程退出"
+};
+
 const stageTitle = (config: CompetitionConfig, stageId?: string): string => {
   const stage = config.stages.find((candidate) => candidate.id === stageId);
   return stage ? stageDisplayName(stage) : stageId ?? "—";
@@ -109,18 +141,7 @@ const profileLabel = (profile: string): string => ({
 const availabilityFor = (runtime: RuntimeSnapshot, action: RefereeActionId): ActionAvailability | undefined =>
   runtime.availableActions.find((candidate) => candidate.action === action);
 
-function ConfirmButton({
-  label,
-  kind,
-  target,
-  versionKey,
-  requestPayload,
-  disabled,
-  disabledReason,
-  className,
-  requestConfirmation,
-  onConfirm
-}: {
+interface ConfirmButtonProps {
   label: string;
   kind: ConfirmationKind;
   target: string;
@@ -131,7 +152,24 @@ function ConfirmButton({
   className?: string | undefined;
   requestConfirmation(kind: ConfirmationKind, target: string, requestPayload?: unknown): Promise<ConfirmationSummary>;
   onConfirm(confirmation: ConfirmationSummary): Promise<void>;
-}) {
+}
+
+function ConfirmButton(props: ConfirmButtonProps) {
+  return <ConfirmButtonState key={`${props.versionKey}:${props.disabled ? "disabled" : "enabled"}`} {...props} />;
+}
+
+function ConfirmButtonState({
+  label,
+  kind,
+  target,
+  versionKey,
+  requestPayload,
+  disabled,
+  disabledReason,
+  className,
+  requestConfirmation,
+  onConfirm
+}: ConfirmButtonProps) {
   const [confirmation, setConfirmation] = useState<ConfirmationSummary>();
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
@@ -142,7 +180,7 @@ function ConfirmButton({
     finally { setBusy(false); }
   };
   const confirm = async () => {
-    if (!confirmation) return;
+    if (!confirmation || disabled) return;
     setBusy(true); setError("");
     try { await onConfirm(confirmation); setConfirmation(undefined); }
     catch (caught) { setError(caught instanceof Error ? caught.message : "操作失败"); }
@@ -160,7 +198,7 @@ function ConfirmButton({
       {effect.affectedPlayers?.length ? <div className="affected-players"><strong>受影响玩家</strong><ul>{effect.affectedPlayers.map((item) => <li key={item.playerId}><span>{item.displayName}</span><small>{item.beforePlace === null ? "空成绩" : `第 ${item.beforePlace} 名`} → {item.afterPlace === null ? "空成绩" : `第 ${item.afterPlace} 名`} · {item.beforePoints} 分 → {item.afterPoints} 分</small></li>)}</ul></div> : null}
       {confirmation.effect.irreversible && <small>确认后无法撤销。</small>}
       <div className="button-row compact">
-        <button className={className} disabled={busy} onClick={() => void confirm()}>确认</button>
+        <button className={className} disabled={disabled || busy} onClick={() => void confirm()}>确认</button>
         <button className="ghost" disabled={busy} onClick={() => setConfirmation(undefined)}>取消</button>
       </div>
       {error && <span className="inline-error">{error}</span>}
@@ -192,16 +230,44 @@ function LocalConfirmButton({ label, summary, disabled, className, onConfirm }: 
   </div>;
 }
 
-function ActionButton({ runtime, action, canWrite, onClick, children, className }: {
+function ActionButton({ runtime, action, canWrite, onClick, children, className, disabled = false, disabledReason: localDisabledReason }: {
   runtime: RuntimeSnapshot; action: RefereeActionId; canWrite: boolean; onClick(): void; children: ReactNode; className?: string;
+  disabled?: boolean; disabledReason?: string;
 }) {
   const availability = availabilityFor(runtime, action);
-  const disabledReason = !canWrite ? "实时连接或控制权不可用" : availability?.disabledReason;
+  const isDisabled = !canWrite || !availability?.enabled || disabled;
+  const disabledReason = !canWrite ? "实时连接或控制权不可用" : disabled ? localDisabledReason : availability?.disabledReason;
   return <div className="action-control">
-    <button className={className} disabled={!canWrite || !availability?.enabled} title={disabledReason} onClick={onClick}>{children}</button>
-    {(!canWrite || !availability?.enabled) && <small className="disabled-reason">{disabledReason ?? "当前状态不可用"}</small>}
-    {availability?.enabled && <small className="action-effect">{availability.effect}</small>}
+    <button className={className} disabled={isDisabled} title={disabledReason} onClick={onClick}>{children}</button>
+    {isDisabled && <small className="disabled-reason">{disabledReason ?? "当前状态不可用"}</small>}
+    {!isDisabled && availability?.enabled && <small className="action-effect">{availability.effect}</small>}
   </div>;
+}
+
+function WorkConnectionPanel({ connection }: { connection: NonNullable<RuntimeSnapshot["workConnection"]> }) {
+  const evidence = connection.recentServerEvidence;
+  return <section className={`work-connection-panel connection-${connection.status}`} aria-label="工作模式连接状态">
+    <div className="work-connection-heading">
+      <h3>MockClient 与服务器连接</h3>
+      <strong>{workConnectionStatusLabel[connection.status]}</strong>
+    </div>
+    <dl className="work-connection-facts">
+      <div><dt>进程代次</dt><dd>{connection.processGeneration}</dd></div>
+      <div><dt>连接代次</dt><dd>{connection.connectionGeneration}</dd></div>
+      <div><dt>当前裁判连接 ID</dt><dd>{connection.refereeConnectionId ?? "尚未由本次 list 确认"}</dd></div>
+      <div><dt>恢复步骤</dt><dd>{connection.recoveryStep ? workRecoveryStepLabel[connection.recoveryStep] : "—"}</dd></div>
+    </dl>
+    {connection.recoveryStartedAt && <p className="work-connection-meta">恢复开始：{formatUtc8DateTime(connection.recoveryStartedAt)}</p>}
+    {connection.cooldownUntil && <p className="work-connection-meta">冷却至：{formatUtc8DateTime(connection.cooldownUntil)}</p>}
+    <div className="work-connection-evidence">
+      <strong>最近服务端证据</strong>
+      {evidence
+        ? <><span>{workServerEvidenceLabel[evidence.kind]} · {formatUtc8DateTime(evidence.occurredAt)}</span>
+          <p>{evidence.detail}</p>
+          <small>进程代次 {evidence.processGeneration} · 连接代次 {evidence.connectionGeneration}</small></>
+        : <span className="muted">尚无经过后端核验的服务端证据</span>}
+    </div>
+  </section>;
 }
 
 export function App() {
@@ -573,15 +639,18 @@ function ConsolePanel({ snapshot, canWrite, versionKey, startWork, enableAutomat
   const [scheduleAt, setScheduleAt] = useState(() => toUtc8Input(new Date(Date.now() + 5 * 60_000)));
   const participant = snapshot.config.participants.find((candidate) => candidate.id === participantId);
   const startConnection = availabilityFor(runtime, "start-work");
-  const reconnect = availabilityFor(runtime, "restart-work");
-  const hasOpenServerIncident = (runtime.incidents as Array<{ type?: string; status?: string }>).some((incident) => incident.type === "server-disconnect" && incident.status === "open");
-  const useReconnect = snapshot.competition.mode === "test" || startConnection?.disabledReason === "比赛连接已经启动";
-  const reconnectDisabledReason = reconnect?.disabledReason;
-  const connectionLabel = snapshot.competition.mode === "test" ? reconnect?.label ?? "模拟恢复连接"
-    : !useReconnect ? startConnection?.label ?? "连接比赛服务器"
-      : reconnect?.enabled ? reconnect.label
-        : reconnectDisabledReason && reconnectDisabledReason !== "当前没有待恢复的服务器连接阻断" ? reconnectDisabledReason
-          : hasOpenServerIncident ? reconnectDisabledReason ?? "正在恢复比赛连接" : "比赛服务器已连接";
+  const workConnection = snapshot.competition.mode === "work" ? runtime.workConnection : undefined;
+  const lifecycleVersionKey = workConnection
+    ? `${versionKey}:${workConnection.status}:p${workConnection.processGeneration}:c${workConnection.connectionGeneration}:${workConnection.refereeConnectionId ?? "unverified"}`
+    : versionKey;
+  const mapsRegistering = workConnection?.status === "healthy" && workConnection.recoveryStep === "register-maps";
+  const liveCommandUnavailable = snapshot.competition.mode === "work"
+    && (workConnection?.status !== "healthy" || mapsRegistering);
+  const liveCommandDisabledReason = liveCommandUnavailable
+    ? mapsRegistering
+      ? "当前 MockClient 正在完成地图注册；完成前不能重发真实命令"
+      : `当前连接为${workConnection ? workConnectionStatusLabel[workConnection.status] : "未建立"}；完成服务器身份核验后才能重发真实命令`
+    : undefined;
   const confirmedAction = (
     label: string,
     actionId: RefereeActionId,
@@ -609,15 +678,29 @@ function ConsolePanel({ snapshot, canWrite, versionKey, startWork, enableAutomat
   return <section className="grid two">
     <div className="panel"><h2>裁判操作</h2>
       <div className="button-row action-row">
-        <ActionButton runtime={runtime} action={useReconnect ? "restart-work" : "start-work"} canWrite={canWrite}
-          onClick={() => void (useReconnect ? performAction({ type: "restart-work" }) : startWork())}>{connectionLabel}</ActionButton>
+        {snapshot.competition.mode === "test"
+          ? confirmedAction(availabilityFor(runtime, "restart-work")?.label ?? "模拟恢复连接", "restart-work", "high-risk", snapshot.competition.id,
+            (confirmation) => ({ type: "restart-work", confirmationToken: confirmation.token, impactHash: confirmation.impactHash }))
+          : startConnection?.enabled
+            ? <ActionButton runtime={runtime} action="start-work" canWrite={canWrite}
+              onClick={() => void startWork()}>{startConnection.label}</ActionButton>
+            : workConnection
+            ? <>
+              {confirmedAction("软重新连接", "reconnect-work", "high-risk", snapshot.competition.id,
+                (confirmation) => ({ type: "reconnect-work", confirmationToken: confirmation.token, impactHash: confirmation.impactHash }), undefined, false, undefined, lifecycleVersionKey)}
+              {confirmedAction("重启 MockClient", "restart-work", "high-risk", snapshot.competition.id,
+                (confirmation) => ({ type: "restart-work", confirmationToken: confirmation.token, impactHash: confirmation.impactHash }), undefined, false, undefined, lifecycleVersionKey)}
+            </>
+            : <ActionButton runtime={runtime} action="start-work" canWrite={canWrite}
+              onClick={() => void startWork()}>{startConnection?.label ?? "连接比赛服务器"}</ActionButton>}
         <ActionButton runtime={runtime} action="enable-automation" canWrite={canWrite} onClick={() => void enableAutomation()}>{availabilityFor(runtime, "enable-automation")?.label ?? "启动自动化"}</ActionButton>
         <ActionButton runtime={runtime} action="pause-automation" canWrite={canWrite} className="secondary" onClick={() => void pauseAutomation()}>暂停自动化</ActionButton>
       </div>
+      {workConnection && <WorkConnectionPanel connection={workConnection} />}
       <h3>面向玩家的通知</h3>
       <div className="inline-form notification-form"><select aria-label="通知类型" value={channel} onChange={(event) => setChannel(event.target.value as NotificationChannel)}>
         <option value="bulletin">Bulletin · 顶部状态</option><option value="notice">Notice · 普通通知</option><option value="announce">Announce · 中央重要通知</option>
-      </select><input aria-label="通知文本" value={notification} onChange={(event) => setNotification(event.target.value)} /><button disabled={!canWrite || !notification.trim()} onClick={() => void performAction({ type: "notification", channel, text: notification })}>发送</button></div>
+      </select><input aria-label="通知文本" value={notification} onChange={(event) => setNotification(event.target.value)} /><ActionButton runtime={runtime} action="notification" canWrite={canWrite} disabled={!notification.trim()} disabledReason="请输入通知文本" onClick={() => void performAction({ type: "notification", channel, text: notification })}>发送</ActionButton></div>
       <h3>流程控制</h3>
       <div className="button-row action-row">
         {confirmedAction("进入 Ready+发令流程", "start-ready-flow", "manual-action", snapshot.competition.id, (confirmation) => ({ type: "start-ready-flow", confirmationToken: confirmation.token, impactHash: confirmation.impactHash }))}
@@ -647,8 +730,8 @@ function ConsolePanel({ snapshot, canWrite, versionKey, startWork, enableAutomat
           <ConfirmButton key={`confirm-executed:${action.id}:${versionKey}`} label="确认已执行" kind="automation-command-resolution" target={action.id} versionKey={versionKey}
             requestPayload={{ actionId: action.id, resolution: "confirm-executed" }} disabled={!canWrite} requestConfirmation={requestConfirmation}
             onConfirm={(confirmation) => performAction({ type: "resolve-automation-command", actionId: action.id, resolution: "confirm-executed", confirmationToken: confirmation.token, impactHash: confirmation.impactHash })} />
-          <ConfirmButton key={`resend:${action.id}:${versionKey}`} label="执行重发" kind="automation-command-resolution" target={action.id} versionKey={versionKey} className="danger"
-            requestPayload={{ actionId: action.id, resolution: "resend" }} disabled={!canWrite} requestConfirmation={requestConfirmation}
+          <ConfirmButton key={`resend:${action.id}:${lifecycleVersionKey}`} label="执行重发" kind="automation-command-resolution" target={action.id} versionKey={lifecycleVersionKey} className="danger"
+            requestPayload={{ actionId: action.id, resolution: "resend" }} disabled={!canWrite || liveCommandUnavailable} disabledReason={!canWrite ? "实时连接或控制权不可用" : liveCommandDisabledReason} requestConfirmation={requestConfirmation}
             onConfirm={(confirmation) => performAction({ type: "resolve-automation-command", actionId: action.id, resolution: "resend", confirmationToken: confirmation.token, impactHash: confirmation.impactHash })} />
         </div>)}</section>}
       {runtime.unconfirmedCommands.length > 0 && <section className="unconfirmed-command-panel critical"><h3>未确认真实命令</h3>
@@ -658,8 +741,8 @@ function ConsolePanel({ snapshot, canWrite, versionKey, startWork, enableAutomat
           <ConfirmButton key={`command-confirmed:${command.id}:${versionKey}`} label={command.status === "failed" ? "确认不再执行" : "确认已执行"} kind="command-resolution" target={command.id} versionKey={versionKey}
             requestPayload={{ commandId: command.id, resolution: command.status === "failed" ? "dismiss-failed" : "confirm-executed" }} disabled={!canWrite} requestConfirmation={requestConfirmation}
             onConfirm={(confirmation) => performAction({ type: "resolve-command", commandId: command.id, resolution: command.status === "failed" ? "dismiss-failed" : "confirm-executed", confirmationToken: confirmation.token, impactHash: confirmation.impactHash })} />
-          <ConfirmButton key={`command-resend:${command.id}:${versionKey}`} label="执行重发" kind="command-resolution" target={command.id} versionKey={versionKey} className="danger"
-            requestPayload={{ commandId: command.id, resolution: "resend" }} disabled={!canWrite} requestConfirmation={requestConfirmation}
+          <ConfirmButton key={`command-resend:${command.id}:${lifecycleVersionKey}`} label="执行重发" kind="command-resolution" target={command.id} versionKey={lifecycleVersionKey} className="danger"
+            requestPayload={{ commandId: command.id, resolution: "resend" }} disabled={!canWrite || liveCommandUnavailable} disabledReason={!canWrite ? "实时连接或控制权不可用" : liveCommandDisabledReason} requestConfirmation={requestConfirmation}
             onConfirm={(confirmation) => performAction({ type: "resolve-command", commandId: command.id, resolution: "resend", confirmationToken: confirmation.token, impactHash: confirmation.impactHash })} />
         </div>)}</section>}
       {runtime.observationGaps.length > 0 && <section className="unconfirmed-command-panel critical"><h3>服务中断观察缺口</h3>
@@ -674,7 +757,8 @@ function ConsolePanel({ snapshot, canWrite, versionKey, startWork, enableAutomat
       <div className="attention-list">{runtime.attentionItems.map((item) => <article className={`attention-card ${item.severity}`} key={item.id}>
         <div><strong>{item.title}</strong><time>{formatUtc8DateTime(item.occurredAt)}</time></div>
         <p>{[item.message, item.stageId ? `关卡 ${stageTitle(snapshot.config, item.stageId)}` : "", item.participantIds?.length ? `玩家 ${item.participantIds.join("、")}` : ""].filter(Boolean).join(" · ")}</p>
-        {item.action === "restart-work" && <ActionButton runtime={runtime} action="restart-work" canWrite={canWrite} onClick={() => void performAction({ type: "restart-work" })}>{availabilityFor(runtime, "restart-work")?.label ?? "恢复连接"}</ActionButton>}
+        {item.action === "restart-work" && confirmedAction(availabilityFor(runtime, "restart-work")?.label ?? "恢复连接", "restart-work", "high-risk", snapshot.competition.id,
+          (confirmation) => ({ type: "restart-work", confirmationToken: confirmation.token, impactHash: confirmation.impactHash }), undefined, false, undefined, lifecycleVersionKey)}
         {item.action === "enable-automation" && <ActionButton runtime={runtime} action="enable-automation" canWrite={canWrite} onClick={() => void enableAutomation()}>核对后恢复自动化</ActionButton>}
       </article>)}</div>
       <h3>事故与尝试</h3><p className="muted">事故证据和历史尝试永久保留；重赛入口位于左侧流程控制。</p>

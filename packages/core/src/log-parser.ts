@@ -17,6 +17,17 @@ const elapsedToMs = (hours: string, minutes: string, seconds: string, millisecon
 
 const sourceIdFor = (line: string): string => createHash("sha256").update(line).digest("hex");
 
+const authenticationFailureFor = (body: string): { code?: 1002 | 2000; message: string } | undefined => {
+  if (body === "Login denied.") return { message: body };
+  const farewell = /^The host hath bidden us farewell\.\s+\((1002|2000):\s*.+\)$/.exec(body);
+  if (!farewell) return undefined;
+  return { code: Number(farewell[1]) as 1002 | 2000, message: body };
+};
+
+const isServerDisconnect = (body: string): boolean => body === "Disconnected from server."
+  || /^The host hath bidden us farewell\.\s+\(5003: Connection dropped\)$/.test(body)
+  || /^The host hath bidden us farewell\.\s+\(1101: Kicked by .+ \(.*\)\.\)$/.test(body);
+
 const quotedMapReference = (value: string): { mapKind: "custom"; mapHashPrefix?: string; mapDisplayName?: string } => {
   const prefix = /^([0-9a-f]+)\.\.$/i.exec(value)?.[1];
   return prefix ? { mapKind: "custom", mapHashPrefix: prefix.toLowerCase() } : { mapKind: "custom", mapDisplayName: value };
@@ -30,6 +41,18 @@ export const parseLogLine = (input: string, context: ParseContext): ParsedLogLin
   const sourceId = context.sourceId ?? sourceIdFor(rawLine);
   if (!prefix) {
     const timestamp = new Date(0).toISOString();
+    const authenticationFailure = authenticationFailureFor(rawLine);
+    if (authenticationFailure) {
+      return {
+        sourceId,
+        timestamp,
+        rawLine,
+        event: { type: "authentication-failed", sourceId, occurredAt: timestamp, rawLine, ...authenticationFailure }
+      };
+    }
+    if (isServerDisconnect(rawLine)) {
+      return { sourceId, timestamp, rawLine, event: { type: "server-disconnected", sourceId, occurredAt: timestamp, rawLine } };
+    }
     return { sourceId, timestamp, rawLine, event: { type: "unknown", sourceId, occurredAt: timestamp, rawLine, text: rawLine } };
   }
 
@@ -38,12 +61,13 @@ export const parseLogLine = (input: string, context: ParseContext): ParsedLogLin
   const timestamp = new Date(utc).toISOString();
   const metadata = { sourceId, occurredAt: timestamp, rawLine };
   let event: DomainEvent;
+  const authenticationFailure = authenticationFailureFor(body);
 
-  if (body === "Connected to server OK") {
+  if (authenticationFailure) {
+    event = { ...metadata, type: "authentication-failed", ...authenticationFailure };
+  } else if (body === "Connected to server OK") {
     event = { ...metadata, type: "connected" };
-  } else if (body === "Disconnected from server."
-    || /^The host hath bidden us farewell\.\s+\(5003: Connection dropped\)$/.test(body)
-    || /^The host hath bidden us farewell\.\s+\(1101: Kicked by .+ \(.*\)\.\)$/.test(body)) {
+  } else if (isServerDisconnect(body)) {
     event = { ...metadata, type: "server-disconnected" };
   } else if (body === "Action failed: you don't have the permission to run this action.") {
     event = { ...metadata, type: "permission-denied", message: body };

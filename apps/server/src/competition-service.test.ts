@@ -1,10 +1,9 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { CompetitionConfig, ScenarioDefinition, ScenarioEvent } from "@ballance/contracts";
+import type { CompetitionConfig, ScenarioDefinition, ScenarioEvent, WorkConnectionStatus } from "@ballance/contracts";
 import { CompetitionController } from "@ballance/core";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { CommandRecord } from "./command-queue.js";
 import type { CommandTransport } from "./mock-client.js";
 import { CompetitionService, seededBehaviorRandom } from "./competition-service.js";
 import { openDatabase, type OpenedDatabase } from "./storage/database.js";
@@ -16,6 +15,12 @@ const workRuntimeManager = (service: CompetitionService): WorkRuntimeManager =>
 
 const testRuntimeManager = (service: CompetitionService): TestRuntimeManager =>
   (service as unknown as { testRuntimeManager: TestRuntimeManager }).testRuntimeManager;
+
+const establishAuthenticatedReferee = (runtime: WorkRuntime, connectionId = "7"): void => {
+  runtime.refereeConnectionId = connectionId;
+  runtime.connection = { ...runtime.connection, status: "healthy", refereeConnectionId: connectionId };
+  runtime.commands.setRefereeConnectionId(connectionId);
+};
 
 describe("CompetitionService dynamic participants", () => {
   let dataRoot = "";
@@ -35,7 +40,7 @@ describe("CompetitionService dynamic participants", () => {
     expect(seededBehaviorRandom(20_260_631, "sr-1", 1, "normal", "finish-time")).not.toBe(first);
   });
 
-  it("resets simulated server finish ordinals on every authoritative Go", () => {
+  it("resets simulated server finish ordinals on every authoritative Go", async () => {
     const service = new CompetitionService();
     const record = service.create({ name: "Ordinal reset", mode: "test", idempotencyKey: "ordinal-reset" });
     service.publish(record.id, 0, "publish-ordinal-reset");
@@ -53,7 +58,7 @@ describe("CompetitionService dynamic participants", () => {
     expect(render(runtime, finish("second"))).toContain("2nd place");
     render(runtime, { atMs: 2_000, sourceId: "go-again", type: "go", stageId: stage.id, refereeConnectionId: runtime.definition.refereeConnectionId });
     expect(render(runtime, finish("after-go"))).toContain("1st place");
-    service.close();
+    await service.close();
   });
 
   it("keeps work automation on the fixed Ready cadence", async () => {
@@ -81,6 +86,8 @@ describe("CompetitionService dynamic participants", () => {
           return actions;
         }
       },
+      commands: { advanceGeneration: () => 1 },
+      connection: { status: "healthy", processGeneration: 0, connectionGeneration: 0 },
       mapEchoPrefixes: new Map<string, string>()
     };
     workRuntimeManager(service).register(record.id, runtime as never);
@@ -94,10 +101,10 @@ describe("CompetitionService dynamic participants", () => {
     now = 30_000;
     await workRuntimeManager(service).tickRealtime(runtime as never);
     expect(controller.snapshot().phase).toBe("running");
-    service.close();
+    await service.close();
   });
 
-  it("does not let a player's countdown move the referee flow out of Ready", () => {
+  it("does not let a player's countdown move the referee flow out of Ready", async () => {
     dataRoot = mkdtempSync(join(tmpdir(), "ballance-foreign-countdown-"));
     database = openDatabase(join(dataRoot, "console.sqlite"));
     const service = new CompetitionService(undefined, { database, dataRoot });
@@ -123,12 +130,13 @@ describe("CompetitionService dynamic participants", () => {
     expect(runtime.refereeConnectionId).toBeUndefined();
     expect(runtime.controller.snapshot().phase).toBe("ready");
     manager.ingestLine(runtime, "[07-03 20:20:07] 2760557282: *ContestConsole    70ms");
-    expect(runtime.refereeConnectionId).toBe("2760557282");
+    expect(runtime.refereeConnectionId).toBeUndefined();
+    establishAuthenticatedReferee(runtime, "2760557282");
     manager.ingestLine(runtime, "[07-03 20:20:17] [3210244510, liangzhichao]: Level 02 - 2");
 
     expect(runtime.controller.snapshot().phase).toBe("ready");
     expect(runtime.controller.snapshot().countdownValue).toBeUndefined();
-    service.close();
+    await service.close();
   });
   it("registers normal players from list output and keeps display aliases separate", async () => {
     dataRoot = mkdtempSync(join(tmpdir(), "ballance-dynamic-participants-"));
@@ -143,16 +151,18 @@ describe("CompetitionService dynamic participants", () => {
     const runtime = manager.makeRuntime(record.id, published, transport);
     manager.register(record.id, runtime);
 
+    manager.beginListReconciliation(runtime);
     manager.ingestLine(runtime, "[06-30 12:00:00] 3 player(s) online:");
     manager.ingestLine(runtime, "[06-30 12:00:00] Silent_Snow (#42)");
     manager.ingestLine(runtime, "[06-30 12:00:00] *Observer (#99)");
     manager.ingestLine(runtime, "[06-30 12:00:00] *ContestConsole (#7)");
-    expect(service.snapshot(record.id).config.participants).toMatchObject([{
+    establishAuthenticatedReferee(runtime);
+    await vi.waitFor(() => expect(service.snapshot(record.id).config.participants).toMatchObject([{
       id: "Silent_Snow",
       displayName: "Silent_Snow",
       connectionIds: ["42"],
       online: true
-    }]);
+    }]));
 
     await service.performAction(record.id, {
       expectedStateVersion: 1,
@@ -171,114 +181,22 @@ describe("CompetitionService dynamic participants", () => {
       displayName: "渴望新地图",
       points: 20
     }]);
+    manager.beginListReconciliation(runtime);
     manager.ingestLine(runtime, "[06-30 12:00:03] 0 player(s) online:");
-    expect(service.snapshot(record.id).config.participants[0]?.online).toBe(false);
+    await vi.waitFor(() => expect(service.snapshot(record.id).config.participants[0]?.online).toBe(false));
 
     manager.beginListReconciliation(runtime);
     manager.ingestLine(runtime, "[06-30 12:00:04] 314: Modern_Player     28ms");
     manager.ingestLine(runtime, "[06-30 12:00:04] 99: *Observer     0ms");
     manager.ingestLine(runtime, "[06-30 12:00:04] 2 client(s) online: 1 player(s), 1 spectator(s).");
-    expect(service.snapshot(record.id).config.participants).toEqual(expect.arrayContaining([
+    await vi.waitFor(() => expect(service.snapshot(record.id).config.participants).toEqual(expect.arrayContaining([
       expect.objectContaining({ id: "Silent_Snow", online: false }),
       expect.objectContaining({ id: "Modern_Player", connectionIds: ["314"], online: true })
-    ]));
+    ])));
+    await service.close();
   });
 
-  it("automatically restarts once for the 5003 connection-drop line and resolves on reconnect", async () => {
-    dataRoot = mkdtempSync(join(tmpdir(), "ballance-auto-reconnect-"));
-    database = openDatabase(join(dataRoot, "console.sqlite"));
-    const service = new CompetitionService(undefined, { database, dataRoot });
-    const record = service.create({ name: "Automatic reconnect", mode: "work", idempotencyKey: "create-auto-reconnect" });
-    service.publish(record.id, 0, "publish-auto-reconnect");
-    const manager = workRuntimeManager(service);
-    const runtime = manager.makeRuntime(record.id, service.snapshot(record.id).publishedConfig as CompetitionConfig, { write: async () => undefined });
-    runtime.customMapsRegistered = true;
-    manager.register(record.id, runtime);
-    const replaceClient = vi.fn(async () => {
-      manager.ingestLine(runtime, "[07-03 09:53:52] Connected to server OK");
-    });
-    (manager as unknown as { replaceClient(runtime: WorkRuntime): Promise<void> }).replaceClient = replaceClient;
-
-    manager.ingestLine(runtime, "[07-03 09:53:51] The host hath bidden us farewell.  (5003: Connection dropped)");
-    await vi.waitFor(() => expect(replaceClient).toHaveBeenCalledTimes(1));
-
-    expect(runtime.connectionRecoveryState).toBeUndefined();
-    expect(runtime.controller.snapshot()).toMatchObject({ phase: "paused", automationEnabled: false, blockers: [] });
-    expect(service.snapshot(record.id).runtime.attentionItems).toEqual(expect.arrayContaining([
-      expect.objectContaining({ title: "连接中断，正在自动恢复" }),
-      expect.objectContaining({ title: "比赛服务器连接已恢复" })
-    ]));
-    service.close();
-  });
-
-  it("keeps manual reconnect available while healthy and disabled during automatic recovery", async () => {
-    dataRoot = mkdtempSync(join(tmpdir(), "ballance-auto-reconnect-failed-"));
-    database = openDatabase(join(dataRoot, "console.sqlite"));
-    const service = new CompetitionService(undefined, { database, dataRoot });
-    const record = service.create({ name: "Failed reconnect", mode: "work", idempotencyKey: "create-failed-reconnect" });
-    service.publish(record.id, 0, "publish-failed-reconnect");
-    const manager = workRuntimeManager(service);
-    const runtime = manager.makeRuntime(record.id, service.snapshot(record.id).publishedConfig as CompetitionConfig, { write: async () => undefined });
-    manager.register(record.id, runtime);
-    const replaceClient = vi.fn(async () => { throw new Error("restart failed"); });
-    (manager as unknown as { replaceClient(runtime: WorkRuntime): Promise<void> }).replaceClient = replaceClient;
-
-    expect(service.snapshot(record.id).runtime.availableActions.find((action) => action.action === "restart-work")).toMatchObject({ enabled: true });
-    manager.ingestLine(runtime, "[07-03 09:53:51] The host hath bidden us farewell.  (5003: Connection dropped)");
-    expect(service.snapshot(record.id).runtime.availableActions.find((action) => action.action === "restart-work")).toMatchObject({ enabled: false, disabledReason: "正在自动尝试恢复连接" });
-    await vi.waitFor(() => expect(runtime.connectionRecoveryState).toBe("failed"));
-
-    expect(replaceClient).toHaveBeenCalledTimes(1);
-    expect(service.snapshot(record.id).runtime.availableActions.find((action) => action.action === "restart-work")).toMatchObject({ enabled: true });
-    expect(runtime.controller.snapshot().blockers).toContainEqual(expect.objectContaining({ code: "INCIDENT_OPEN" }));
-    service.close();
-  });
-
-  it("automatically reconnects once when scheduled list receives no server echo", async () => {
-    dataRoot = mkdtempSync(join(tmpdir(), "ballance-list-no-echo-"));
-    database = openDatabase(join(dataRoot, "console.sqlite"));
-    const service = new CompetitionService(undefined, { database, dataRoot });
-    const record = service.create({ name: "List no echo", mode: "work", idempotencyKey: "create-list-no-echo" });
-    service.publish(record.id, 0, "publish-list-no-echo");
-    const manager = workRuntimeManager(service);
-    const runtime = manager.makeRuntime(record.id, service.snapshot(record.id).publishedConfig as CompetitionConfig, { write: async () => undefined });
-    runtime.customMapsRegistered = true;
-    manager.register(record.id, runtime);
-    const replaceClient = vi.fn(async () => undefined);
-    (manager as unknown as { replaceClient(runtime: WorkRuntime): Promise<void> }).replaceClient = replaceClient;
-    const timedOutList = (id: string): CommandRecord => ({
-      id,
-      idempotencyKey: id,
-      action: { type: "list" },
-      command: "list",
-      status: "timed_out",
-      createdAt: "2026-07-13T00:00:00.000Z",
-      updatedAt: "2026-07-13T00:00:01.000Z"
-    });
-    const handleNoEcho = (manager as unknown as { handleParticipantListNoEcho(runtime: WorkRuntime, record: CommandRecord): void }).handleParticipantListNoEcho.bind(manager);
-
-    handleNoEcho(runtime, timedOutList("list-timeout-first"));
-    await vi.waitFor(() => expect(replaceClient).toHaveBeenCalledTimes(1));
-    expect(runtime.connectionRecoveryState).toBe("automatic");
-    expect(service.snapshot(record.id).runtime.availableActions.find((action) => action.action === "restart-work"))
-      .toMatchObject({ enabled: false, disabledReason: "正在自动尝试恢复连接" });
-    expect(service.snapshot(record.id).runtime.attentionItems).toContainEqual(expect.objectContaining({ title: "list 无回显，正在自动重连", severity: "warning" }));
-
-    manager.ingestLine(runtime, "[07-13 08:00:00] Connected to server OK");
-    expect(runtime.connectionRecoveryState).toBeUndefined();
-    handleNoEcho(runtime, timedOutList("list-timeout-second"));
-
-    expect(runtime.connectionRecoveryState).toBe("failed");
-    expect(service.snapshot(record.id).runtime.availableActions.find((action) => action.action === "restart-work")).toMatchObject({ enabled: true });
-    expect(service.snapshot(record.id).runtime.attentionItems).toContainEqual(expect.objectContaining({
-      title: "自动恢复连接失败",
-      severity: "critical",
-      action: "restart-work"
-    }));
-    service.close();
-  });
-
-  it("uses a live fatal-error line once and mirrors the voided protected attempt into scoring", () => {
+  it("uses a live fatal-error line once and mirrors the voided protected attempt into scoring", async () => {
     dataRoot = mkdtempSync(join(tmpdir(), "ballance-fatal-protection-"));
     database = openDatabase(join(dataRoot, "console.sqlite"));
     const service = new CompetitionService(undefined, { database, dataRoot });
@@ -288,7 +206,7 @@ describe("CompetitionService dynamic participants", () => {
     const runtime = manager.makeRuntime(record.id, service.snapshot(record.id).publishedConfig as CompetitionConfig, { write: async () => undefined });
     manager.register(record.id, runtime);
 
-    manager.ingestLine(runtime, "[07-02 12:00:00] 7: *ContestConsole     0ms");
+    establishAuthenticatedReferee(runtime);
     manager.ingestLine(runtime, "[07-02 12:00:00] Player One (#42) logged in with cheat mode off.");
     manager.ingestLine(runtime, "[07-02 12:00:01] [7, *ContestConsole]: Level 01 - Go!");
     manager.ingestLine(runtime, "[07-02 12:00:02] (#42, Player One) finished Level 01 in 1st place (score: 100; real time: 00:00:01.000).");
@@ -310,7 +228,7 @@ describe("CompetitionService dynamic participants", () => {
     expect(service.snapshot(record.id).config.participants).toContainEqual(expect.objectContaining({ id: "Player One", online: false }));
     const restoredRuntime = manager.makeRuntime(record.id, service.snapshot(record.id).publishedConfig as CompetitionConfig, { write: async () => undefined });
     expect(restoredRuntime.controller.snapshot().startProtectionUsedStageIds).toEqual(["sr-1"]);
-    service.close();
+    await service.close();
   });
 
   it("registers every published custom map once after connection and attributes its quoted echoes", async () => {
@@ -338,13 +256,11 @@ describe("CompetitionService dynamic participants", () => {
     manager.register(record.id, runtime);
     expect(internals.toCommandAction(record.id, { type: "ready" })).toMatchObject({ map: `${hash} 0`, mode: "hs" });
     expect(internals.toCommandAction(record.id, { type: "manual-go" })).toMatchObject({ map: `${hash} 0`, mode: "hs" });
-    manager.ingestLine(runtime, "[07-01 19:25:39] Connected to server OK");
-    await runtime.customMapRegistration;
-    manager.ingestLine(runtime, "[07-01 19:25:39] Connected to server OK");
-    await runtime.customMapRegistration;
+    await manager.registerPublishedCustomMaps(runtime, published);
+    await manager.registerPublishedCustomMaps(runtime, published);
     expect(writes).toEqual([`setmap ${hash} 0 云端决赛图`, "listmap"]);
     const prefix = hash.slice(0, 20);
-    manager.ingestLine(runtime, "[07-01 19:25:40] 7: *ContestConsole     0ms");
+    establishAuthenticatedReferee(runtime);
     manager.ingestLine(runtime, "[07-01 19:25:40] Alpha (#11) logged in with cheat mode off.");
     manager.ingestLine(runtime, "[07-01 19:25:40] Beta (#12) logged in with cheat mode off.");
     manager.ingestLine(runtime, `[07-01 19:25:43] [7, *ContestConsole]: "${prefix}.." <HS> - Get ready`);
@@ -360,7 +276,7 @@ describe("CompetitionService dynamic participants", () => {
     expect(snapshot.currentScoreboard.find((entry) => entry.playerId === "Beta")?.stages["custom-hs-final"])
       .toMatchObject({ status: "dnf", points: 0 });
     expect(service.getRawClientLogs(record.id).filter((line) => line.rawLine.includes("云端决赛图") || line.rawLine.includes(`"${prefix}.."`))).toHaveLength(4);
-    service.close();
+    await service.close();
   });
 
   it("binds an official server hash echo only after the current referee Ready", () => {
@@ -375,7 +291,7 @@ describe("CompetitionService dynamic participants", () => {
     manager.register(record.id, runtime);
     runtime.controller.manualReady();
     const prefix = "a364b408fffaab434480";
-    manager.ingestLine(runtime, "[07-01 19:30:00] 7: *ContestConsole     0ms");
+    establishAuthenticatedReferee(runtime);
     manager.ingestLine(runtime, "[07-01 19:30:00] Alpha (#11) logged in with cheat mode off.");
     manager.ingestLine(runtime, `[07-01 19:30:01] [7, *ContestConsole]: ${prefix}.. - Get ready`);
     manager.ingestLine(runtime, `[07-01 19:30:16] [7, *ContestConsole]: ${prefix}.. - Go!`);
@@ -404,7 +320,7 @@ describe("CompetitionService dynamic participants", () => {
     manager.register(record.id, runtime);
     runtime.controller.manualReady();
     const prefix = "a364b408fffaab434480";
-    manager.ingestLine(runtime, "[07-03 21:01:31] 1427745711: *ContestConsole     0ms");
+    establishAuthenticatedReferee(runtime, "1427745711");
     manager.ingestLine(runtime, "[07-03 21:01:31] Runner (#11) logged in with cheat mode off.");
     manager.ingestLine(runtime, `[07-03 21:01:36] [1427745711, *ContestConsole]: ${prefix}.. <HS> - Get ready`);
     manager.ingestLine(runtime, `[07-03 21:01:39] [1427745711, *ContestConsole]: ${prefix}.. <HS> - Go!`);
@@ -449,7 +365,7 @@ describe("CompetitionService dynamic participants", () => {
     const manager = workRuntimeManager(service);
     const runtime = manager.makeRuntime(record.id, service.snapshot(record.id).publishedConfig as CompetitionConfig, { write: async () => undefined });
     manager.register(record.id, runtime);
-    manager.ingestLine(runtime, "[07-01 12:00:00] 7: *ContestConsole     0ms");
+    establishAuthenticatedReferee(runtime);
     for (const [id, name] of [["11", "Cheater"], ["12", "Valid"], ["13", "Warned"]]) {
       manager.ingestLine(runtime, `[07-01 12:00:00] ${name} (#${id}) logged in with cheat mode off.`);
     }
@@ -470,7 +386,7 @@ describe("CompetitionService dynamic participants", () => {
     expect(runtime.engine.snapshot().anomalies.filter((item) => item.code === "duplicate-event" || item.code === "post-completion-result")).toHaveLength(0);
   });
 
-  it("warns once after cheat-off and mirrors a cheat-on reconnect into the live scoreboard at Go", () => {
+  it("warns once after cheat-off and mirrors a cheat-on reconnect into the live scoreboard at Go", async () => {
     dataRoot = mkdtempSync(join(tmpdir(), "ballance-cheat-reconnect-"));
     database = openDatabase(join(dataRoot, "console.sqlite"));
     const service = new CompetitionService(undefined, { database, dataRoot });
@@ -480,15 +396,21 @@ describe("CompetitionService dynamic participants", () => {
     const runtime = manager.makeRuntime(record.id, service.snapshot(record.id).publishedConfig as CompetitionConfig, { write: async () => undefined });
     manager.register(record.id, runtime);
 
-    manager.ingestLine(runtime, "[07-02 20:00:00] 7: *ContestConsole     0ms");
+    establishAuthenticatedReferee(runtime);
     manager.ingestLine(runtime, "[07-02 20:00:00] OfflineCheater (#41) logged in with cheat mode off.");
     runtime.controller.manualCheatOff();
     const cheatOff = runtime.controller.drainActions().find((item) => item.kind === "cheat-off");
     if (!cheatOff) throw new Error("missing cheat-off action");
     runtime.controller.acknowledgeAction(cheatOff.id, "acknowledged");
     manager.ingestLine(runtime, "[07-02 20:00:01] OfflineCheater (#41) disconnected.");
+    manager.beginListReconciliation(runtime);
     manager.ingestLine(runtime, "[07-02 20:00:02] 42: OfflineCheater [CHEAT]    34ms");
+    manager.ingestLine(runtime, "[07-02 20:00:02] 1 client(s) online: 1 player(s), 0 spectator(s).");
+    await vi.waitFor(() => expect(runtime.listReconciliation).toBeUndefined());
+    manager.beginListReconciliation(runtime);
     manager.ingestLine(runtime, "[07-02 20:00:03] 42: OfflineCheater [CHEAT]    34ms");
+    manager.ingestLine(runtime, "[07-02 20:00:03] 1 client(s) online: 1 player(s), 0 spectator(s).");
+    await vi.waitFor(() => expect(runtime.listReconciliation).toBeUndefined());
 
     expect(runtime.controller.snapshot().actions.filter((item) => item.kind === "notice")).toHaveLength(1);
     expect(runtime.controller.snapshot().blockers.some((blocker) => blocker.code === "PARTICIPANT_OFFLINE" || blocker.code === "PARTICIPANT_CHEAT")).toBe(false);
@@ -501,9 +423,10 @@ describe("CompetitionService dynamic participants", () => {
       reason: "cheat-enabled"
     });
     expect(snapshot.runtime.attentionItems.filter((item) => item.title === "违规成绩已排除")).toHaveLength(1);
+    await service.close();
   });
 
-  it("records a player who enters with cheat enabled directly in the live scoreboard", () => {
+  it("records a player who enters with cheat enabled directly in the live scoreboard", async () => {
     dataRoot = mkdtempSync(join(tmpdir(), "ballance-cheat-login-scoreboard-"));
     database = openDatabase(join(dataRoot, "console.sqlite"));
     const service = new CompetitionService(undefined, { database, dataRoot });
@@ -513,7 +436,7 @@ describe("CompetitionService dynamic participants", () => {
     const runtime = manager.makeRuntime(record.id, service.snapshot(record.id).publishedConfig as CompetitionConfig, { write: async () => undefined });
     manager.register(record.id, runtime);
 
-    manager.ingestLine(runtime, "[07-02 20:00:00] 7: *ContestConsole     0ms");
+    establishAuthenticatedReferee(runtime);
     manager.ingestLine(runtime, "[07-02 20:00:00] [7, *ContestConsole]: Level 01 - Go!");
     manager.ingestLine(runtime, "[07-02 20:00:01] LoginCheater (#41) logged in with cheat mode on.");
 
@@ -523,7 +446,7 @@ describe("CompetitionService dynamic participants", () => {
       reason: "cheat-enabled"
     });
     expect(service.snapshot(record.id).runtime.attentionItems.filter((item) => item.title === "违规成绩已排除")).toHaveLength(1);
-    service.close();
+    await service.close();
   });
 
   it("keeps raw test finish logs sequential when earlier finisher is excluded", () => {
@@ -536,7 +459,7 @@ describe("CompetitionService dynamic participants", () => {
     const runtime = manager.makeRuntime(record.id, service.snapshot(record.id).publishedConfig as CompetitionConfig, { write: async () => undefined });
     manager.register(record.id, runtime);
 
-    manager.ingestLine(runtime, "[07-01 12:00:00] 7: *ContestConsole     0ms");
+    establishAuthenticatedReferee(runtime);
     for (const [id, name] of [["11", "Cheater"], ["12", "Valid"]]) {
       manager.ingestLine(runtime, `[07-01 12:00:00] ${name} (#${id}) logged in with cheat mode off.`);
     }
@@ -565,7 +488,7 @@ describe("CompetitionService dynamic participants", () => {
     const runtime = manager.makeRuntime(record.id, service.snapshot(record.id).publishedConfig as CompetitionConfig, { write: async () => undefined });
     manager.register(record.id, runtime);
 
-    manager.ingestLine(runtime, "[07-01 12:00:00] 7: *ContestConsole     0ms");
+    establishAuthenticatedReferee(runtime);
     manager.ingestLine(runtime, "[07-01 12:00:00] Practicing (#21) logged in with cheat mode off.");
     manager.ingestLine(runtime, "[07-01 12:00:01] [7, *ContestConsole]: Level 01 - Go!");
     manager.ingestLine(runtime, "[07-01 12:00:02] (#21, Practicing) finished Level 01 in 1st place (score: 100; real time: 00:00:01.000).");
@@ -582,7 +505,7 @@ describe("CompetitionService dynamic participants", () => {
     expect(service.getRawClientLogs(record.id).some((line) => line.rawLine.includes("finished Level 02"))).toBe(true);
   });
 
-  it("recovers sent commands as uncertain and keeps automation paused after restart", () => {
+  it("recovers sent commands as uncertain and keeps automation paused after restart", async () => {
     dataRoot = mkdtempSync(join(tmpdir(), "ballance-command-recovery-"));
     database = openDatabase(join(dataRoot, "console.sqlite"));
     const first = new CompetitionService(undefined, { database, dataRoot });
@@ -594,7 +517,7 @@ describe("CompetitionService dynamic participants", () => {
     };
     database.sqlite.prepare("INSERT INTO command_audits(id,competition_id,idempotency_key,action_type,status,payload,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?)")
       .run(payload.id, record.id, payload.idempotencyKey, "raw", "sent", JSON.stringify(payload), now, now);
-    first.close();
+    await first.close();
 
     const restored = new CompetitionService(undefined, { database, dataRoot }).snapshot(record.id);
     expect(restored.runtime.commands).toContainEqual(expect.objectContaining({ id: "sent-command", status: "uncertain" }));
@@ -619,10 +542,15 @@ describe("CompetitionService dynamic participants", () => {
     expect(snapshot.runtime.availableActions).toContainEqual(expect.objectContaining({ action: "restart-work", enabled: true }));
     expect(snapshot.runtime.availableActions).toContainEqual(expect.objectContaining({ action: "enable-automation", enabled: false }));
     expect(snapshot.runtime.attentionItems).toContainEqual(expect.objectContaining({ category: "incident", severity: "critical", action: "restart-work" }));
+    const confirmation = service.createConfirmation(record.id, {
+      kind: "high-risk",
+      intent: "restart-work",
+      target: record.id
+    });
     await service.performAction(record.id, {
       expectedStateVersion: snapshot.competition.stateVersion,
       idempotencyKey: "recover-test-connection",
-      action: { type: "restart-work" }
+      action: { type: "restart-work", confirmationToken: confirmation.token, impactHash: confirmation.impactHash }
     });
 
     snapshot = service.snapshot(record.id);
@@ -635,10 +563,185 @@ describe("CompetitionService dynamic participants", () => {
       idempotencyKey: "resume-after-connection"
     });
     expect(service.snapshot(record.id).runtime).toMatchObject({ phase: "preparing", automationEnabled: true });
-    service.close();
+    await service.close();
   });
 
-  it("recovers a sent Go as acknowledged when the persisted authoritative attempt proves execution", () => {
+  it("records a critical incident when automatic review cannot safely stop MockClient", async () => {
+    const service = new CompetitionService();
+    const record = service.create({ name: "Review stop failure", mode: "work", idempotencyKey: "review-stop-failure" });
+    service.publish(record.id, 0, "publish-review-stop-failure");
+    const manager = workRuntimeManager(service);
+    const mutableManager = manager as unknown as {
+      get(competitionId: string): WorkRuntime | undefined;
+      saveSnapshot(runtime: WorkRuntime): void;
+      remove(competitionId: string): Promise<void>;
+    };
+    const originalGet = mutableManager.get;
+    const originalSaveSnapshot = mutableManager.saveSnapshot;
+    const originalRemove = mutableManager.remove;
+    mutableManager.get = () => ({ competitionId: record.id } as WorkRuntime);
+    mutableManager.saveSnapshot = () => undefined;
+    mutableManager.remove = async () => { throw new Error("owned process tree still running"); };
+
+    try {
+      const internals = service as unknown as {
+        completeCompetitionOnReview(competitionId: string, snapshot: ReturnType<CompetitionController["snapshot"]>): void;
+      };
+      internals.completeCompetitionOnReview(record.id, { phase: "review" } as ReturnType<CompetitionController["snapshot"]>);
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    } finally {
+      mutableManager.get = originalGet;
+      mutableManager.saveSnapshot = originalSaveSnapshot;
+      mutableManager.remove = originalRemove;
+    }
+
+    const snapshot = service.snapshot(record.id);
+    expect(snapshot.competition.status).toBe("finished");
+    expect(snapshot.runtime.attentionItems).toContainEqual(expect.objectContaining({
+      title: "比赛已结束，但 MockClient 未确认退出",
+      severity: "critical",
+      action: "delete",
+      message: expect.stringContaining("owned process tree still running")
+    }));
+    await service.close();
+  });
+
+  it("gates every live command on a healthy work connection and exposes lifecycle recovery by connection state", async () => {
+    const service = new CompetitionService();
+    const record = service.create({ name: "Work connection matrix", mode: "work", idempotencyKey: "work-connection-matrix" });
+    service.publish(record.id, 0, "publish-work-connection-matrix");
+    const manager = workRuntimeManager(service);
+    const writes: string[] = [];
+    const runtime = manager.makeRuntime(record.id, service.snapshot(record.id).config, {
+      write: async (command) => { writes.push(command); }
+    });
+    manager.register(record.id, runtime);
+
+    const expectedByStatus: ReadonlyArray<{
+      status: WorkConnectionStatus;
+      lifecycleEnabled: boolean;
+      liveWritesEnabled: boolean;
+    }> = [
+      { status: "connecting", lifecycleEnabled: false, liveWritesEnabled: false },
+      { status: "authenticating", lifecycleEnabled: false, liveWritesEnabled: false },
+      { status: "healthy", lifecycleEnabled: true, liveWritesEnabled: true },
+      { status: "suspect", lifecycleEnabled: true, liveWritesEnabled: false },
+      { status: "recovering", lifecycleEnabled: false, liveWritesEnabled: false },
+      { status: "blocked", lifecycleEnabled: true, liveWritesEnabled: false }
+    ];
+    for (const expected of expectedByStatus) {
+      runtime.connection = { ...runtime.connection, status: expected.status };
+      const actions = service.snapshot(record.id).runtime.availableActions;
+      expect(actions.find((action) => action.action === "reconnect-work"), expected.status)
+        .toMatchObject({ enabled: expected.lifecycleEnabled });
+      expect(actions.find((action) => action.action === "restart-work"), expected.status)
+        .toMatchObject({ enabled: expected.lifecycleEnabled });
+      expect(actions.find((action) => action.action === "ready"), expected.status)
+        .toMatchObject({ enabled: expected.liveWritesEnabled });
+      expect(actions.find((action) => action.action === "raw-command"), expected.status)
+        .toMatchObject({ enabled: expected.liveWritesEnabled });
+    }
+
+    runtime.connection = { ...runtime.connection, status: "healthy", processGeneration: 4, connectionGeneration: 9 };
+    const staleLifecycleConfirmation = service.createConfirmation(record.id, {
+      kind: "high-risk",
+      intent: "restart-work",
+      target: record.id
+    });
+    runtime.connection = { ...runtime.connection, status: "suspect", connectionGeneration: 10 };
+    await expect(service.performAction(record.id, {
+      expectedStateVersion: service.snapshot(record.id).competition.stateVersion,
+      idempotencyKey: "stale-lifecycle-confirmation",
+      action: {
+        type: "restart-work",
+        confirmationToken: staleLifecycleConfirmation.token,
+        impactHash: staleLifecycleConfirmation.impactHash
+      }
+    })).rejects.toMatchObject({ code: "CONFIRMATION_INVALID", statusCode: 409 });
+
+    runtime.connection = { ...runtime.connection, status: "blocked" };
+    const expectedStateVersion = service.snapshot(record.id).competition.stateVersion;
+    await expect(service.performAction(record.id, {
+      expectedStateVersion,
+      idempotencyKey: "blocked-notification",
+      action: { type: "notification", channel: "announce", text: "must not be sent" }
+    })).rejects.toMatchObject({ code: "ACTION_UNAVAILABLE", statusCode: 409 });
+    await expect(service.performAction(record.id, {
+      expectedStateVersion,
+      idempotencyKey: "blocked-ready",
+      action: { type: "ready" }
+    })).rejects.toMatchObject({ code: "ACTION_UNAVAILABLE", statusCode: 409 });
+    const rawConfirmation = service.createConfirmation(record.id, {
+      kind: "high-risk",
+      intent: "raw-command",
+      target: record.id,
+      command: "scores"
+    });
+    await expect(service.performAction(record.id, {
+      expectedStateVersion,
+      idempotencyKey: "blocked-raw-command",
+      action: {
+        type: "raw-command",
+        command: "scores",
+        confirmationToken: rawConfirmation.token,
+        impactHash: rawConfirmation.impactHash
+      }
+    })).rejects.toMatchObject({ code: "ACTION_UNAVAILABLE", statusCode: 409 });
+    expect(writes).toEqual([]);
+
+    const draft = service.create({ name: "Draft connection matrix", mode: "work", idempotencyKey: "draft-connection-matrix" });
+    const draftRuntime = manager.makeRuntime(draft.id, service.snapshot(draft.id).config, { write: async () => undefined });
+    manager.register(draft.id, draftRuntime);
+    const draftActions = service.snapshot(draft.id).runtime.availableActions;
+    expect(draftActions.find((action) => action.action === "reconnect-work")).toMatchObject({ enabled: false });
+    expect(draftActions.find((action) => action.action === "restart-work")).toMatchObject({ enabled: false });
+    await service.close();
+  });
+
+  it("persists work connection generations but exposes an offline runtime only through start-work recovery", async () => {
+    dataRoot = mkdtempSync(join(tmpdir(), "ballance-work-connection-snapshot-"));
+    database = openDatabase(join(dataRoot, "console.sqlite"));
+    let service = new CompetitionService(undefined, { database, dataRoot });
+    const record = service.create({ name: "Persisted connection", mode: "work", idempotencyKey: "persisted-connection" });
+    service.publish(record.id, 0, "publish-persisted-connection");
+    const manager = workRuntimeManager(service);
+    const runtime = manager.makeRuntime(record.id, service.snapshot(record.id).config, { write: async () => undefined });
+    runtime.connection = {
+      status: "healthy",
+      processGeneration: 4,
+      connectionGeneration: 9,
+      refereeConnectionId: "314159",
+      recentServerEvidence: {
+        kind: "list-verified",
+        occurredAt: "2026-07-22T10:00:00.000Z",
+        detail: "authenticated before service stop",
+        processGeneration: 4,
+        connectionGeneration: 9
+      }
+    };
+    manager.register(record.id, runtime);
+    manager.saveSnapshot(runtime);
+    await service.close();
+
+    service = new CompetitionService(undefined, { database, dataRoot });
+    const restored = service.snapshot(record.id);
+    expect(restored.runtime.workConnection).toMatchObject({
+      status: "blocked",
+      processGeneration: 4,
+      connectionGeneration: 9,
+      recentServerEvidence: expect.objectContaining({ kind: "list-verified" })
+    });
+    expect(restored.runtime.workConnection).not.toHaveProperty("refereeConnectionId");
+    expect(restored.runtime.availableActions.find((action) => action.action === "start-work"))
+      .toMatchObject({ enabled: true });
+    expect(restored.runtime.availableActions.find((action) => action.action === "reconnect-work"))
+      .toMatchObject({ enabled: false });
+    expect(restored.runtime.availableActions.find((action) => action.action === "restart-work"))
+      .toMatchObject({ enabled: false });
+    await service.close();
+  });
+
+  it("recovers a sent Go as acknowledged when the persisted authoritative attempt proves execution", async () => {
     dataRoot = mkdtempSync(join(tmpdir(), "ballance-proven-command-recovery-"));
     database = openDatabase(join(dataRoot, "console.sqlite"));
     const first = new CompetitionService(undefined, { database, dataRoot });
@@ -657,7 +760,7 @@ describe("CompetitionService dynamic participants", () => {
     };
     database.sqlite.prepare("UPDATE runtime_snapshots SET payload=? WHERE competition_id=?")
       .run(JSON.stringify({ work: { started: true, automation, mapEchoPrefixes: {} } }), record.id);
-    first.close();
+    await first.close();
 
     const restored = new CompetitionService(undefined, { database, dataRoot }).snapshot(record.id);
     expect(restored.runtime.commands).toContainEqual(expect.objectContaining({ id: "sent-go", status: "acknowledged" }));
@@ -673,13 +776,13 @@ describe("CompetitionService dynamic participants", () => {
     let manager = workRuntimeManager(service);
     let runtime = manager.makeRuntime(record.id, service.snapshot(record.id).config, { write: async () => undefined });
     manager.register(record.id, runtime);
-    manager.ingestLine(runtime, "[07-03 01:00:00] 7: *ContestConsole     0ms");
+    establishAuthenticatedReferee(runtime);
     manager.ingestLine(runtime, "[07-03 01:00:00] Runner (#41) logged in with cheat mode off.");
     manager.ingestLine(runtime, "[07-03 01:00:01] [7, *ContestConsole]: Level 01 - Go!");
     manager.ingestLine(runtime, "[07-03 01:00:02] (#41, Runner) finished Level 01 in 1st place (score: 100; real time: 00:00:01.000).");
     expect(service.snapshot(record.id).runtime.phase).toBe("running");
     expect(service.snapshot(record.id).currentScoreboard).toContainEqual(expect.objectContaining({ playerId: "Runner", points: 20 }));
-    service.close();
+    await service.close();
 
     service = new CompetitionService(undefined, { database, dataRoot });
     let snapshot = service.snapshot(record.id);
@@ -717,7 +820,7 @@ describe("CompetitionService dynamic participants", () => {
     });
     expect(service.snapshot(record.id).runtime).toMatchObject({ phase: "running", automationEnabled: true });
     expect(service.snapshot(record.id).currentScoreboard).toContainEqual(expect.objectContaining({ playerId: "Runner", points: 20 }));
-    service.close();
+    await service.close();
   });
 
   it("reads legacy stages as official maps without rewriting immutable published snapshots", () => {
@@ -752,7 +855,7 @@ describe("CompetitionService dynamic participants", () => {
 
     let snapshot = service.snapshot(record.id);
     expect(snapshot.runtime).toMatchObject({ startProtectionEnabled: true, startProtectionUsed: false });
-    let confirmation = service.createConfirmation(record.id, { kind: "manual-action", target: `${record.id}:start-protection:sr-1:true` });
+    let confirmation = service.createConfirmation(record.id, { kind: "manual-action", intent: "set-start-protection", target: `${record.id}:start-protection:sr-1:true` });
     expect(confirmation.effect).toMatchObject({
       title: "把 SR1 的起跑保护标记为已使用？",
       consequences: expect.arrayContaining(["本关后续掉线不再触发自动延时或作废尝试。"])
@@ -763,19 +866,19 @@ describe("CompetitionService dynamic participants", () => {
       action: { type: "set-start-protection", used: true, confirmationToken: confirmation.token, impactHash: confirmation.impactHash }
     });
     expect(service.snapshot(record.id).runtime.startProtectionUsed).toBe(true);
-    service.close();
+    await service.close();
 
     service = new CompetitionService(undefined, { database, dataRoot });
     snapshot = service.snapshot(record.id);
     expect(snapshot.runtime.startProtectionUsed).toBe(true);
-    confirmation = service.createConfirmation(record.id, { kind: "manual-action", target: `${record.id}:start-protection:sr-1:false` });
+    confirmation = service.createConfirmation(record.id, { kind: "manual-action", intent: "set-start-protection", target: `${record.id}:start-protection:sr-1:false` });
     await service.performAction(record.id, {
       expectedStateVersion: snapshot.competition.stateVersion,
       idempotencyKey: "reset-protection-unused",
       action: { type: "set-start-protection", used: false, confirmationToken: confirmation.token, impactHash: confirmation.impactHash }
     });
     expect(service.snapshot(record.id).runtime.startProtectionUsed).toBe(false);
-    service.close();
+    await service.close();
   });
 
   it("returns button-specific confirmation copy and rejects a token prepared for another action", async () => {
@@ -832,7 +935,82 @@ describe("CompetitionService dynamic participants", () => {
       title: "永久删除比赛“Specific confirmations”？",
       consequences: expect.arrayContaining(["已生成的归档文件会保留，但比赛无法从控制台恢复。"])
     });
-    service.close();
+    await service.close();
+  });
+
+  it("rejects generic or input-unbound confirmations for lifecycle and raw actions", async () => {
+    const service = new CompetitionService();
+    const record = service.create({ name: "Strict confirmation binding", mode: "work", idempotencyKey: "strict-confirmation-binding" });
+    service.publish(record.id, 0, "publish-strict-confirmation-binding");
+    const manager = workRuntimeManager(service);
+    const runtime = manager.makeRuntime(record.id, service.snapshot(record.id).config, { write: async () => undefined });
+    manager.register(record.id, runtime);
+    const expectedStateVersion = service.snapshot(record.id).competition.stateVersion;
+
+    for (const actionType of ["reconnect-work", "restart-work"] as const) {
+      const correctlyBound = service.createConfirmation(record.id, {
+        kind: "high-risk",
+        intent: actionType,
+        target: record.id
+      });
+      const generic = service.createConfirmation(record.id, {
+        kind: "high-risk",
+        target: correctlyBound.target
+      });
+      await expect(service.performAction(record.id, {
+        expectedStateVersion,
+        idempotencyKey: `generic-${actionType}`,
+        action: {
+          type: actionType,
+          confirmationToken: generic.token,
+          impactHash: generic.impactHash
+        }
+      })).rejects.toMatchObject({ code: "CONFIRMATION_INVALID", statusCode: 409 });
+    }
+
+    const genericRaw = service.createConfirmation(record.id, { kind: "high-risk", target: record.id });
+    await expect(service.performAction(record.id, {
+      expectedStateVersion,
+      idempotencyKey: "generic-raw-command",
+      action: {
+        type: "raw-command",
+        command: "scores",
+        confirmationToken: genericRaw.token,
+        impactHash: genericRaw.impactHash
+      }
+    })).rejects.toMatchObject({ code: "CONFIRMATION_INVALID", statusCode: 409 });
+
+    const inputUnboundRaw = service.createConfirmation(record.id, {
+      kind: "high-risk",
+      intent: "raw-command",
+      target: record.id
+    });
+    await expect(service.performAction(record.id, {
+      expectedStateVersion,
+      idempotencyKey: "input-unbound-raw-command",
+      action: {
+        type: "raw-command",
+        command: "scores",
+        confirmationToken: inputUnboundRaw.token,
+        impactHash: inputUnboundRaw.impactHash
+      }
+    })).rejects.toMatchObject({ code: "CONFIRMATION_INVALID", statusCode: 409 });
+
+    const genericManual = service.createConfirmation(record.id, {
+      kind: "manual-action",
+      target: record.id
+    });
+    await expect(service.performAction(record.id, {
+      expectedStateVersion,
+      idempotencyKey: "generic-ready-flow",
+      action: {
+        type: "start-ready-flow",
+        confirmationToken: genericManual.token,
+        impactHash: genericManual.impactHash
+      }
+    })).rejects.toMatchObject({ code: "CONFIRMATION_INVALID", statusCode: 409 });
+
+    await service.close();
   });
 
   it("binds start-protection confirmations to the current stage and persists work-mode changes immediately", async () => {
@@ -854,6 +1032,7 @@ describe("CompetitionService dynamic participants", () => {
     const snapshot = service.snapshot(record.id);
     const confirmation = service.createConfirmation(record.id, {
       kind: "manual-action",
+      intent: "set-start-protection",
       target: `${record.id}:start-protection:sr-1:true`
     });
     await service.performAction(record.id, {
@@ -864,10 +1043,10 @@ describe("CompetitionService dynamic participants", () => {
 
     const restoredRuntime = manager.makeRuntime(record.id, config, { write: async () => undefined });
     expect(restoredRuntime.controller.snapshot().startProtectionUsedStageIds).toEqual(["sr-1"]);
-    service.close();
+    await service.close();
   });
 
-  it("disables manual start-protection control when the published config opts out", () => {
+  it("disables manual start-protection control when the published config opts out", async () => {
     dataRoot = mkdtempSync(join(tmpdir(), "ballance-no-start-protection-"));
     database = openDatabase(join(dataRoot, "console.sqlite"));
     const service = new CompetitionService(undefined, { database, dataRoot });
@@ -884,7 +1063,7 @@ describe("CompetitionService dynamic participants", () => {
       kind: "manual-action",
       target: `${record.id}:start-protection:sr-1:true`
     })).toThrowError(/比赛配置未启用起跑保护/);
-    service.close();
+    await service.close();
   });
 
   it("closes timed-out stages without inventing DNF results or MockClient DNF lines", () => {
@@ -916,7 +1095,7 @@ describe("CompetitionService dynamic participants", () => {
     expect(service.snapshot(record.id).runtime.attentionItems.some((item) => item.id.startsWith("deadline:"))).toBe(false);
   });
 
-  it("models player Warning as deterministic behavior instead of a scenario fault", () => {
+  it("models player Warning as deterministic behavior instead of a scenario fault", async () => {
     const service = new CompetitionService();
     const record = service.create({ name: "Warning behavior", mode: "test", idempotencyKey: "warning-behavior" });
     service.publish(record.id, 0, "publish-warning-behavior");
@@ -930,7 +1109,7 @@ describe("CompetitionService dynamic participants", () => {
     expect(snapshot.currentScoreboard.some((entry) => entry.stages["sr-1"] && (entry.stages["sr-1"] as { status?: string }).status === "excluded")).toBe(true);
     expect(snapshot.runtime.incidents).toEqual([]);
     expect(snapshot.runtime.attentionItems).toContainEqual(expect.objectContaining({ title: "违规成绩已排除" }));
-    service.close();
+    await service.close();
   });
 
   it("keeps accepting post-threshold finishes before the next Ready starts", () => {
@@ -1134,7 +1313,7 @@ describe("CompetitionService dynamic participants", () => {
       expect(database.sqlite.prepare("SELECT status FROM command_audits WHERE id=?").get(original.id)).toMatchObject({ status: original.status });
     }
 
-    service.close();
+    await service.close();
     service = new CompetitionService(undefined, { database, dataRoot });
     expect(service.snapshot(record.id).runtime.unconfirmedCommands).toHaveLength(0);
     expect(service.snapshot(record.id).runtime.blockers.some((blocker) => blocker.code === "COMMAND_UNCONFIRMED")).toBe(false);
@@ -1157,7 +1336,8 @@ describe("CompetitionService dynamic participants", () => {
     });
     runtimeHolder.current = runtime;
     manager.register(record.id, runtime);
-    manager.ingestLine(runtime, "[07-04 10:00:00] 7: *ContestConsole     0ms");
+    establishAuthenticatedReferee(runtime);
+    runtime.runtime = { dispatch: async () => [] } as unknown as WorkRuntime["runtime"];
     const now = new Date().toISOString();
     const unresolved = {
       id: "old-uncertain-raw",
@@ -1176,7 +1356,7 @@ describe("CompetitionService dynamic participants", () => {
     expect(snapshot.runtime.availableActions).toContainEqual(expect.objectContaining({ action: "restart-stage", enabled: true }));
     const stageId = snapshot.runtime.currentStageId;
     if (!stageId) throw new Error("missing current stage");
-    const confirmation = service.createConfirmation(record.id, { kind: "restart-stage", target: stageId });
+    const confirmation = service.createConfirmation(record.id, { kind: "restart-stage", intent: "restart-stage", target: stageId });
     await service.performAction(record.id, {
       expectedStateVersion: snapshot.competition.stateVersion,
       idempotencyKey: "force-restart-with-unresolved-command",
@@ -1192,7 +1372,7 @@ describe("CompetitionService dynamic participants", () => {
     snapshot = service.snapshot(record.id);
     expect(snapshot.runtime.attempts).toEqual([]);
     expect(snapshot.runtime.attentionItems).toContainEqual(expect.objectContaining({ title: "已忽略旧发令周期的 Go 回显" }));
-    service.close();
+    await service.close();
   });
 
   it("rejects forcenextrestart at the real raw-command action boundary", async () => {
@@ -1208,7 +1388,12 @@ describe("CompetitionService dynamic participants", () => {
     );
     manager.register(record.id, runtime);
     const snapshot = service.snapshot(record.id);
-    const confirmation = service.createConfirmation(record.id, { kind: "high-risk", target: record.id });
+    const confirmation = service.createConfirmation(record.id, {
+      kind: "high-risk",
+      intent: "raw-command",
+      target: record.id,
+      command: "forcenextrestart"
+    });
 
     await expect(service.performAction(record.id, {
       expectedStateVersion: snapshot.competition.stateVersion,
@@ -1234,12 +1419,38 @@ describe("CompetitionService dynamic participants", () => {
     manager.register(record.id, runtime);
 
     expect(await runtime.commands.enqueue({ type: "list" }, "failed-read-only-list"))
-      .toMatchObject({ status: "failed" });
+      .toMatchObject({ status: "timed_out" });
     const snapshot = service.snapshot(record.id);
     expect(snapshot.runtime.unconfirmedCommands).toEqual([]);
     expect(snapshot.runtime.blockers.some((blocker) => blocker.code === "COMMAND_UNCONFIRMED")).toBe(false);
     expect(snapshot.runtime.attentionItems).toContainEqual(expect.objectContaining({ category: "command", severity: "warning" }));
-    service.close();
+    await service.close();
+  });
+
+  it("surfaces every rejected flow-changing stdin write for individual referee resolution", async () => {
+    const service = new CompetitionService();
+    const record = service.create({ name: "Rejected live writes", mode: "work", idempotencyKey: "rejected-live-writes" });
+    service.publish(record.id, 0, "publish-rejected-live-writes");
+    const manager = workRuntimeManager(service);
+    const runtime = manager.makeRuntime(record.id, service.snapshot(record.id).config, {
+      write: async () => { throw new Error("stdin callback rejected after write attempt"); }
+    });
+    manager.register(record.id, runtime);
+
+    const results = await Promise.all([
+      runtime.commands.enqueue({ type: "ready", map: "level 1", mode: "sr" }, "rejected-ready"),
+      runtime.commands.enqueue({ type: "cheat-off" }, "rejected-cheat-off"),
+      runtime.commands.enqueue({ type: "set-map", mapHash: "a".repeat(32), displayName: "Recovery_Map" }, "rejected-custom-map"),
+      runtime.commands.enqueue({ type: "set-official-map", level: 1, displayName: "Level_01" }, "rejected-official-map")
+    ]);
+    expect(results.map((result) => result.status)).toEqual(["uncertain", "uncertain", "uncertain", "uncertain"]);
+
+    const snapshot = service.snapshot(record.id);
+    expect(snapshot.runtime.unconfirmedCommands.map((command) => command.actionType)).toEqual(expect.arrayContaining([
+      "ready", "cheat-off", "set-map", "set-official-map"
+    ]));
+    expect(snapshot.runtime.blockers).toContainEqual(expect.objectContaining({ code: "COMMAND_UNCONFIRMED", severity: "critical" }));
+    await service.close();
   });
 
   it("writes a new audited command when a work-mode referee explicitly resends", async () => {
@@ -1286,6 +1497,62 @@ describe("CompetitionService dynamic participants", () => {
     expect(result).toMatchObject({ status: "acknowledged", command: "countdown level 1 sr 4" });
     expect(writes).toHaveLength(1);
     expect(runtime.controller.snapshot().actions.find((action) => action.id === ready!.id)?.status).toBe("acknowledged");
+  });
+
+  it("binds an idempotency key to one normalized action payload", async () => {
+    const service = new CompetitionService();
+    const record = service.create({ name: "Action identity", mode: "work", idempotencyKey: "action-identity" });
+    const firstInput = {
+      expectedStateVersion: record.stateVersion,
+      idempotencyKey: "one-action-only",
+      action: {
+        type: "player-alias-upsert" as const,
+        playerId: "Player One",
+        displayName: "Player One"
+      }
+    };
+
+    const first = await service.performAction(record.id, firstInput);
+    await expect(service.performAction(record.id, firstInput)).resolves.toEqual(first);
+    await expect(service.performAction(record.id, {
+      expectedStateVersion: service.snapshot(record.id).competition.stateVersion,
+      idempotencyKey: firstInput.idempotencyKey,
+      action: {
+        type: "player-alias-upsert",
+        playerId: "Player One",
+        displayName: "Changed Name"
+      }
+    })).rejects.toMatchObject({ code: "IDEMPOTENCY_CONFLICT", statusCode: 409 });
+    expect(service.journal.after(0)?.filter((event) =>
+      event.competitionId === record.id && event.type === "command.updated"
+    )).toHaveLength(1);
+    await service.close();
+  });
+
+  it("normalizes the server identity in lifecycle confirmation targets", async () => {
+    const service = new CompetitionService();
+    const record = service.create({ name: "Normalized lifecycle target", mode: "work", idempotencyKey: "normalized-lifecycle-target" });
+    service.publish(record.id, 0, "publish-normalized-server");
+    const manager = workRuntimeManager(service);
+    const runtime = manager.makeRuntime(record.id, service.snapshot(record.id).config, { write: async () => undefined });
+    manager.register(record.id, runtime);
+    runtime.server = " SAME.SERVER. ";
+
+    const first = service.createConfirmation(record.id, {
+      kind: "high-risk",
+      intent: "reconnect-work",
+      target: record.id
+    });
+    runtime.server = "same.server";
+    const second = service.createConfirmation(record.id, {
+      kind: "high-risk",
+      intent: "reconnect-work",
+      target: record.id
+    });
+
+    expect(first.target).toBe(second.target);
+    expect(first.target.startsWith("same.server ")).toBe(true);
+    await service.close();
   });
 
   it("allows multiple work competitions but blocks starting two on the same server", () => {

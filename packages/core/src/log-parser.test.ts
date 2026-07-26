@@ -21,6 +21,43 @@ describe("parseLogLine", () => {
       .toMatchObject({ type: "server-disconnected" });
   });
 
+  it("parses login rejection and authentication farewell codes with and without timestamps", () => {
+    const sameUsername = "The host hath bidden us farewell.  (1002: A player with the same username \"*ContestConsole\" already exists on this server.)";
+    const invalidClient = "The host hath bidden us farewell.  (2000: Invalid client)";
+
+    expect(parseLogLine("[07-18 20:51:14] Login denied.", context).event)
+      .toMatchObject({ type: "authentication-failed", message: "Login denied." });
+    expect(parseLogLine(`[07-18 20:51:14] ${sameUsername}`, context).event)
+      .toMatchObject({ type: "authentication-failed", code: 1002, message: sameUsername });
+    expect(parseLogLine(`[07-18 20:51:15] ${invalidClient}`, context).event)
+      .toMatchObject({ type: "authentication-failed", code: 2000, message: invalidClient });
+
+    const withoutPrefix = parseLogLine(sameUsername, { ...context, sourceId: "auth-without-prefix" });
+    expect(withoutPrefix.timestamp).toBe("1970-01-01T00:00:00.000Z");
+    expect(withoutPrefix.event).toMatchObject({
+      type: "authentication-failed",
+      code: 1002,
+      message: sameUsername,
+      sourceId: "auth-without-prefix",
+      rawLine: sameUsername
+    });
+    expect(parseLogLine("Login denied.", context).event)
+      .toMatchObject({ type: "authentication-failed", message: "Login denied." });
+    expect(parseLogLine(invalidClient, context).event)
+      .toMatchObject({ type: "authentication-failed", code: 2000, message: invalidClient });
+  });
+
+  it("does not misclassify ordinary connection loss as authentication failure", () => {
+    expect(parseLogLine("[07-03 09:53:51] The host hath bidden us farewell.  (5003: Connection dropped)", context).event)
+      .toMatchObject({ type: "server-disconnected" });
+    expect(parseLogLine("[07-02 20:32:50] Disconnected from server.", context).event)
+      .toMatchObject({ type: "server-disconnected" });
+    expect(parseLogLine("The host hath bidden us farewell.  (5003: Connection dropped)", context).event)
+      .toMatchObject({ type: "server-disconnected" });
+    expect(parseLogLine("Disconnected from server.", context).event)
+      .toMatchObject({ type: "server-disconnected" });
+  });
+
   it("parses the live official HS marker on Ready, countdown and Go", () => {
     expect(parseLogLine("[07-03 20:12:04] [3642659740, *ContestConsole]: Level 01 <HS> - Get ready", context).event)
       .toMatchObject({ type: "ready", level: 1, mode: "hs", refereeName: "*ContestConsole" });
