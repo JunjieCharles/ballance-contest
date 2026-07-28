@@ -282,12 +282,14 @@ export function App() {
   const [name, setName] = useState("小型比赛");
   const [mode, setMode] = useState<CompetitionMode>("work");
   const [message, setMessage] = useState("正在连接本机服务…");
+  const [draftSaving, setDraftSaving] = useState(false);
   const [realtimeConnected, setRealtimeConnected] = useState(false);
   const [rawLogs, setRawLogs] = useState<RawClientLogLine[]>([]);
   const [rawLogsMinimized, setRawLogsMinimized] = useState(false);
   const lastSequence = useRef(0);
   const snapshotRequestSequence = useRef(0);
   const selectedIdRef = useRef(selectedId);
+  const draftSaveInFlight = useRef(false);
   const canWrite = Boolean(session?.control && realtimeConnected);
 
   useEffect(() => { selectedIdRef.current = selectedId; }, [selectedId]);
@@ -432,13 +434,23 @@ export function App() {
     return created.id;
   }, "比赛已创建");
 
-  const saveDraft = (patch: Partial<CompetitionConfig>) => run(async () => {
-    if (!session || !snapshot) throw new Error("请选择比赛");
-    await request(`/api/v1/competitions/${snapshot.competition.id}/draft`, session, {
-      method: "PATCH",
-      body: JSON.stringify({ ...patch, expectedStateVersion: snapshot.competition.stateVersion, idempotencyKey: crypto.randomUUID() })
-    });
-  }, "草稿已保存");
+  const saveDraft = async (patch: Partial<CompetitionConfig>) => {
+    if (draftSaveInFlight.current) throw new Error("草稿正在保存，请等待当前修改落地后再继续");
+    draftSaveInFlight.current = true;
+    setDraftSaving(true);
+    try {
+      await run(async () => {
+        if (!session || !snapshot) throw new Error("请选择比赛");
+        await request(`/api/v1/competitions/${snapshot.competition.id}/draft`, session, {
+          method: "PATCH",
+          body: JSON.stringify({ ...patch, expectedStateVersion: snapshot.competition.stateVersion, idempotencyKey: crypto.randomUUID() })
+        });
+      }, "草稿已保存");
+    } finally {
+      draftSaveInFlight.current = false;
+      setDraftSaving(false);
+    }
+  };
 
   const publish = () => run(async () => {
     if (!session || !snapshot) throw new Error("请选择比赛");
@@ -609,7 +621,7 @@ export function App() {
             startWork={() => startWork()} enableAutomation={() => enableAutomation()} pauseAutomation={() => pauseAutomation()}
             performAction={(action) => performAction(action)} requestConfirmation={requestConfirmation} />}
           {activeTab === "config" && <ConfigPanel key={`${snapshot.competition.id}:${snapshot.competition.stateVersion}`} snapshot={snapshot} canWrite={canWrite}
-            saveDraft={(patch) => saveDraft(patch)} publish={() => publish()} />}
+            saving={draftSaving} saveDraft={(patch) => saveDraft(patch)} publish={() => publish()} />}
           {activeTab === "players" && <PlayersPanel snapshot={snapshot} canWrite={canWrite} performAction={(action) => performAction(action)} />}
           {activeTab === "scoreboard" && <ScoreboardPanel snapshot={snapshot} canWrite={canWrite} versionKey={scoreboardVersionKey}
             requestConfirmation={requestConfirmation} overrideScoreboard={overrideScoreboard} downloadExport={downloadExport} />}
@@ -651,6 +663,17 @@ function ConsolePanel({ snapshot, canWrite, versionKey, startWork, enableAutomat
       ? "当前 MockClient 正在完成地图注册；完成前不能重发真实命令"
       : `当前连接为${workConnection ? workConnectionStatusLabel[workConnection.status] : "未建立"}；完成服务器身份核验后才能重发真实命令`
     : undefined;
+  const stageBoundConfirmationActions = new Set<RefereeActionId>([
+    "start-ready-flow",
+    "ready",
+    "manual-go",
+    "delay-ready",
+    "extend-stage-deadline",
+    "reschedule",
+    "reschedule-stage-deadline",
+    "end-stage",
+    "restart-stage"
+  ]);
   const confirmedAction = (
     label: string,
     actionId: RefereeActionId,
@@ -663,15 +686,17 @@ function ConsolePanel({ snapshot, canWrite, versionKey, startWork, enableAutomat
     confirmationVersionKey = versionKey
   ) => {
     const availability = availabilityFor(runtime, actionId);
+    const targetStageId = stageBoundConfirmationActions.has(actionId) ? availability?.targetStageId : undefined;
+    const confirmationTarget = targetStageId ?? target;
     const confirmationPayload: Record<string, unknown> = {
       intent: actionId as ConfirmationIntent,
-      stageId: runtime.currentStageId,
+      stageId: targetStageId ?? runtime.currentStageId,
       ...(actionId === "delay-ready" || actionId === "extend-stage-deadline" ? { milliseconds: 60_000 } : {}),
       ...(actionId === "reschedule" ? { plannedReadyAt: utc8InputToIso(scheduleAt) } : {}),
       ...(actionId === "reschedule-stage-deadline" ? { deadlineAt: utc8InputToIso(scheduleAt) } : {}),
       ...(actionId === "raw-command" ? { command: rawCommand.trim() } : {})
     };
-    return <ConfirmButton key={`${label}:${target}:${confirmationVersionKey}`} label={label} kind={kind} target={target} versionKey={confirmationVersionKey} className={className}
+    return <ConfirmButton key={`${label}:${confirmationTarget}:${confirmationVersionKey}`} label={label} kind={kind} target={confirmationTarget} versionKey={confirmationVersionKey} className={className}
       disabled={!canWrite || !availability?.enabled || extraDisabled} disabledReason={!canWrite ? "实时连接或控制权不可用" : extraDisabled ? extraReason : availability?.disabledReason}
       requestPayload={confirmationPayload} requestConfirmation={requestConfirmation} onConfirm={(confirmation) => performAction(build(confirmation))} />;
   };
@@ -704,11 +729,11 @@ function ConsolePanel({ snapshot, canWrite, versionKey, startWork, enableAutomat
       <h3>流程控制</h3>
       <div className="button-row action-row">
         {confirmedAction("进入 Ready+发令流程", "start-ready-flow", "manual-action", snapshot.competition.id, (confirmation) => ({ type: "start-ready-flow", confirmationToken: confirmation.token, impactHash: confirmation.impactHash }))}
-        {confirmedAction("手动 Ready", "ready", "manual-action", snapshot.competition.id, () => ({ type: "ready" }))}
+        {confirmedAction("手动 Ready", "ready", "manual-action", snapshot.competition.id, (confirmation) => ({ type: "ready", confirmationToken: confirmation.token, impactHash: confirmation.impactHash }))}
         <ActionButton runtime={runtime} action="cheat-off" canWrite={canWrite} onClick={() => void performAction({ type: "cheat-off" })}>关闭 cheat</ActionButton>
         {confirmedAction("手动发令", "manual-go", "manual-go", snapshot.competition.id, (confirmation) => ({ type: "manual-go", confirmationToken: confirmation.token, impactHash: confirmation.impactHash }))}
         {confirmedAction("提前结束本关", "end-stage", "manual-action", snapshot.competition.id, (confirmation) => ({ type: "end-stage", confirmationToken: confirmation.token, impactHash: confirmation.impactHash }), "danger")}
-        {confirmedAction("重赛本关", "restart-stage", "restart-stage", runtime.currentStageId ?? snapshot.competition.id, (confirmation) => ({ type: "restart-stage", stageId: runtime.currentStageId ?? "", confirmationToken: confirmation.token, impactHash: confirmation.impactHash }), "danger")}
+        {confirmedAction("重赛本关", "restart-stage", "restart-stage", availabilityFor(runtime, "restart-stage")?.targetStageId ?? snapshot.competition.id, (confirmation) => ({ type: "restart-stage", stageId: availabilityFor(runtime, "restart-stage")?.targetStageId ?? "", confirmationToken: confirmation.token, impactHash: confirmation.impactHash }), "danger")}
         {confirmedAction(runtime.startProtectionUsed ? "将起跑保护重置为未使用" : "将起跑保护标记为已使用", "set-start-protection", "manual-action", `${snapshot.competition.id}:start-protection:${runtime.currentStageId}:${!runtime.startProtectionUsed}`, (confirmation) => ({ type: "set-start-protection", used: !runtime.startProtectionUsed, confirmationToken: confirmation.token, impactHash: confirmation.impactHash }), runtime.startProtectionUsed ? undefined : "danger", false, undefined, `${snapshot.competition.stateVersion}:${runtime.currentStageId}:${runtime.startProtectionUsed}`)}
       </div>
       <h3>相对延时</h3>
@@ -774,11 +799,11 @@ function ConsolePanel({ snapshot, canWrite, versionKey, startWork, enableAutomat
   </section>;
 }
 
-function ConfigPanel({ snapshot, canWrite, saveDraft, publish }: {
-  snapshot: CompetitionSnapshot; canWrite: boolean; saveDraft(patch: Partial<CompetitionConfig>): Promise<void>; publish(): Promise<void>;
+function ConfigPanel({ snapshot, canWrite, saving, saveDraft, publish }: {
+  snapshot: CompetitionSnapshot; canWrite: boolean; saving: boolean; saveDraft(patch: Partial<CompetitionConfig>): Promise<void>; publish(): Promise<void>;
 }) {
   const config = snapshot.config;
-  const editable = canWrite && snapshot.competition.status === "draft";
+  const editable = canWrite && snapshot.competition.status === "draft" && !saving;
   const [contestType, setContestType] = useState(config.scoring.contestType);
   const [startProtectionEnabled, setStartProtectionEnabled] = useState(config.flow.startProtectionEnabled);
   const [startProtectionSaving, setStartProtectionSaving] = useState(false);
@@ -1038,7 +1063,7 @@ function ScoreboardPanel({ snapshot, canWrite, versionKey, requestConfirmation, 
     }
   };
   return <section className="panel"><div className="panel-title-row"><h2>实时成绩</h2><div className="button-row compact"><button onClick={() => void copyScoreboard()}>复制表格</button><button onClick={() => void downloadExport("xlsx")}>XLSX</button><button onClick={() => void downloadExport("csv")}>CSV</button></div></div>
-    <p className="muted">当前关成绩由现场事件持续接收；进入下一关 Ready 后可修订此前关卡，比赛结束后可修订全部关卡。</p>
+    <p className="muted">当前关成绩由现场事件持续接收；进入下一关 Ready 前 1 分钟的准备阶段后可修订此前关卡，比赛结束后可修订全部关卡。</p>
     {copyMessage && <p className="copy-message" role="status">{copyMessage}</p>}
     {copyFallback && <label className="copy-fallback">手工复制表格<textarea aria-label="手工复制表格" readOnly value={copyFallback} onFocus={(event) => event.currentTarget.select()} /></label>}
     <table className="scoreboard"><thead><tr>{table.headers.map((header, index) => <th key={`${index}:${header}`}>{header}</th>)}</tr></thead><tbody>{table.rows.map((row) => {

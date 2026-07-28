@@ -44,6 +44,10 @@ export class RefereeActionService {
     confirmation?: { runtimeToken?: string }
   ): Promise<boolean> {
     const competition = this.host.getCompetition(competitionId);
+    if (competition.mode === "work") {
+      const runtime = this.host.workRuntimeManager.get(competitionId);
+      if (runtime) this.host.workRuntimeManager.synchronizeStageBoundary(runtime);
+    }
     const controller = (): CompetitionController => this.host.controllerFor(competitionId);
     switch (action.type) {
       case "reconnect-work": {
@@ -130,7 +134,11 @@ export class RefereeActionService {
         break;
       case "end-stage":
         controller().endStage("referee-ended-stage");
-        if (competition.mode === "work") this.host.workRuntimeManager.mirrorSystemResults(this.host.workRuntimeManager.get(competitionId) as WorkRuntime);
+        if (competition.mode === "work") {
+          const runtime = this.host.workRuntimeManager.get(competitionId) as WorkRuntime;
+          this.host.workRuntimeManager.mirrorSystemResults(runtime);
+          this.host.workRuntimeManager.mirrorClosedAttempts(runtime);
+        }
         break;
       case "restart-stage": {
         if (!confirmation?.runtimeToken) throw new ServiceError("CONFIRMATION_INVALID", "重赛确认缺少运行时凭据", 409);
@@ -202,11 +210,13 @@ export class RefereeActionService {
     } else {
       const runtime = this.host.workRuntimeManager.get(competitionId);
       if (runtime) {
+        this.host.workRuntimeManager.synchronizeStageBoundary(runtime);
         const lifecycleAction = action.type === "reconnect-work" || action.type === "restart-work";
         if (!lifecycleAction && this.host.workRuntimeManager.businessCommandsReady(runtime)) {
           await runtime.runtime.dispatch();
         }
-        this.host.completeCompetitionOnReview(competitionId, runtime.controller.snapshot());
+        const synchronized = this.host.workRuntimeManager.synchronizeStageBoundary(runtime);
+        this.host.completeCompetitionOnReview(competitionId, synchronized);
         this.host.workRuntimeManager.saveSnapshot(runtime);
       }
     }
@@ -230,8 +240,9 @@ export class RefereeActionService {
   public toCommandAction(competitionId: string, action: CompetitionAction): CommandAction {
     const runtime = this.host.workRuntimeManager.get(competitionId);
     const config = this.host.getPublishedConfig(competitionId) ?? this.host.getDraftConfig(competitionId);
-    const currentStageId = runtime?.controller.snapshot().currentStageId;
-    const stage = config.stages.find((candidate) => candidate.id === currentStageId) ?? config.stages[0];
+    const snapshot = runtime?.controller.snapshot();
+    const targetStageId = snapshot?.plannedReadyStageId ?? snapshot?.currentStageId;
+    const stage = config.stages.find((candidate) => candidate.id === targetStageId) ?? config.stages[0];
     if (!stage) throw new ServiceError("STATE_CONFLICT", "比赛没有可执行动作的轮次", 409);
     switch (action.type) {
       case "notification": return { type: "notification", channel: action.channel, text: action.text };

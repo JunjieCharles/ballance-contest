@@ -104,7 +104,7 @@ const workConnectionFixture = (
   ...(status === "recovering" ? {
     recoveryStep: "cooldown" as const,
     recoveryStartedAt: "2026-07-22T10:00:00.000Z",
-    cooldownUntil: "2026-07-22T10:00:30.000Z"
+    cooldownUntil: "2026-07-22T10:00:20.000Z"
   } : {}),
   recentServerEvidence: {
     kind: status === "blocked" ? "authentication-failed" : status === "healthy" ? "list-verified" : "connected",
@@ -206,6 +206,8 @@ test("edits per-stage scoring and replaces the stage draft through inline confir
   await page.getByLabel("第 1 名计分").fill("31");
   await page.getByRole("button", { name: "保存计分规则并覆盖单关配置" }).click();
   await expect(page.getByLabel("第 1 名计分")).toHaveValue("31");
+  await expect(page.locator(".stage-editor").first().getByLabel("单关计分"))
+    .toHaveValue("31,24,21,18,16,14,12,10,8,6,5,4,3,2,1");
 
   await page.getByRole("button", { name: "HS1–13 预设" }).click();
   const presetConfirmation = page.locator(".panel.wide .inline-confirm");
@@ -213,6 +215,10 @@ test("edits per-stage scoring and replaces the stage draft through inline confir
   await presetConfirmation.getByRole("button", { name: "确认" }).click();
   await expect(presetConfirmation).toHaveCount(0);
   await expect(page.locator(".stage-editor")).toHaveCount(13);
+  await expect(page.locator('.stage-editor[data-stage-id="hs-1"]')).toBeVisible();
+  const secondHsStage = page.locator('.stage-editor[data-stage-id="hs-2"]');
+  await expect(secondHsStage.getByLabel("第 2 关关卡模式")).toHaveValue("official-HS");
+  await expect(secondHsStage.getByLabel("关卡号")).toHaveValue("2");
 
   const firstStage = page.locator(".stage-editor").first();
   await firstStage.getByLabel("第 1 关关卡模式").selectOption("custom-HS");
@@ -387,6 +393,127 @@ test("renders every work connection state and invalidates lifecycle confirmation
   await expect(operatorPanel.getByRole("button", { name: "软重新连接", exact: true })).toHaveCount(0);
   await expect(operatorPanel.getByRole("button", { name: "重启 MockClient", exact: true })).toHaveCount(0);
   await expect(page.getByRole("region", { name: "工作模式连接状态" })).toContainText("尚未由本次 list 确认");
+});
+
+test("binds stage confirmations and submitted actions to the backend SR3 target", async ({ page }, testInfo) => {
+  await page.goto("/#token=e2e-bootstrap-token");
+  await expect(page.getByText(/已取得控制权|只读标签页/)).toBeVisible();
+  await acquireControl(page);
+  const name = `E2E 后端关卡目标 ${testInfo.project.name}`;
+  await createCompetition(page, name, "work");
+  await page.getByRole("button", { name: "发布比赛" }).click();
+  await expect(page.locator(".competition-list button.selected")).toContainText("published");
+  const fixture = await selectedCompetitionSnapshot(page, name);
+  const targetedActions = withWorkActionMatrix(fixture.snapshot.runtime.availableActions, "healthy")
+    .map((action): ActionAvailability => ["start-ready-flow", "ready", "manual-go"].includes(action.action)
+      ? { ...action, enabled: true, targetStageId: "sr-3" }
+      : action);
+  const mockedSnapshot: CompetitionSnapshot = {
+    ...structuredClone(fixture.snapshot),
+    runtime: {
+      ...structuredClone(fixture.snapshot.runtime),
+      phase: "tail-intake",
+      stateVersion: 73,
+      currentStageId: "sr-2",
+      plannedReadyStageId: "sr-3",
+      plannedReadyAtMs: 180_000,
+      workConnection: workConnectionFixture("healthy", 8, 52),
+      availableActions: targetedActions
+    }
+  };
+  const confirmationRequests: Array<{ intent?: string; target?: string; stageId?: string }> = [];
+  const submittedActions: Array<{ action: { type: string; confirmationToken?: string; impactHash?: string } }> = [];
+
+  await page.route(`**/api/v1/competitions/${fixture.competitionId}/snapshot`, async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ data: mockedSnapshot })
+    });
+  });
+  await page.route(`**/api/v1/competitions/${fixture.competitionId}/confirmations`, async (route) => {
+    const input = route.request().postDataJSON() as { kind: ConfirmationSummary["kind"]; intent?: string; target?: string; stageId?: string };
+    confirmationRequests.push(input);
+    const intent = input.intent ?? "unknown";
+    const title = intent === "start-ready-flow"
+      ? "进入 SR3 的 Ready+发令流程？"
+      : "发送一次 SR3 Ready？";
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        data: {
+          ...confirmationFixture(input, mockedSnapshot.competition.stateVersion),
+          token: `fixture-${intent}-${input.stageId}`,
+          runtimeStateVersion: mockedSnapshot.runtime.stateVersion,
+          impactHash: `fixture-hash-${intent}-${input.stageId}`,
+          effect: {
+            title,
+            target: "SR3",
+            currentPhase: mockedSnapshot.runtime.phase,
+            consequences: ["动作只对后端锁定的 SR3 生效。"],
+            irreversible: false
+          }
+        } satisfies ConfirmationSummary
+      })
+    });
+  });
+  await page.route(`**/api/v1/competitions/${fixture.competitionId}/actions`, async (route) => {
+    const input = route.request().postDataJSON() as { action: { type: string; confirmationToken?: string; impactHash?: string } };
+    submittedActions.push(input);
+    if (input.action.type === "ready") {
+      await route.fulfill({
+        status: 409,
+        contentType: "application/json",
+        body: JSON.stringify({ error: { code: "CONFIRMATION_STALE", message: "确认已失效：目标关已从 SR3 变更" } })
+      });
+      return;
+    }
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ data: {} }) });
+  });
+
+  await page.getByRole("button", { name: "控制台", exact: true }).click();
+  await page.locator(".competition-list button.selected").click();
+  await expect(page.getByText("关卡", { exact: true }).locator("..")).toContainText("SR2");
+
+  const readyFlowAction = page.locator(".confirm-action").filter({
+    has: page.getByRole("button", { name: "进入 Ready+发令流程" })
+  });
+  await readyFlowAction.getByRole("button", { name: "进入 Ready+发令流程" }).click();
+  await expect(readyFlowAction).toContainText("进入 SR3 的 Ready+发令流程？");
+  await expect(readyFlowAction).not.toContainText("进入 SR2 的 Ready+发令流程？");
+  expect(confirmationRequests.at(-1)).toMatchObject({
+    intent: "start-ready-flow",
+    target: "sr-3",
+    stageId: "sr-3"
+  });
+  await readyFlowAction.getByRole("button", { name: "确认" }).click();
+  await expect.poll(() => submittedActions.length).toBe(1);
+  expect(submittedActions[0]?.action).toMatchObject({
+    type: "start-ready-flow",
+    confirmationToken: "fixture-start-ready-flow-sr-3",
+    impactHash: "fixture-hash-start-ready-flow-sr-3"
+  });
+
+  const manualReadyAction = page.locator(".confirm-action").filter({
+    has: page.getByRole("button", { name: "手动 Ready" })
+  });
+  await manualReadyAction.getByRole("button", { name: "手动 Ready" }).click();
+  await expect(manualReadyAction).toContainText("发送一次 SR3 Ready？");
+  await expect(manualReadyAction).not.toContainText("发送一次 SR2 Ready？");
+  expect(confirmationRequests.at(-1)).toMatchObject({
+    intent: "ready",
+    target: "sr-3",
+    stageId: "sr-3"
+  });
+  await manualReadyAction.getByRole("button", { name: "确认" }).click();
+  await expect.poll(() => submittedActions.length).toBe(2);
+  expect(submittedActions[1]?.action).toMatchObject({
+    type: "ready",
+    confirmationToken: "fixture-ready-sr-3",
+    impactHash: "fixture-hash-ready-sr-3"
+  });
+  await expect(page.locator("header")).toContainText("确认已失效：目标关已从 SR3 变更");
 });
 
 test("disables connection-bound resends while keeping local command disposition available", async ({ page }, testInfo) => {
@@ -658,7 +785,7 @@ test("keeps a scrolled raw log in place, follows at the bottom, and resizes the 
   expect(after?.height).toBeLessThan(before.height);
 });
 
-test("restarts the current stage and unlocks its score review only after the next Ready", async ({ page }, testInfo) => {
+test("restarts the current stage and unlocks its score review after the next T-60 preparation boundary", async ({ page }, testInfo) => {
   await page.goto("/#token=e2e-bootstrap-token");
   await expect(page.getByText(/已取得控制权|只读标签页/)).toBeVisible();
   await acquireControl(page);
@@ -677,7 +804,7 @@ test("restarts the current stage and unlocks its score review only after the nex
   await page.getByRole("button", { name: "成绩", exact: true }).click();
   const firstStageCell = page.locator(".scoreboard tbody tr").first().locator("td").nth(4).getByRole("button");
   await expect(firstStageCell).toBeDisabled();
-  await expect(firstStageCell).toHaveAttribute("title", /进入下一关 Ready 后才能修订/);
+  await expect(firstStageCell).toHaveAttribute("title", /进入下一关 Ready 前 1 分钟的准备阶段后才能修订/);
   expect((await page.locator(".scoreboard tbody tr td:nth-child(5) .cell-button").allTextContents()).some((value) => value.trim().startsWith("#"))).toBe(true);
 
   await page.getByRole("button", { name: "控制台", exact: true }).click();

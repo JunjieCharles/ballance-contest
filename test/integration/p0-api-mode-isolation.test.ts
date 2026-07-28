@@ -231,11 +231,22 @@ describe("P0 API mode isolation and test run regression", () => {
       payload: { scenarioId: "independent-player-sandbox" }
     });
     const manualRunId = manualRun.json<{ data: { runId: string } }>().data.runId;
+    const readyConfirmationResponse = await app.inject({
+      method: "POST",
+      url: `/api/v1/competitions/${manualCompetitionId}/confirmations`,
+      headers: auth(token),
+      payload: { kind: "manual-action", intent: "ready", target: manualCompetitionId }
+    });
+    const readyConfirmation = readyConfirmationResponse.json<{ data: { token: string; impactHash: string } }>().data;
     const ready = await app.inject({
       method: "POST",
       url: `/api/v1/competitions/${manualCompetitionId}/actions`,
       headers: auth(token),
-      payload: { expectedStateVersion: 1, idempotencyKey: "manual-ready", action: { type: "ready" } }
+      payload: {
+        expectedStateVersion: 1,
+        idempotencyKey: "manual-ready",
+        action: { type: "ready", confirmationToken: readyConfirmation.token, impactHash: readyConfirmation.impactHash }
+      }
     });
     expect(ready.statusCode).toBe(200);
     const cheatOff = await app.inject({

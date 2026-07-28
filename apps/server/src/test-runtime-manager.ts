@@ -355,9 +355,18 @@ export class TestRuntimeManager {
     for (const runId of this.realtimeTimers.keys()) this.stopRealtime(runId);
   }
 
-  private makeRuntime(competitionId: string, definition: ScenarioDefinition, id: string = randomUUID(), createdAt: string = new Date().toISOString()): TestRuntime {
+  private makeRuntime(
+    competitionId: string,
+    definition: ScenarioDefinition,
+    id: string = randomUUID(),
+    createdAt: string = new Date().toISOString(),
+    persisted?: Pick<
+      PersistedTestRun,
+      "automation" | "engine" | "pendingCountdown" | "appliedFaultIds" | "stageFinishOrdinals" | "phaseStartedAt" | "recoveries"
+    >
+  ): TestRuntime {
     const config = this.host.getDraftConfig(competitionId);
-    const automationClock = new VirtualClock(0);
+    const automationClock = new VirtualClock(persisted?.automation?.clockNowMs ?? 0);
     const automation = new CompetitionController({
       competitionId,
       participants: definition.players.map((player) => player.id),
@@ -370,22 +379,30 @@ export class TestRuntimeManager {
         minimumScoringPlace: stage.minimumScoringPlace
       })),
       policy: automationPolicyFor(config),
-      wallClockOriginMs: Date.parse(createdAt)
+      wallClockOriginMs: Date.parse(createdAt),
+      ...(persisted?.automation === undefined
+        ? {}
+        : { initialSnapshot: persisted.automation, restoreParticipantState: true })
     }, automationClock);
+    const engine = new CompetitionEngine(definition);
+    if (persisted?.engine) engine.restore(persisted.engine);
     const runtime: TestRuntime = {
       id, competitionId, definition,
       runner: new ScenarioRunner(definition),
-      engine: new CompetitionEngine(definition),
+      engine,
       automationClock,
       automation,
       automationRuntime: new TestAutomationRuntime(automation),
       playedEvents: 0,
       operations: [],
       clockAdvanceCanCoalesce: false,
-      appliedFaultIds: new Set(),
-      stageFinishOrdinals: new Map(),
-      phaseStartedAt: new Map(),
-      recoveries: [],
+      ...(persisted?.pendingCountdown === undefined
+        ? {}
+        : { pendingCountdown: { action: { ...persisted.pendingCountdown.action }, emitted: persisted.pendingCountdown.emitted } }),
+      appliedFaultIds: new Set(persisted?.appliedFaultIds ?? []),
+      stageFinishOrdinals: new Map(Object.entries(persisted?.stageFinishOrdinals ?? {})),
+      phaseStartedAt: new Map(Object.entries(persisted?.phaseStartedAt ?? {})),
+      recoveries: (persisted?.recoveries ?? []).map((recovery) => ({ ...recovery })),
       createdAt,
       updatedAt: createdAt
     };
@@ -399,27 +416,38 @@ export class TestRuntimeManager {
   }
 
   private restoreRuntime(competitionId: string, persisted: PersistedTestRun): TestRuntime {
-    const runtime = this.makeRuntime(competitionId, persisted.definition, persisted.id, persisted.createdAt);
-    this.connectPlayers(runtime, false);
-    for (let index = 0; index < persisted.playedEvents; index += 1) {
-      const event = runtime.runner.next();
-      if (event) this.applyTestEvent(runtime, event, false, false);
-    }
-    for (const operation of persisted.operations) {
-      if (operation.kind === "automation-start") runtime.automation.enable(runtime.automationClock.now() + (operation.readyInMs ?? 0));
-      else if (operation.kind === "advance-clock") {
-        this.advanceClock(runtime, operation.milliseconds ?? 0);
-        continue;
-      } else if (operation.kind === "fault" && operation.fault) {
-        this.applyFault(runtime, {
-          fault: operation.fault,
-          ...(operation.playerId === undefined ? {} : { playerId: operation.playerId }),
-          ...(operation.milliseconds === undefined ? {} : { milliseconds: operation.milliseconds })
-        });
-      } else if (operation.kind === "start-protection") {
-        runtime.automation.setStartProtectionUsed(operation.used ?? false);
+    const hasSnapshot = persisted.automation !== undefined && persisted.engine !== undefined;
+    const runtime = this.makeRuntime(
+      competitionId,
+      persisted.definition,
+      persisted.id,
+      persisted.createdAt,
+      hasSnapshot ? persisted : undefined
+    );
+    if (hasSnapshot) {
+      for (let index = 0; index < persisted.playedEvents; index += 1) runtime.runner.next();
+    } else {
+      this.connectPlayers(runtime, false);
+      for (let index = 0; index < persisted.playedEvents; index += 1) {
+        const event = runtime.runner.next();
+        if (event) this.applyTestEvent(runtime, event, false, false);
       }
-      this.settleAutomation(runtime);
+      for (const operation of persisted.operations) {
+        if (operation.kind === "automation-start") runtime.automation.enable(runtime.automationClock.now() + (operation.readyInMs ?? 0));
+        else if (operation.kind === "advance-clock") {
+          this.advanceClock(runtime, operation.milliseconds ?? 0);
+          continue;
+        } else if (operation.kind === "fault" && operation.fault) {
+          this.applyFault(runtime, {
+            fault: operation.fault,
+            ...(operation.playerId === undefined ? {} : { playerId: operation.playerId }),
+            ...(operation.milliseconds === undefined ? {} : { milliseconds: operation.milliseconds })
+          });
+        } else if (operation.kind === "start-protection") {
+          runtime.automation.setStartProtectionUsed(operation.used ?? false);
+        }
+        this.settleAutomation(runtime);
+      }
     }
     runtime.operations = [...persisted.operations];
     runtime.playedEvents = persisted.playedEvents;
@@ -456,6 +484,15 @@ export class TestRuntimeManager {
       definition: runtime.definition,
       playedEvents: runtime.playedEvents,
       operations: runtime.operations,
+      automation: runtime.automation.snapshot(),
+      engine: runtime.engine.snapshot(),
+      ...(runtime.pendingCountdown === undefined
+        ? {}
+        : { pendingCountdown: { action: { ...runtime.pendingCountdown.action }, emitted: runtime.pendingCountdown.emitted } }),
+      appliedFaultIds: [...runtime.appliedFaultIds],
+      stageFinishOrdinals: Object.fromEntries(runtime.stageFinishOrdinals),
+      phaseStartedAt: Object.fromEntries(runtime.phaseStartedAt),
+      recoveries: runtime.recoveries.map((recovery) => ({ ...recovery })),
       createdAt: runtime.createdAt,
       updatedAt: runtime.updatedAt
     };
@@ -525,6 +562,9 @@ export class TestRuntimeManager {
   }
 
   private drivePlayers(runtime: TestRuntime): void {
+    if (runtime.definition.kind === "scripted-replay") return;
+    runtime.automation.synchronizeStageBoundary();
+    this.mirrorClosedAttempts(runtime);
     const snapshot = runtime.automation.snapshot();
     if (snapshot.phase !== "running" && snapshot.phase !== "tail-intake") return;
     const stageId = snapshot.currentStageId;
@@ -539,19 +579,7 @@ export class TestRuntimeManager {
       const sourceId = `agent:${runtime.id}:${attempt.id}:${player.id}`;
       if (plan.kind === "disrupt") {
         const warning = seededBehaviorRandom(runtime.definition.randomSeed ?? 1, stageId, attempt.attemptNumber, player.id, "disrupt-kind") < 0.5;
-        if (warning) {
-          this.applyTestEvent(runtime, {
-            atMs: plan.dueAtMs,
-            sourceId: `${sourceId}:warning`,
-            type: "warning",
-            playerId: player.id,
-            message: "just pressed the Reset hotkey"
-          }, false, true, false);
-        } else {
-          this.applyTestEvent(runtime, { atMs: plan.dueAtMs, sourceId: `${sourceId}:cheat`, type: "cheat", playerId: player.id, enabled: true }, false, true, false);
-          this.applyTestEvent(runtime, { atMs: plan.dueAtMs, sourceId: `${sourceId}:cheat-off`, type: "cheat", playerId: player.id, enabled: false }, false, true, false);
-        }
-        this.applyTestEvent(runtime, {
+        const finishEvent: ScenarioEvent = {
           atMs: plan.dueAtMs,
           sourceId,
           type: "finish",
@@ -559,7 +587,22 @@ export class TestRuntimeManager {
           playerId: player.id,
           elapsedMs: Math.max(1_000, plan.dueAtMs - attempt.goAtMs),
           score: 3_000 + Math.floor(seededBehaviorRandom(runtime.definition.randomSeed ?? 1, stageId, attempt.attemptNumber, player.id, "disrupt-score") * 1_000)
-        }, false, true, false);
+        };
+        if (warning) {
+          this.applyTestEventsAtomically(runtime, [{
+            atMs: plan.dueAtMs,
+            sourceId: `${sourceId}:warning`,
+            type: "warning",
+            playerId: player.id,
+            message: "just pressed the Reset hotkey"
+          }, finishEvent]);
+        } else {
+          this.applyTestEventsAtomically(runtime, [
+            { atMs: plan.dueAtMs, sourceId: `${sourceId}:cheat`, type: "cheat", playerId: player.id, enabled: true },
+            { atMs: plan.dueAtMs, sourceId: `${sourceId}:cheat-off`, type: "cheat", playerId: player.id, enabled: false },
+            finishEvent
+          ]);
+        }
         continue;
       }
       if (plan.kind === "dnf") {
@@ -616,8 +659,77 @@ export class TestRuntimeManager {
   }
 
   private applyTestEvent(runtime: TestRuntime, event: ScenarioEvent, countEvent: boolean, writeLog = true, settleAutomation = true): void {
-    runtime.engine.apply(event);
-    this.applyAutomationEvent(runtime, event, settleAutomation);
+    if (event.atMs > runtime.automationClock.now()) {
+      runtime.automationClock.advanceBy(event.atMs - runtime.automationClock.now());
+    }
+    runtime.automation.synchronizeStageBoundary();
+    this.mirrorClosedAttempts(runtime);
+    this.applyTestEventEffects(runtime, event, settleAutomation);
+    this.recordTestEvent(runtime, event, countEvent, writeLog);
+  }
+
+  private applyTestEventsAtomically(runtime: TestRuntime, events: readonly ScenarioEvent[]): void {
+    const first = events[0];
+    if (!first) return;
+    if (events.some((event) => event.atMs !== first.atMs)) throw new Error("ATOMIC_TEST_EVENTS_MUST_SHARE_TIME");
+    if (first.atMs > runtime.automationClock.now()) {
+      runtime.automationClock.advanceBy(first.atMs - runtime.automationClock.now());
+    }
+    const receiptAtMs = runtime.automationClock.now();
+    runtime.automation.synchronizeStageBoundary();
+    this.mirrorClosedAttempts(runtime);
+    const atomicAttempt = runtime.automation.snapshot().attempts.findLast((attempt) =>
+      attempt.stageId === runtime.automation.snapshot().currentStageId
+      && attempt.intakeOpen
+      && !attempt.voided);
+    // Warning/[CHEAT] evidence and its finish describe one receipt. Bind the finish
+    // to the exact attempt captured before the batch; a later standalone finish must
+    // still pass the normal intake and deadline gates.
+    for (const event of events) {
+      if (event.type === "finish" && atomicAttempt) {
+        const excluded = runtime.automation.snapshot().attempts
+          .find((attempt) => attempt.id === atomicAttempt.id)?.results
+          .find((result) =>
+            result.playerId === event.playerId
+            && result.status === "excluded"
+            && result.receivedAtMs === receiptAtMs);
+        if (excluded) {
+          const accepted = runtime.automation.recordExcludedFinishEvidence({
+            attemptId: atomicAttempt.id,
+            stageId: atomicAttempt.stageId,
+            playerId: event.playerId,
+            exclusionSourceId: excluded.sourceId,
+            finishSourceId: event.sourceId,
+            receivedAtMs: receiptAtMs
+          }) === "accepted";
+          if (accepted) runtime.engine.apply(event);
+        } else {
+          this.applyTestEventEffects(runtime, event, false);
+        }
+      } else {
+        this.applyTestEventEffects(runtime, event, false);
+      }
+      this.recordTestEvent(runtime, event, false, true);
+    }
+  }
+
+  private applyTestEventEffects(runtime: TestRuntime, event: ScenarioEvent, settleAutomation: boolean): void {
+    const controlledAttempt = event.type === "finish" || event.type === "dnf"
+      ? runtime.automation.snapshot().attempts.findLast((attempt) =>
+        attempt.stageId === event.stageId && !attempt.voided)
+      : undefined;
+    if ((event.type === "finish" || event.type === "dnf")
+      && (runtime.definition.kind === "player-behavior" || controlledAttempt !== undefined)) {
+      const accepted = this.applyAutomationEvent(runtime, event, false);
+      if (accepted) runtime.engine.apply(event);
+      if (settleAutomation) this.settleAutomation(runtime);
+    } else {
+      runtime.engine.apply(event);
+      this.applyAutomationEvent(runtime, event, settleAutomation);
+    }
+  }
+
+  private recordTestEvent(runtime: TestRuntime, event: ScenarioEvent, countEvent: boolean, writeLog: boolean): void {
     if (countEvent) runtime.playedEvents += 1;
     if (writeLog) {
       const source = event.type === "ready" || event.type === "go" ? "test-referee" : "test-player";
@@ -640,6 +752,7 @@ export class TestRuntimeManager {
         Object.values(entry.stages).flatMap((result) => [result.sourceId, ...(result.finishSourceId ? [result.finishSourceId] : [])])));
       runtime.automation.tick();
       this.mirrorDeadlineResults(runtime, knownResultSources);
+      this.mirrorClosedAttempts(runtime);
       const actions = runtime.automationRuntime.dispatch(true);
       for (const action of actions) {
         if (action.kind === "go") {
@@ -659,10 +772,29 @@ export class TestRuntimeManager {
   private advancePendingCountdown(runtime: TestRuntime): void {
     const pending = runtime.pendingCountdown;
     if (!pending) return;
+    const automation = runtime.automation.snapshot();
+    const action = automation.actions.find((candidate) => candidate.id === pending.action.id);
+    const effectivePhase = (automation.phase === "paused" || automation.phase === "incident") && automation.pausedFromPhase
+      ? automation.pausedFromPhase
+      : automation.phase;
+    const currentPendingGo = [...automation.actions].reverse().find((candidate) =>
+      candidate.kind === "go"
+      && candidate.status === "pending"
+      && candidate.stageId === automation.currentStageId);
+    const activeCycle = action?.kind === "go"
+      && action.status === "pending"
+      && action.stageId === automation.currentStageId
+      && currentPendingGo?.id === action.id
+      && effectivePhase === "countdown"
+      && !automation.attempts.some((attempt) => attempt.stageId === action.stageId && !attempt.voided);
+    if (!activeCycle || !action) {
+      delete runtime.pendingCountdown;
+      return;
+    }
     const dueAtMs = pending.action.createdAtMs + pending.emitted * 1_000;
     if (runtime.automationClock.now() < dueAtMs) return;
     const prefix = this.testLogPrefix(runtime, dueAtMs);
-    const stage = runtime.definition.stages.find((candidate) => candidate.id === pending.action.stageId);
+    const stage = runtime.definition.stages.find((candidate) => candidate.id === action.stageId);
     const mapEcho = this.testStageEcho(stage, true);
     const referee = runtime.definition.refereeConnectionId;
     if (pending.emitted < 3) {
@@ -674,15 +806,22 @@ export class TestRuntimeManager {
     }
     const event: ScenarioEvent = {
       atMs: dueAtMs,
-      sourceId: `automation-go:${pending.action.id}`,
+      sourceId: `automation-go:${action.id}`,
       type: "go",
-      stageId: pending.action.stageId,
+      stageId: action.stageId,
       refereeConnectionId: referee
     };
+    runtime.automation.acknowledgeAction(action.id, "acknowledged");
+    const after = runtime.automation.snapshot();
+    const acknowledged = after.actions.find((candidate) => candidate.id === action.id)?.status === "acknowledged";
+    const attemptCreated = after.attempts.some((attempt) => attempt.stageId === action.stageId && !attempt.voided);
+    if (!acknowledged || !attemptCreated) {
+      delete runtime.pendingCountdown;
+      return;
+    }
     runtime.engine.apply(event);
-    runtime.automation.acknowledgeAction(pending.action.id, "acknowledged");
     this.host.appendRawLog(runtime.competitionId, "test-referee", this.testEventLogLine(runtime, event), this.testOccurredAt(runtime, dueAtMs));
-    this.host.recordAutomationAttention(runtime.competitionId, pending.action);
+    this.host.recordAutomationAttention(runtime.competitionId, action);
     delete runtime.pendingCountdown;
   }
 
@@ -722,6 +861,19 @@ export class TestRuntimeManager {
         candidate.stageId === attempt.stageId && candidate.attemptNumber === attempt.attemptNumber && !candidate.voided);
       if (!engineAttempt) continue;
       runtime.engine.voidAttempt(attempt.stageId, attempt.attemptNumber, `start-protection:${attempt.id}`);
+    }
+  }
+
+  private mirrorClosedAttempts(runtime: TestRuntime): void {
+    const engineAttempts = runtime.engine.snapshot().attempts;
+    for (const attempt of runtime.automation.snapshot().attempts) {
+      if (attempt.intakeOpen || attempt.voided) continue;
+      const engineAttempt = engineAttempts.find((candidate) =>
+        candidate.stageId === attempt.stageId
+        && candidate.attemptNumber === attempt.attemptNumber
+        && candidate.open
+        && !candidate.voided);
+      if (engineAttempt) runtime.engine.closeAttempt(attempt.stageId, attempt.attemptNumber);
     }
   }
 
@@ -820,51 +972,92 @@ export class TestRuntimeManager {
     }
   }
 
-  private applyAutomationEvent(runtime: TestRuntime, event: ScenarioDefinition["events"][number], settleAutomation = true): void {
-    if (event.atMs > runtime.automationClock.now()) runtime.automationClock.advanceBy(event.atMs - runtime.automationClock.now());
+  private applyAutomationEvent(runtime: TestRuntime, event: ScenarioDefinition["events"][number], settleAutomation = true): boolean {
+    let accepted = true;
     switch (event.type) {
       case "login": runtime.automation.observeConnection(event.playerId, true); break;
       case "disconnect": runtime.automation.observeConnection(event.playerId, false); break;
       case "cheat": {
+        const before = runtime.automation.snapshot();
+        const targetAttempt = [...before.attempts].reverse().find((attempt) =>
+          attempt.stageId === before.currentStageId && attempt.intakeOpen && !attempt.voided);
         runtime.automation.observeCheat(event.playerId, event.enabled, event.sourceId);
-        if (event.enabled) {
-          const stageId = runtime.automation.snapshot().currentStageId;
-          const phase = runtime.automation.snapshot().phase;
-          if (stageId && (phase === "running" || phase === "tail-intake")) {
+        if (event.enabled && targetAttempt) {
+          const snapshot = runtime.automation.snapshot();
+          const stageId = targetAttempt.stageId;
+          const excluded = snapshot.attempts.some((attempt) =>
+            attempt.stageId === targetAttempt.stageId
+            && attempt.attemptNumber === targetAttempt.attemptNumber
+            && attempt.results.some((result) =>
+              result.playerId === event.playerId && result.status === "excluded" && result.sourceId === event.sourceId));
+          if (excluded) {
+            const versionCount = runtime.engine.snapshot().scoreboardVersions.length;
             runtime.engine.apply({ atMs: runtime.automationClock.now(), sourceId: `${event.sourceId}:excluded`, type: "exclude", stageId, playerId: event.playerId, reason: "cheat-enabled" });
-            this.host.appendAttention(runtime.competitionId, {
-              id: `excluded:${event.sourceId}`,
-              category: "result",
-              severity: "warning",
-              title: "违规成绩已排除",
-              message: `${event.playerId} 在本关开启 cheat；后续完赛日志仍保留，但不参与计分。`,
-              occurredAt: this.testOccurredAt(runtime, runtime.automationClock.now()),
-              stageId,
-              participantIds: [event.playerId]
-            });
+            if (runtime.engine.snapshot().scoreboardVersions.length > versionCount) {
+              this.host.appendAttention(runtime.competitionId, {
+                id: `excluded:${event.sourceId}`,
+                category: "result",
+                severity: "warning",
+                title: "违规成绩已排除",
+                message: `${event.playerId} 在本关开启 cheat；后续完赛日志仍保留，但不参与计分。`,
+                occurredAt: this.testOccurredAt(runtime, runtime.automationClock.now()),
+                stageId,
+                participantIds: [event.playerId]
+              });
+            }
           }
         }
         break;
       }
-      case "finish": runtime.automation.recordResult({ stageId: event.stageId, playerId: event.playerId, status: "finished", sourceId: event.sourceId, receivedAtMs: runtime.automationClock.now() }); break;
-      case "dnf": runtime.automation.recordResult({ stageId: event.stageId, playerId: event.playerId, status: "dnf", sourceId: event.sourceId, reason: event.reason, receivedAtMs: runtime.automationClock.now() }); break;
+      case "finish":
+        accepted = runtime.automation.recordResult({
+          stageId: event.stageId,
+          playerId: event.playerId,
+          status: "finished",
+          sourceId: event.sourceId,
+          receivedAtMs: runtime.automationClock.now()
+        }) === "accepted";
+        break;
+      case "dnf":
+        accepted = runtime.automation.recordResult({
+          stageId: event.stageId,
+          playerId: event.playerId,
+          status: "dnf",
+          sourceId: event.sourceId,
+          reason: event.reason,
+          receivedAtMs: runtime.automationClock.now()
+        }) === "accepted";
+        break;
       case "exclude": runtime.automation.observeViolation(event.playerId, event.sourceId, event.reason); break;
       case "warning": {
-        const stageId = runtime.automation.snapshot().currentStageId;
-        if (event.playerId && stageId) {
+        const before = runtime.automation.snapshot();
+        const targetAttempt = [...before.attempts].reverse().find((attempt) =>
+          attempt.stageId === before.currentStageId && attempt.intakeOpen && !attempt.voided);
+        if (event.playerId && targetAttempt) {
+          const stageId = targetAttempt.stageId;
           const sourceId = `${event.sourceId}:excluded`;
           runtime.automation.observeViolation(event.playerId, sourceId, event.message);
-          runtime.engine.apply({ atMs: runtime.automationClock.now(), sourceId, type: "exclude", stageId, playerId: event.playerId, reason: event.message });
-          this.host.appendAttention(runtime.competitionId, {
-            id: `excluded:${sourceId}`,
-            category: "result",
-            severity: "warning",
-            title: "违规成绩已排除",
-            message: `${event.playerId} 触发 Warning；后续完赛日志仍保留，但不参与计分。`,
-            occurredAt: this.testOccurredAt(runtime, runtime.automationClock.now()),
-            stageId,
-            participantIds: [event.playerId]
-          });
+          const excluded = runtime.automation.snapshot().attempts.some((attempt) =>
+            attempt.stageId === targetAttempt.stageId
+            && attempt.attemptNumber === targetAttempt.attemptNumber
+            && attempt.results.some((result) =>
+              result.playerId === event.playerId && result.status === "excluded" && result.sourceId === sourceId));
+          if (excluded) {
+            const versionCount = runtime.engine.snapshot().scoreboardVersions.length;
+            runtime.engine.apply({ atMs: runtime.automationClock.now(), sourceId, type: "exclude", stageId, playerId: event.playerId, reason: event.message });
+            if (runtime.engine.snapshot().scoreboardVersions.length > versionCount) {
+              this.host.appendAttention(runtime.competitionId, {
+                id: `excluded:${sourceId}`,
+                category: "result",
+                severity: "warning",
+                title: "违规成绩已排除",
+                message: `${event.playerId} 触发 Warning；后续完赛日志仍保留，但不参与计分。`,
+                occurredAt: this.testOccurredAt(runtime, runtime.automationClock.now()),
+                stageId,
+                participantIds: [event.playerId]
+              });
+            }
+          }
         }
         break;
       }
@@ -872,6 +1065,7 @@ export class TestRuntimeManager {
       default: break;
     }
     if (settleAutomation) this.settleAutomation(runtime);
+    return accepted;
   }
 
   private applyFault(runtime: TestRuntime, input: { fault: string; playerId?: string; milliseconds?: number; recoverAfterMs?: number; message?: string }): void {

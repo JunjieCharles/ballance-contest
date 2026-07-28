@@ -271,35 +271,301 @@ describe("CompetitionController", () => {
     expect(controller.snapshot().actions.filter((item) => item.kind === "bulletin")).toHaveLength(1);
   });
 
-  it("runs the normal flow and closes tail intake atomically at the next actual Ready", () => {
+  it("enters the next stage and closes old intake at the T-60 preparation boundary", () => {
     const clock = new FakeClock();
-    const controller = new CompetitionController(configuration(), clock);
+    const controller = new CompetitionController(configuration({
+      stages: [
+        { id: "s1", map: "1", displayName: "第一关", mode: "sr", timeLimitMs: 200_000, minimumScoringPlace: 3 },
+        { id: "s2", map: "2", displayName: "第二关", mode: "hs", timeLimitMs: 20_000, minimumScoringPlace: 3 }
+      ],
+      policy: {
+        announcementLeadMs: 0,
+        readyBufferMs: 1_000,
+        reconnectStableMs: 15_000,
+        intermissionMs: 120_000,
+        protectionWindowMs: 15_000
+      }
+    }), clock);
     connectAll(controller);
     enterRunning(controller, clock);
 
     for (const playerId of ["p1", "p2", "p3"]) {
       expect(controller.recordResult({ stageId: "s1", playerId, status: "finished", sourceId: `finish-${playerId}` })).toBe("accepted");
     }
-    expect(controller.snapshot()).toMatchObject({ phase: "tail-intake", plannedReadyAtMs: 33_000, plannedReadyStageId: "s2" });
-    expect(controller.snapshot().actions.at(-1)?.message).toBe("第二关 将在 08:00 发令");
+    expect(controller.snapshot()).toMatchObject({ phase: "tail-intake", plannedReadyAtMs: 150_000, plannedReadyStageId: "s2" });
+    expect(controller.snapshot().actions.at(-1)?.message).toBe("第二关 将在 08:02 发令");
     controller.manualReady();
     const tailManualReady = action(controller, "ready");
     expect(tailManualReady).toMatchObject({ stageId: "s2", manual: true });
-    expect(controller.snapshot()).toMatchObject({ phase: "tail-intake", currentStageId: "s1", plannedReadyAtMs: 33_000 });
+    expect(controller.snapshot()).toMatchObject({ phase: "tail-intake", currentStageId: "s1", plannedReadyAtMs: 150_000 });
     controller.acknowledgeAction(tailManualReady.id, "acknowledged");
 
-    clock.set(32_999);
+    clock.set(89_999);
     expect(controller.recordResult({ stageId: "s1", playerId: "p4", status: "finished", sourceId: "finish-p4" })).toBe("accepted");
-    clock.set(33_000);
+    clock.set(90_000);
     controller.tick();
 
     const snapshot = controller.snapshot();
-    expect(snapshot.phase).toBe("ready");
+    expect(snapshot.phase).toBe("preparing");
     expect(snapshot.currentStageId).toBe("s2");
-    expect(snapshot.attempts[0]).toMatchObject({ stageId: "s1", intakeOpen: false, intakeClosedAtMs: 33_000 });
+    expect(snapshot).toMatchObject({ plannedReadyAtMs: 150_000, plannedReadyStageId: "s2" });
+    expect(snapshot.attempts[0]).toMatchObject({ stageId: "s1", intakeOpen: false, intakeClosedAtMs: 90_000 });
     expect(snapshot.attempts[0]?.results.some((result) => result.playerId === "p5")).toBe(false);
     expect(controller.recordResult({ stageId: "s1", playerId: "p5", status: "finished", sourceId: "finish-p5" })).toBe("intake-closed");
     expect(controller.snapshot().rejectedResults.at(-1)?.reason).toBe("intake-closed");
+    controller.observeAuthoritativeGo("s1");
+    expect(controller.snapshot()).toMatchObject({
+      currentStageId: "s2",
+      attempts: [{ stageId: "s1", attemptNumber: 1, intakeOpen: false }]
+    });
+    expect(controller.snapshot().attempts).toHaveLength(1);
+    clock.set(149_999);
+    controller.tick();
+    expect(controller.snapshot().phase).toBe("preparing");
+    clock.set(150_000);
+    controller.tick();
+    expect(controller.snapshot()).toMatchObject({ phase: "ready", currentStageId: "s2" });
+  });
+
+  it("attaches finish evidence to an exclusion only while that exact attempt is still open", () => {
+    const makeController = (): { controller: CompetitionController; clock: FakeClock } => {
+      const clock = new FakeClock();
+      const controller = new CompetitionController(configuration({
+        stages: [
+          { id: "s1", map: "1", mode: "sr", timeLimitMs: 200_000, minimumScoringPlace: 3 },
+          { id: "s2", map: "2", mode: "hs", timeLimitMs: 20_000, minimumScoringPlace: 3 }
+        ],
+        policy: {
+          announcementLeadMs: 0,
+          readyBufferMs: 1_000,
+          reconnectStableMs: 15_000,
+          intermissionMs: 120_000,
+          protectionWindowMs: 15_000
+        }
+      }), clock);
+      connectAll(controller);
+      enterRunning(controller, clock);
+      return { controller, clock };
+    };
+
+    const current = makeController();
+    current.controller.observeViolation("p1", "warning-p1", "warning");
+    expect(current.controller.recordResult({
+      stageId: "s1",
+      playerId: "p1",
+      status: "finished",
+      sourceId: "finish-p1"
+    })).toBe("accepted");
+    expect(current.controller.snapshot().attempts[0]?.results[0]).toMatchObject({
+      playerId: "p1",
+      status: "excluded",
+      sourceId: "warning-p1",
+      finishSourceId: "finish-p1"
+    });
+
+    const stale = makeController();
+    stale.controller.observeViolation("p1", "warning-late", "warning");
+    for (const playerId of ["p2", "p3", "p4"]) {
+      stale.controller.recordResult({ stageId: "s1", playerId, status: "finished", sourceId: `finish-${playerId}` });
+    }
+    stale.clock.set(90_000);
+    stale.controller.synchronizeStageBoundary();
+    expect(stale.controller.snapshot()).toMatchObject({ currentStageId: "s2", phase: "preparing" });
+
+    expect(stale.controller.recordResult({
+      stageId: "s1",
+      playerId: "p1",
+      status: "finished",
+      sourceId: "late-finish-p1",
+      receivedAtMs: 90_000
+    })).toBe("intake-closed");
+    const excluded = stale.controller.snapshot().attempts[0]?.results.find((result) => result.playerId === "p1");
+    expect(excluded).toMatchObject({ status: "excluded", sourceId: "warning-late" });
+    expect(excluded?.finishSourceId).toBeUndefined();
+    expect(stale.controller.snapshot().rejectedResults.at(-1)).toMatchObject({
+      sourceId: "late-finish-p1",
+      reason: "intake-closed"
+    });
+  });
+
+  it("allows one explicitly bound same-receipt finish to complete an exclusion across an immediate boundary", () => {
+    const clock = new FakeClock();
+    const controller = new CompetitionController(configuration({
+      participants: ["p1"],
+      stages: [
+        { id: "s1", map: "1", mode: "sr", timeLimitMs: 200_000, minimumScoringPlace: 1 },
+        { id: "s2", map: "2", mode: "hs", timeLimitMs: 20_000, minimumScoringPlace: 1 }
+      ],
+      policy: {
+        announcementLeadMs: 0,
+        readyBufferMs: 1_000,
+        reconnectStableMs: 15_000,
+        intermissionMs: 30_000,
+        protectionWindowMs: 15_000
+      }
+    }), clock);
+    connectAll(controller, ["p1"]);
+    enterRunning(controller, clock);
+    const attempt = controller.snapshot().attempts[0];
+    if (!attempt) throw new Error("missing attempt");
+
+    controller.observeViolation("p1", "warning-p1", "warning");
+    expect(controller.snapshot()).toMatchObject({
+      currentStageId: "s2",
+      phase: "preparing",
+      attempts: [{ id: attempt.id, intakeOpen: false, intakeClosedAtMs: 30_000 }]
+    });
+    expect(controller.recordExcludedFinishEvidence({
+      attemptId: attempt.id,
+      stageId: "s1",
+      playerId: "p1",
+      exclusionSourceId: "warning-p1",
+      finishSourceId: "finish-p1",
+      receivedAtMs: 30_000
+    })).toBe("accepted");
+    expect(controller.snapshot().attempts[0]?.results[0]).toMatchObject({
+      status: "excluded",
+      sourceId: "warning-p1",
+      finishSourceId: "finish-p1"
+    });
+  });
+
+  it("keeps snapshots read-only and settles a missed T-60 boundary through the explicit runtime entrypoint", () => {
+    const clock = new FakeClock();
+    const controller = new CompetitionController(configuration({
+      stages: [
+        { id: "s1", map: "1", mode: "sr", timeLimitMs: 200_000, minimumScoringPlace: 3 },
+        { id: "s2", map: "2", mode: "hs", timeLimitMs: 20_000, minimumScoringPlace: 3 }
+      ],
+      policy: {
+        announcementLeadMs: 0,
+        readyBufferMs: 1_000,
+        reconnectStableMs: 15_000,
+        intermissionMs: 120_000,
+        protectionWindowMs: 15_000
+      }
+    }), clock);
+    connectAll(controller);
+    enterRunning(controller, clock);
+    for (const playerId of ["p1", "p2", "p3"]) {
+      controller.recordResult({ stageId: "s1", playerId, status: "finished", sourceId: playerId });
+    }
+
+    clock.set(120_000);
+    const before = controller.snapshot();
+    expect(before).toMatchObject({ currentStageId: "s1", phase: "tail-intake", stateVersion: before.stateVersion });
+    expect(controller.snapshot()).toEqual(before);
+
+    controller.synchronizeStageBoundary();
+    expect(controller.snapshot()).toMatchObject({
+      currentStageId: "s2",
+      phase: "preparing",
+      attempts: [{ stageId: "s1", intakeOpen: false, intakeClosedAtMs: 90_000 }]
+    });
+  });
+
+  it("settles deadline and T-60 in chronological order after a large clock jump", () => {
+    const makeController = (timeLimitMs: number): { controller: CompetitionController; clock: FakeClock } => {
+      const clock = new FakeClock();
+      const controller = new CompetitionController(configuration({
+        stages: [
+          { id: "s1", map: "1", mode: "sr", timeLimitMs, minimumScoringPlace: 3 },
+          { id: "s2", map: "2", mode: "hs", timeLimitMs: 20_000, minimumScoringPlace: 3 }
+        ],
+        policy: {
+          announcementLeadMs: 0,
+          readyBufferMs: 1_000,
+          reconnectStableMs: 15_000,
+          intermissionMs: 120_000,
+          protectionWindowMs: 15_000
+        }
+      }), clock);
+      connectAll(controller);
+      enterRunning(controller, clock);
+      for (const playerId of ["p1", "p2", "p3"]) {
+        controller.recordResult({ stageId: "s1", playerId, status: "finished", sourceId: playerId });
+      }
+      return { controller, clock };
+    };
+
+    const boundaryFirst = makeController(200_000);
+    boundaryFirst.clock.set(250_000);
+    boundaryFirst.controller.synchronizeStageBoundary();
+    expect(boundaryFirst.controller.snapshot().attempts[0]).toMatchObject({
+      intakeOpen: false,
+      intakeClosedAtMs: 90_000
+    });
+    expect(boundaryFirst.controller.snapshot().actions.some((item) =>
+      item.kind === "announce" && item.message?.includes("比赛时间已到"))).toBe(false);
+
+    const deadlineFirst = makeController(50_000);
+    deadlineFirst.clock.set(100_000);
+    deadlineFirst.controller.synchronizeStageBoundary();
+    expect(deadlineFirst.controller.snapshot()).toMatchObject({
+      currentStageId: "s2",
+      phase: "preparing",
+      attempts: [{ intakeOpen: false, intakeClosedAtMs: 80_000 }]
+    });
+    expect(deadlineFirst.controller.snapshot().actions).toContainEqual(
+      expect.objectContaining({ kind: "announce", stageId: "s1", message: expect.stringContaining("比赛时间已到") })
+    );
+  });
+
+  it("preserves a next-stage cheat-off confirmation and reopened-cheat evidence through T-60 and Ready", () => {
+    const clock = new FakeClock();
+    const controller = new CompetitionController(configuration({
+      stages: [
+        { id: "s1", map: "1", mode: "sr", timeLimitMs: 200_000, minimumScoringPlace: 3 },
+        { id: "s2", map: "2", mode: "hs", timeLimitMs: 20_000, minimumScoringPlace: 3 }
+      ],
+      policy: {
+        announcementLeadMs: 0,
+        readyBufferMs: 1_000,
+        reconnectStableMs: 15_000,
+        intermissionMs: 120_000,
+        protectionWindowMs: 15_000
+      }
+    }), clock);
+    connectAll(controller);
+    enterRunning(controller, clock);
+    for (const playerId of ["p1", "p2", "p3"]) {
+      controller.recordResult({ stageId: "s1", playerId, status: "finished", sourceId: playerId });
+    }
+    for (const pending of controller.drainActions()) controller.acknowledgeAction(pending.id, "acknowledged");
+    controller.manualCheatOff();
+    controller.acknowledgeAction(action(controller, "cheat-off").id, "acknowledged");
+    controller.observeCheat("p4", true, "p4-reopened-cheat");
+
+    clock.set(90_000);
+    controller.tick();
+    for (const pending of controller.drainActions()) controller.acknowledgeAction(pending.id, "acknowledged");
+    expect(controller.snapshot()).toMatchObject({
+      phase: "preparing",
+      currentStageId: "s2",
+      lastCheatOffAcknowledgedAtMs: 30_000
+    });
+
+    clock.set(150_000);
+    controller.tick();
+    for (const pending of controller.drainActions()) controller.acknowledgeAction(pending.id, "acknowledged");
+    expect(controller.snapshot()).toMatchObject({
+      phase: "ready",
+      currentStageId: "s2",
+      lastCheatOffAcknowledgedAtMs: 30_000
+    });
+    controller.requestManualGo();
+    controller.acknowledgeAction(action(controller, "go").id, "acknowledged");
+    expect(controller.snapshot()).toMatchObject({
+      phase: "running",
+      attempts: [
+        expect.objectContaining({ stageId: "s1", intakeOpen: false }),
+        expect.objectContaining({
+          stageId: "s2",
+          intakeOpen: true,
+          results: [expect.objectContaining({ playerId: "p4", status: "excluded", reason: "cheat-enabled" })]
+        })
+      ]
+    });
   });
 
   it("keeps the original deadline when ending a stage early and replans only the next Ready", () => {
@@ -310,7 +576,7 @@ describe("CompetitionController", () => {
     const deadlineAtMs = controller.snapshot().attempts[0]?.deadlineAtMs;
     controller.endStage("referee-ended-stage");
     const snapshot = controller.snapshot();
-    expect(snapshot).toMatchObject({ phase: "tail-intake", plannedReadyAtMs: 33_000, plannedReadyStageId: "s2" });
+    expect(snapshot).toMatchObject({ phase: "preparing", currentStageId: "s2", plannedReadyAtMs: 33_000, plannedReadyStageId: "s2" });
     expect(snapshot.attempts[0]).toMatchObject({ intakeOpen: false, deadlineAtMs });
     expect(snapshot.actions.at(-1)).toMatchObject({ kind: "bulletin", stageId: "s2", message: "第二关 将在 08:00 发令" });
   });
@@ -329,12 +595,33 @@ describe("CompetitionController", () => {
     controller.tick();
     const snapshot = controller.snapshot();
     expect(snapshot.automationEnabled).toBe(false);
-    expect(snapshot.phase).toBe("tail-intake");
+    expect(snapshot).toMatchObject({ phase: "paused", pausedFromPhase: "preparing", currentStageId: "s2" });
     expect(snapshot.attempts[0]?.results).toHaveLength(1);
     expect(snapshot.attempts[0]?.results.some((result) => result.reason === "time-limit")).toBe(false);
 
     controller.enable();
-    expect(controller.snapshot()).toMatchObject({ phase: "tail-intake", automationEnabled: true });
+    expect(controller.snapshot()).toMatchObject({ phase: "preparing", automationEnabled: true, currentStageId: "s2" });
+  });
+
+  it("blocks old-stage launch actions while paused from running but still allows ending the open stage", () => {
+    const clock = new FakeClock();
+    const controller = new CompetitionController(configuration(), clock);
+    connectAll(controller);
+    enterRunning(controller, clock);
+    controller.pause();
+
+    expect(() => controller.startReadyFlow()).toThrow("READY_FLOW_NOT_AVAILABLE");
+    expect(() => controller.manualReady()).toThrow("READY_NOT_AVAILABLE");
+    expect(() => controller.requestManualGo()).toThrow("MANUAL_GO_NOT_AVAILABLE");
+
+    controller.endStage("referee-ended-stage");
+    expect(controller.snapshot()).toMatchObject({
+      phase: "paused",
+      pausedFromPhase: "preparing",
+      currentStageId: "s2",
+      plannedReadyStageId: "s2",
+      attempts: [{ stageId: "s1", intakeOpen: false }]
+    });
   });
 
   it("lets a referee resolve each unconfirmed action before resuming the previous phase", () => {
@@ -354,7 +641,7 @@ describe("CompetitionController", () => {
     expect(controller.snapshot().actions.find((candidate) => candidate.id === ready.id)?.status).toBe("referee-confirmed");
   });
 
-  it("keeps the old intake open while a critical command blocks the next Ready, but never beyond its deadline", () => {
+  it("closes old intake immediately when a plan starts inside T-60 even while a critical command keeps automation paused", () => {
     const clock = new FakeClock();
     const controller = new CompetitionController(configuration({
       stages: [
@@ -369,12 +656,17 @@ describe("CompetitionController", () => {
     controller.acknowledgeAction(action(controller, "ready").id, "uncertain");
     clock.set(46_000);
     controller.tick();
-    expect(controller.snapshot()).toMatchObject({ phase: "paused", pausedFromPhase: "tail-intake", attempts: [{ intakeOpen: true }] });
-    expect(controller.recordResult({ stageId: "s1", playerId: "p4", status: "finished", sourceId: "p4" })).toBe("accepted");
+    expect(controller.snapshot()).toMatchObject({
+      phase: "paused",
+      pausedFromPhase: "preparing",
+      currentStageId: "s2",
+      attempts: [{ intakeOpen: false, intakeClosedAtMs: 30_000 }]
+    });
+    expect(controller.recordResult({ stageId: "s1", playerId: "p4", status: "finished", sourceId: "p4" })).toBe("intake-closed");
 
     clock.set(80_000);
     controller.tick();
-    expect(controller.snapshot().attempts[0]).toMatchObject({ intakeOpen: false, intakeClosedAtMs: 80_000 });
+    expect(controller.snapshot().attempts[0]).toMatchObject({ intakeOpen: false, intakeClosedAtMs: 30_000 });
     expect(controller.snapshot().attempts[0]?.results.some((result) => result.playerId === "p5")).toBe(false);
   });
 

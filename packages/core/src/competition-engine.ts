@@ -273,6 +273,12 @@ export class CompetitionEngine {
     this.createScoreboardVersion(stageId, sourceId);
   }
 
+  public closeAttempt(stageId: string, attemptNumber: number): void {
+    const attempt = this.attempts.find((candidate) =>
+      candidate.stageId === stageId && candidate.attemptNumber === attemptNumber && !candidate.voided);
+    if (attempt) attempt.open = false;
+  }
+
   private buildScoreboard(excludeStageId?: string): readonly ScoreboardEntry[] {
     const aggregate = [...this.playerNames].map(([playerId, displayName]) => ({
       playerId,

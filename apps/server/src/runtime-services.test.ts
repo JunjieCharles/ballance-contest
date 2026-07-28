@@ -15,11 +15,11 @@ describe("extracted runtime services", () => {
     const service = new ScoreboardService();
     expect(service.editPermissions(stages, "published", "s2")).toEqual([
       { stageId: "s1", editable: true },
-      { stageId: "s2", editable: false, reason: expect.stringContaining("下一关 Ready") }
+      { stageId: "s2", editable: false, reason: "当前关仍由自动或现场成绩接收；进入下一关 Ready 前 1 分钟的准备阶段后才能修订" }
     ]);
     expect(service.editPermissions(stages, "finished", "s1").every((permission) => permission.editable)).toBe(true);
     expect(() => service.assertEditAllowed(service.editPermissions(stages, "published", "s1"), "s1"))
-      .toThrowError(/下一关 Ready/);
+      .toThrowError(/进入下一关 Ready 前 1 分钟的准备阶段后才能修订/);
   });
 
   it("keeps in-memory logs and attention isolated by competition", () => {

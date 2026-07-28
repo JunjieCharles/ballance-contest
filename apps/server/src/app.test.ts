@@ -149,10 +149,74 @@ describe("local API", () => {
     expect((await act(3, { type: "reschedule", plannedReadyAt: readyTarget }, "reschedule-ready")).statusCode).toBe(200);
     expect((await act(4, { type: "reschedule-stage-deadline", deadlineAt: deadlineTarget }, "reschedule-deadline")).statusCode).toBe(200);
     const afterResponse = await app.inject({ method: "GET", url: `/api/v1/competitions/${competitionId}/snapshot`, headers: auth(token) });
-    const after = afterResponse.json<{ data: { runtime: { plannedReadyAt: string; stageDeadlineAt: string; attentionItems: Array<{ title: string }> } } }>().data.runtime;
+    const after = afterResponse.json<{
+      data: {
+        runtime: {
+          plannedReadyAt: string;
+          plannedReadyAtMs: number;
+          plannedReadyStageId: string;
+          stageDeadlineAt: string;
+          virtualNowMs: number;
+          attentionItems: Array<{ title: string }>;
+        };
+      };
+    }>().data.runtime;
     expect(after.plannedReadyAt).toBe(readyTarget);
     expect(after.stageDeadlineAt).toBe(deadlineTarget);
     expect(after.attentionItems.some((item) => item.title === "赛程计划已更新")).toBe(true);
+    await app.close();
+    app = await buildApp({ bootstrapToken: "bootstrap", serveStatic: false, dataRoot });
+    const restoredSession = await app.inject({
+      method: "POST",
+      url: "/api/v1/sessions/bootstrap",
+      payload: { bootstrapToken: "bootstrap", tabId: "tab-scheduling-restored" }
+    });
+    token = restoredSession.json<{ token: string }>().token;
+    const restoredResponse = await app.inject({
+      method: "GET",
+      url: `/api/v1/competitions/${competitionId}/snapshot`,
+      headers: auth(token)
+    });
+    const restored = restoredResponse.json<{
+      data: {
+        runtime: {
+          phase: string;
+          pausedFromPhase?: string;
+          currentStageId: string;
+          plannedReadyAt: string;
+          plannedReadyAtMs: number;
+          plannedReadyStageId: string;
+          stageDeadlineAt: string;
+          virtualNowMs: number;
+        };
+      };
+    }>().data.runtime;
+    expect(restored).toMatchObject({
+      phase: "paused",
+      pausedFromPhase: "tail-intake",
+      currentStageId: "s1",
+      plannedReadyAt: readyTarget,
+      plannedReadyAtMs: after.plannedReadyAtMs,
+      plannedReadyStageId: after.plannedReadyStageId,
+      stageDeadlineAt: deadlineTarget,
+      virtualNowMs: after.virtualNowMs
+    });
+
+    const toBoundaryMs = restored.plannedReadyAtMs - 60_000 - restored.virtualNowMs;
+    expect(toBoundaryMs).toBeGreaterThanOrEqual(0);
+    const crossed = await app.inject({
+      method: "POST",
+      url: `/api/v1/competitions/${competitionId}/test-runs/${runId}/automation/advance`,
+      headers: auth(token),
+      payload: { milliseconds: toBoundaryMs }
+    });
+    expect(crossed.json()).toMatchObject({
+      data: {
+        phase: "paused",
+        pausedFromPhase: "preparing",
+        currentStageId: after.plannedReadyStageId
+      }
+    });
   });
 
   it("separates the scheduled launch flow from manual Ready, cheat-off and authoritative manual Go timing", async () => {
@@ -162,7 +226,7 @@ describe("local API", () => {
     const run = await app.inject({ method: "POST", url: `/api/v1/competitions/${competitionId}/test-runs/from-scenario`, headers: auth(token), payload: { scenarioId: "normal-player-roster" } });
     const runId = run.json<{ data: { runId: string } }>().data.runId;
 
-    const confirm = async (kind: "manual-action" | "manual-go", intent: "start-ready-flow" | "manual-go") => (await app.inject({
+    const confirm = async (kind: "manual-action" | "manual-go", intent: "start-ready-flow" | "ready" | "manual-go") => (await app.inject({
       method: "POST", url: `/api/v1/competitions/${competitionId}/confirmations`, headers: auth(token), payload: { kind, intent, target: competitionId }
     })).json<{ data: { token: string; impactHash: string } }>().data;
     const flowConfirmation = await confirm("manual-action", "start-ready-flow");
@@ -180,9 +244,14 @@ describe("local API", () => {
     expect(logsAfterFlow).toContainEqual(expect.stringMatching(/\[Bulletin\].*SR1 将在 \d{2}:\d{2} 发令$/));
     expect(logsAfterFlow).toContainEqual(expect.stringContaining("SR1 即将在 1 分钟后发令，请提前做好重启游戏等准备，避免影响发令流程。"));
 
+    const readyConfirmation = await confirm("manual-action", "ready");
     expect((await app.inject({
       method: "POST", url: `/api/v1/competitions/${competitionId}/actions`, headers: auth(token),
-      payload: { expectedStateVersion: 2, idempotencyKey: "manual-ready", action: { type: "ready" } }
+      payload: {
+        expectedStateVersion: 2,
+        idempotencyKey: "manual-ready",
+        action: { type: "ready", confirmationToken: readyConfirmation.token, impactHash: readyConfirmation.impactHash }
+      }
     })).statusCode).toBe(200);
     snapshot = (await app.inject({ method: "GET", url: `/api/v1/competitions/${competitionId}/snapshot`, headers: auth(token) })).json<{ data: SnapshotData }>().data;
     expect(snapshot.runtime).toMatchObject({ phase: "preparing", plannedReadyAt: originalReadyAt, attempts: [] });
@@ -210,7 +279,7 @@ describe("local API", () => {
     expect(Date.parse(snapshot.runtime.stageDeadlineAt as string) - Date.parse(snapshot.runtime.plannedStageStartAt as string)).toBe(snapshot.config.stages[0]?.timeLimitMs);
   });
 
-  it("allows score review only after the next stage starts and for every stage after finish", async () => {
+  it("allows score review from the next stage T-60 boundary and for every stage after finish", async () => {
     const scenario = JSON.parse(readFileSync(resolve("test/fixtures/scenarios/three-stage-main/scenario.json"), "utf8")) as Record<string, unknown>;
     const stages = (scenario.stages as Array<{ id: string; order: number; level: number; mode: "SR" | "HS"; timeLimitMs: number; scoring: number[]; minimumScoringPlace: number }>).map((stage) => ({ ...stage, label: `${stage.mode} ${stage.level}` }));
     const created = await app.inject({ method: "POST", url: "/api/v1/competitions", headers: auth(token), payload: { name: "Score gates", mode: "test", idempotencyKey: "score-gates" } });
@@ -229,7 +298,12 @@ describe("local API", () => {
       payload: { kind: "scoreboard-override", intent: "scoreboard-set-place", target: "p1:s1", playerId: "p1", stageId: "s1", operation: "set-place", place: 1, rankPolicy: "shift" }
     });
     expect(denied).toMatchObject({ statusCode: 409 });
-    expect(denied.json()).toMatchObject({ error: { code: "ACTION_UNAVAILABLE", message: expect.stringContaining("下一关 Ready") } });
+    expect(denied.json()).toMatchObject({
+      error: {
+        code: "ACTION_UNAVAILABLE",
+        message: expect.stringContaining("进入下一关 Ready 前 1 分钟的准备阶段后才能修订")
+      }
+    });
 
     await app.inject({ method: "POST", url: `/api/v1/competitions/${competitionId}/test-runs/${runId}/automation/advance`, headers: auth(token), payload: { milliseconds: 180_000 } });
     const nextStage = await app.inject({ method: "GET", url: `/api/v1/competitions/${competitionId}/snapshot`, headers: auth(token) });

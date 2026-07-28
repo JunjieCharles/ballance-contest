@@ -68,6 +68,7 @@ export interface WorkRuntime {
   mapRegistration?: { processGeneration: number; connectionGeneration: number; promise: Promise<void> };
   mapRegistrationAttemptedProcessGeneration?: number;
   registeredMapsProcessGeneration?: number;
+  participantStageId: string;
   connection: WorkConnectionView;
   connectionAttempt?: ConnectionAttempt;
   authenticationDelayTimer?: ReturnType<typeof setTimeout>;
@@ -353,10 +354,12 @@ export class WorkRuntimeManager {
             ...(persistedConnection?.refereeConnectionId === undefined ? {} : { refereeConnectionId: persistedConnection.refereeConnectionId })
           },
       mapEchoPrefixes: new Map(Object.entries(this.host.getPayload(competitionId).work?.mapEchoPrefixes ?? {})),
+      participantStageId: this.host.getPayload(competitionId).work?.participantStageId ?? controller.snapshot().currentStageId,
       ...(persistedConnection?.refereeConnectionId === undefined ? {} : { lastRefereeConnectionId: persistedConnection.refereeConnectionId }),
       ...(mockClientVersion === undefined ? {} : { mockClientVersion }),
       ...(transport instanceof ManagedMockClient ? { client: transport } : {})
     };
+    this.mirrorClosedAttempts(runtime);
     return runtime;
   }
 
@@ -699,6 +702,7 @@ export class WorkRuntimeManager {
       runtime.controller.tick();
       this.mirrorSystemResults(runtime);
       this.mirrorVoidedAttempts(runtime);
+      this.mirrorClosedAttempts(runtime);
       const records = this.businessCommandsReady(runtime) ? await runtime.runtime.dispatch() : [];
       const snapshot = runtime.controller.snapshot();
       this.host.completeCompetitionOnReview(runtime.competitionId, snapshot);
@@ -847,17 +851,91 @@ export class WorkRuntimeManager {
   }
 
   public saveSnapshot(runtime: WorkRuntime): void {
+    const settled = this.settleStageBoundary(runtime);
+    this.persistSnapshot(runtime, settled.after);
+    if (settled.controllerChanged) this.recordStageBoundary(runtime, settled.before, settled.after);
+  }
+
+  private persistSnapshot(runtime: WorkRuntime, automation: AutomationSnapshot): void {
+    this.synchronizeParticipantStageStatuses(runtime, automation.currentStageId);
     const payload = this.host.getPayload(runtime.competitionId);
     this.host.savePayload(runtime.competitionId, {
       ...payload,
       work: {
         started: true,
         ...(runtime.mockClientVersion === undefined ? {} : { mockClientVersion: runtime.mockClientVersion }),
-        automation: runtime.controller.snapshot(),
+        participantStageId: runtime.participantStageId,
+        automation,
         engine: runtime.engine.snapshot(),
         mapEchoPrefixes: Object.fromEntries(runtime.mapEchoPrefixes),
         connection: runtime.connection
       }
+    });
+  }
+
+  public synchronizeStageBoundary(runtime: WorkRuntime): AutomationSnapshot {
+    const settled = this.settleStageBoundary(runtime);
+    if (settled.controllerChanged || settled.engineChanged) {
+      this.persistSnapshot(runtime, settled.after);
+    }
+    if (settled.controllerChanged) this.recordStageBoundary(runtime, settled.before, settled.after);
+    return settled.after;
+  }
+
+  private settleStageBoundary(runtime: WorkRuntime): {
+    before: AutomationSnapshot;
+    after: AutomationSnapshot;
+    controllerChanged: boolean;
+    engineChanged: boolean;
+  } {
+    const before = runtime.controller.snapshot();
+    runtime.controller.synchronizeStageBoundary();
+    const engineChanged = this.mirrorClosedAttempts(runtime);
+    const after = runtime.controller.snapshot();
+    return {
+      before,
+      after,
+      controllerChanged: after.stateVersion !== before.stateVersion,
+      engineChanged
+    };
+  }
+
+  private recordStageBoundary(
+    runtime: WorkRuntime,
+    before: AutomationSnapshot,
+    after: AutomationSnapshot
+  ): void {
+    const stageChanged = before.currentStageId !== after.currentStageId;
+    this.host.journal.append({
+      type: stageChanged ? "work.stage-boundary" : "work.stage-deadline",
+      competitionId: runtime.competitionId,
+      data: {
+        previousStageId: before.currentStageId,
+        currentStageId: after.currentStageId,
+        stageChanged,
+        stateVersion: after.stateVersion
+      }
+    });
+  }
+
+  private synchronizeParticipantStageStatuses(runtime: WorkRuntime, currentStageId: string): void {
+    if (runtime.participantStageId === currentStageId) return;
+    const previousStageId = runtime.participantStageId;
+    const config = this.host.getDraftConfig(runtime.competitionId);
+    let resetCount = 0;
+    const participants = config.participants.map((participant) => {
+      if (participant.role !== "participant" || participant.currentStageStatus === "waiting") return participant;
+      resetCount += 1;
+      return { ...participant, currentStageStatus: "waiting" as const };
+    });
+    if (resetCount > 0) {
+      this.host.upsertConfig(runtime.competitionId, 0, false, { ...config, participants });
+    }
+    runtime.participantStageId = currentStageId;
+    this.host.journal.append({
+      type: "participants.stage-reset",
+      competitionId: runtime.competitionId,
+      data: { previousStageId, currentStageId, resetCount }
     });
   }
 
@@ -912,6 +990,23 @@ export class WorkRuntimeManager {
       changed = true;
     }
     if (changed) this.host.saveScoreboards(runtime.competitionId, runtime.engine.snapshot().scoreboardVersions);
+  }
+
+  public mirrorClosedAttempts(runtime: WorkRuntime): boolean {
+    const engineAttempts = runtime.engine.snapshot().attempts;
+    let changed = false;
+    for (const attempt of runtime.controller.snapshot().attempts) {
+      if (attempt.intakeOpen || attempt.voided) continue;
+      const engineAttempt = engineAttempts.find((candidate) =>
+        candidate.stageId === attempt.stageId
+        && candidate.attemptNumber === attempt.attemptNumber
+        && candidate.open
+        && !candidate.voided);
+      if (!engineAttempt) continue;
+      runtime.engine.closeAttempt(attempt.stageId, attempt.attemptNumber);
+      changed = true;
+    }
+    return changed;
   }
 
   public async remove(competitionId: string): Promise<void> {
@@ -1173,13 +1268,20 @@ export class WorkRuntimeManager {
       runtime.controller.observePermissionDenied(parsed.event.message);
     }
     if (parsed.event.type === "fatal-error") this.handleFatalError(runtime, parsed.event);
-    const before = runtime.controller.snapshot();
+    const before = this.synchronizeStageBoundary(runtime);
     const currentStage = config.stages.find((candidate) => candidate.id === before.currentStageId);
     this.bindOfficialMapEcho(runtime, config, parsed.event, before);
     const eventStage = this.resolveEventStage(runtime, config, parsed.event, before.currentStageId);
+    const effectivePhase = (before.phase === "paused" || before.phase === "incident") && before.pausedFromPhase
+      ? before.pausedFromPhase
+      : before.phase;
+    const openCurrentAttempt = before.attempts.findLast((attempt) =>
+      attempt.stageId === before.currentStageId && attempt.intakeOpen && !attempt.voided);
     if ((parsed.event.type === "finish" || parsed.event.type === "dnf")
-      && (before.phase === "running" || before.phase === "tail-intake")
-      && currentStage && eventStage?.id !== currentStage.id) {
+      && (!openCurrentAttempt
+        || effectivePhase !== "running" && effectivePhase !== "tail-intake"
+        || !currentStage
+        || eventStage?.id !== currentStage.id)) {
       this.host.journal.append({ type: "work.log", competitionId: runtime.competitionId, data: parsed });
       this.saveSnapshot(runtime);
       return;
@@ -1192,7 +1294,8 @@ export class WorkRuntimeManager {
       this.saveSnapshot(runtime);
       return;
     }
-    if (runtime.connection.status !== "healthy" && parsed.event.type !== "connected") {
+    const resultEvidenceWhileBlocked = ["finish", "dnf", "warning", "cheat-changed"].includes(parsed.event.type);
+    if (runtime.connection.status !== "healthy" && parsed.event.type !== "connected" && !resultEvidenceWhileBlocked) {
       this.host.journal.append({ type: "work.log", competitionId: runtime.competitionId, data: parsed });
       this.saveSnapshot(runtime);
       return;
@@ -1218,21 +1321,89 @@ export class WorkRuntimeManager {
       this.saveSnapshot(runtime);
       return;
     }
+    if (event?.type === "go" && event.stageId !== (before.plannedReadyStageId ?? before.currentStageId)) {
+      this.host.journal.append({ type: "work.log", competitionId: runtime.competitionId, data: parsed });
+      this.saveSnapshot(runtime);
+      return;
+    }
     if (event) {
+      let resultAccepted = true;
+      const scoreboardVersionCountBeforeEvent = runtime.engine.snapshot().scoreboardVersions.length;
       if ("playerId" in event) {
         runtime.controller.registerParticipant(event.playerId);
         const participant = this.host.getDraftConfig(runtime.competitionId).participants.find((candidate) => candidate.id === event.playerId);
         runtime.engine.registerPlayer(event.playerId, participant?.displayName ?? event.playerId);
       }
-      runtime.engine.apply(event);
+      if (event.type === "finish") {
+        const cheatFinish = parsed.event.type === "finish" && parsed.event.cheat;
+        const exclusionSourceId = `${event.sourceId}:cheat-finish`;
+        resultAccepted = runtime.controller.recordResult({
+          stageId: event.stageId,
+          playerId: event.playerId,
+          status: cheatFinish ? "excluded" : "finished",
+          sourceId: cheatFinish ? exclusionSourceId : event.sourceId,
+          receivedAtMs: performance.now(),
+          ...(cheatFinish ? { reason: "cheat-finish", finishSourceId: event.sourceId } : {})
+        }) === "accepted";
+        if (resultAccepted) {
+          runtime.engine.apply(event);
+          if (cheatFinish && parsed.event.type === "finish") {
+            const versionCount = runtime.engine.snapshot().scoreboardVersions.length;
+            runtime.engine.apply({
+              atMs: event.atMs,
+              sourceId: exclusionSourceId,
+              type: "exclude",
+              stageId: event.stageId,
+              playerId: event.playerId,
+              reason: "cheat-finish"
+            });
+            this.observeParticipant(runtime.competitionId, parsed.event.playerName, parsed.event.connectionId, true, "excluded");
+            if (runtime.engine.snapshot().scoreboardVersions.length > versionCount) {
+              this.host.recordExclusionAttention(
+                runtime.competitionId,
+                event.stageId,
+                event.playerId,
+                exclusionSourceId,
+                "[CHEAT] 完赛"
+              );
+            }
+          }
+        }
+      } else if (event.type === "dnf") {
+        resultAccepted = runtime.controller.recordResult({
+          stageId: event.stageId,
+          playerId: event.playerId,
+          status: "dnf",
+          sourceId: event.sourceId,
+          reason: event.reason,
+          receivedAtMs: performance.now()
+        }) === "accepted";
+        if (resultAccepted) runtime.engine.apply(event);
+      } else if (event.type === "exclude") {
+        runtime.controller.observeViolation(event.playerId, event.sourceId, event.reason);
+        resultAccepted = runtime.controller.snapshot().attempts.some((attempt) =>
+          attempt.id === openCurrentAttempt?.id
+          && attempt.results.some((result) =>
+            result.playerId === event.playerId
+            && result.status === "excluded"
+            && result.sourceId === event.sourceId));
+        if (resultAccepted) runtime.engine.apply(event);
+      } else if (event.type === "go") {
+        const controllerHasAttempt = before.attempts.some((attempt) =>
+          attempt.stageId === event.stageId && !attempt.voided);
+        const engineHasAttempt = runtime.engine.snapshot().attempts.some((attempt) =>
+          attempt.stageId === event.stageId && !attempt.voided);
+        if (!controllerHasAttempt) runtime.controller.observeAuthoritativeGo(event.stageId);
+        if (!engineHasAttempt) runtime.engine.apply(event);
+      } else {
+        runtime.engine.apply(event);
+      }
       if (event.type === "login") runtime.controller.observeConnection(event.playerId, true);
       else if (event.type === "disconnect") runtime.controller.observeConnection(event.playerId, false);
-      else if (event.type === "go") runtime.controller.observeAuthoritativeGo(event.stageId);
-      else if (event.type === "finish") runtime.controller.recordResult({ stageId: event.stageId, playerId: event.playerId, status: "finished", sourceId: event.sourceId, receivedAtMs: performance.now() });
-      else if (event.type === "dnf") runtime.controller.recordResult({ stageId: event.stageId, playerId: event.playerId, status: "dnf", sourceId: event.sourceId, reason: event.reason, receivedAtMs: performance.now() });
       else if (event.type === "exclude") {
-        runtime.controller.observeViolation(event.playerId, event.sourceId, event.reason);
-        this.host.recordExclusionAttention(runtime.competitionId, event.stageId, event.playerId, event.sourceId, event.reason);
+        if (resultAccepted && runtime.engine.snapshot().scoreboardVersions.length > scoreboardVersionCountBeforeEvent) {
+          this.host.recordExclusionAttention(runtime.competitionId, event.stageId, event.playerId, event.sourceId, event.reason);
+        }
       } else if (event.type === "cheat") {
         const snapshotBeforeCheat = runtime.controller.snapshot();
         const activeAttempt = [...snapshotBeforeCheat.attempts].reverse().find((candidate) => candidate.stageId === snapshotBeforeCheat.currentStageId && candidate.intakeOpen);
@@ -1240,25 +1411,18 @@ export class WorkRuntimeManager {
         if (!playerAlreadyCompleted) {
           runtime.controller.observeCheat(event.playerId, event.enabled, event.sourceId);
           const snapshot = runtime.controller.snapshot();
-          const excludedByThisEvent = snapshot.attempts.some((attempt) => attempt.results.some((result) =>
-            result.playerId === event.playerId && result.status === "excluded" && result.sourceId === event.sourceId));
-          if (event.enabled && excludedByThisEvent && (snapshot.phase === "running" || snapshot.phase === "tail-intake")) {
+          const excludedByThisEvent = snapshot.attempts.some((attempt) => attempt.id === activeAttempt?.id
+            && attempt.results.some((result) =>
+              result.playerId === event.playerId && result.status === "excluded" && result.sourceId === event.sourceId));
+          if (event.enabled && excludedByThisEvent) {
             const versionCount = runtime.engine.snapshot().scoreboardVersions.length;
-            runtime.engine.apply({ atMs: Date.parse(parsed.event.occurredAt), sourceId: `${event.sourceId}:excluded`, type: "exclude", stageId: snapshot.currentStageId, playerId: event.playerId, reason: "cheat-enabled" });
+            const stageId = activeAttempt?.stageId;
+            if (!stageId) throw new Error("CHEAT_EXCLUSION_ATTEMPT_MISSING");
+            runtime.engine.apply({ atMs: Date.parse(parsed.event.occurredAt), sourceId: `${event.sourceId}:excluded`, type: "exclude", stageId, playerId: event.playerId, reason: "cheat-enabled" });
             if (runtime.engine.snapshot().scoreboardVersions.length > versionCount) {
-              this.host.recordExclusionAttention(runtime.competitionId, snapshot.currentStageId, event.playerId, event.sourceId, "开启 cheat");
+              this.host.recordExclusionAttention(runtime.competitionId, stageId, event.playerId, event.sourceId, "开启 cheat");
             }
           }
-        }
-      }
-      if (event.type === "finish" && parsed.event.type === "finish" && parsed.event.cheat) {
-        const exclusionSourceId = `${event.sourceId}:cheat-finish`;
-        const versionCount = runtime.engine.snapshot().scoreboardVersions.length;
-        runtime.engine.apply({ atMs: event.atMs, sourceId: exclusionSourceId, type: "exclude", stageId: event.stageId, playerId: event.playerId, reason: "cheat-finish" });
-        runtime.controller.observeViolation(event.playerId, exclusionSourceId, "cheat-finish");
-        this.observeParticipant(runtime.competitionId, parsed.event.playerName, parsed.event.connectionId, true, "excluded");
-        if (runtime.engine.snapshot().scoreboardVersions.length > versionCount) {
-          this.host.recordExclusionAttention(runtime.competitionId, event.stageId, event.playerId, exclusionSourceId, "[CHEAT] 完赛");
         }
       }
       if (event.type === "login" && parsed.event.type === "player-login" && parsed.event.cheat) {
@@ -1270,6 +1434,7 @@ export class WorkRuntimeManager {
     }
     this.mirrorSystemResults(runtime);
     this.mirrorVoidedAttempts(runtime);
+    this.mirrorClosedAttempts(runtime);
     this.host.completeCompetitionOnReview(runtime.competitionId, runtime.controller.snapshot());
     this.host.journal.append({ type: "work.log", competitionId: runtime.competitionId, data: parsed });
     this.saveSnapshot(runtime);
@@ -1409,7 +1574,12 @@ export class WorkRuntimeManager {
     }
     const snapshot = runtime.controller.snapshot();
     const stage = config.stages.find((candidate) => candidate.id === snapshot.currentStageId);
-    if ((snapshot.phase !== "running" && snapshot.phase !== "tail-intake") || stage?.level !== event.level) return;
+    const effectivePhase = (snapshot.phase === "paused" || snapshot.phase === "incident") && snapshot.pausedFromPhase
+      ? snapshot.pausedFromPhase
+      : snapshot.phase;
+    const activeAttempt = snapshot.attempts.findLast((attempt) =>
+      attempt.stageId === snapshot.currentStageId && attempt.intakeOpen && !attempt.voided);
+    if (!activeAttempt || (effectivePhase !== "running" && effectivePhase !== "tail-intake") || stage?.level !== event.level) return;
     const participant = this.host.getDraftConfig(runtime.competitionId).participants.find((candidate) =>
       candidate.id.toLocaleLowerCase("en-US") === event.playerName?.trim().toLocaleLowerCase("en-US"));
     if (!stage || !participant) {
@@ -1426,9 +1596,13 @@ export class WorkRuntimeManager {
     runtime.controller.registerParticipant(participant.id);
     runtime.engine.registerPlayer(participant.id, participant.displayName);
     const sourceId = `${event.sourceId}:excluded`;
+    runtime.controller.observeViolation(participant.id, sourceId, event.violationCode);
+    const excluded = runtime.controller.snapshot().attempts.some((attempt) => attempt.id === activeAttempt.id
+      && attempt.results.some((result) =>
+        result.playerId === participant.id && result.status === "excluded" && result.sourceId === sourceId));
+    if (!excluded) return;
     const versionCount = runtime.engine.snapshot().scoreboardVersions.length;
     runtime.engine.apply({ atMs: Date.parse(event.occurredAt), sourceId, type: "exclude", stageId: stage.id, playerId: participant.id, reason: event.violationCode });
-    runtime.controller.observeViolation(participant.id, sourceId, event.violationCode);
     this.observeParticipant(runtime.competitionId, participant.id, participant.connectionIds.at(-1) ?? participant.id, true, "excluded");
     if (runtime.engine.snapshot().scoreboardVersions.length > versionCount) {
       this.host.recordExclusionAttention(runtime.competitionId, stage.id, participant.id, sourceId, event.message);

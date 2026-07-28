@@ -398,6 +398,7 @@ export interface ActionAvailability {
   enabled: boolean;
   label: string;
   effect: string;
+  targetStageId?: string;
   disabledReason?: string;
 }
 
@@ -500,6 +501,7 @@ export interface ConfirmationSummary {
   expiresAt: string;
   target: string;
   stateVersion: number;
+  runtimeStateVersion?: number;
   impactHash: string;
   summary: string;
   effect: {
@@ -539,7 +541,7 @@ export type CompetitionAction =
   | { type: "reconnect-work"; confirmationToken: string; impactHash: string }
   | { type: "restart-work"; confirmationToken: string; impactHash: string }
   | { type: "start-ready-flow"; confirmationToken: string; impactHash: string }
-  | { type: "ready" }
+  | { type: "ready"; confirmationToken: string; impactHash: string }
   | { type: "cheat-off" }
   | { type: "manual-go"; confirmationToken: string; impactHash: string }
   | { type: "reschedule"; plannedReadyAt: string; confirmationToken: string; impactHash: string }

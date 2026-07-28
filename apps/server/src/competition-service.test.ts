@@ -386,6 +386,132 @@ describe("CompetitionService dynamic participants", () => {
     expect(runtime.engine.snapshot().anomalies.filter((item) => item.code === "duplicate-event" || item.code === "post-completion-result")).toHaveLength(0);
   });
 
+  it("does not claim a second exclusion when a [CHEAT] DNF repeats an existing terminal result", () => {
+    dataRoot = mkdtempSync(join(tmpdir(), "ballance-duplicate-cheat-dnf-"));
+    database = openDatabase(join(dataRoot, "console.sqlite"));
+    const service = new CompetitionService(undefined, { database, dataRoot });
+    const record = service.create({ name: "Duplicate cheat DNF", mode: "work", idempotencyKey: "duplicate-cheat-dnf" });
+    service.publish(record.id, 0, "publish-duplicate-cheat-dnf");
+    const manager = workRuntimeManager(service);
+    const runtime = manager.makeRuntime(record.id, service.snapshot(record.id).publishedConfig as CompetitionConfig, { write: async () => undefined });
+    manager.register(record.id, runtime);
+    establishAuthenticatedReferee(runtime);
+
+    manager.ingestLine(runtime, "[07-01 12:00:00] RepeatPlayer (#13) logged in with cheat mode off.");
+    manager.ingestLine(runtime, "[07-01 12:00:01] [7, *ContestConsole]: Level 01 - Go!");
+    manager.ingestLine(runtime, "[07-01 12:00:02] [Warning] RepeatPlayer just pressed the Reset hotkey at Level 01!");
+    const versionCount = runtime.engine.snapshot().scoreboardVersions.length;
+    manager.ingestLine(runtime, "[07-01 12:00:03] [CHEAT] (#13, RepeatPlayer) did not finish Level 01 (furthest reach: sector 4).");
+
+    const snapshot = service.snapshot(record.id);
+    expect(runtime.engine.snapshot().scoreboardVersions).toHaveLength(versionCount);
+    expect(snapshot.runtime.attentionItems.filter((item) => item.title === "违规成绩已排除")).toHaveLength(1);
+    expect(snapshot.currentScoreboard.find((entry) => entry.playerId === "RepeatPlayer")?.stages["sr-1"])
+      .toMatchObject({ status: "excluded", points: 0 });
+  });
+
+  it("does not let a [CHEAT] DNF enter the engine when T-60 closes the captured attempt before controller acceptance", () => {
+    dataRoot = mkdtempSync(join(tmpdir(), "ballance-cheat-dnf-boundary-"));
+    database = openDatabase(join(dataRoot, "console.sqlite"));
+    const service = new CompetitionService(undefined, { database, dataRoot });
+    const record = service.create({ name: "Atomic cheat DNF", mode: "work", idempotencyKey: "atomic-cheat-dnf" });
+    const draft = service.snapshot(record.id).config;
+    const firstStage = draft.stages[0];
+    if (!firstStage) throw new Error("missing first stage");
+    service.updateDraft(record.id, {
+      expectedStateVersion: 0,
+      idempotencyKey: "atomic-cheat-dnf-scoring",
+      stages: draft.stages.map((stage, index) => index === 0
+        ? { ...stage, scoring: [20], minimumScoringPlace: 1 }
+        : stage)
+    });
+    service.publish(record.id, 1, "publish-atomic-cheat-dnf");
+    const manager = workRuntimeManager(service);
+    const runtime = manager.makeRuntime(record.id, service.snapshot(record.id).publishedConfig as CompetitionConfig, { write: async () => undefined });
+    manager.register(record.id, runtime);
+    establishAuthenticatedReferee(runtime);
+
+    manager.ingestLine(runtime, "[07-01 12:00:00] [7, *ContestConsole]: Level 01 - Go!");
+    manager.ingestLine(runtime, "[07-01 12:00:01] (#11, Threshold) finished Level 01 in 1st place (score: 100; real time: 00:00:01.000).");
+    expect(runtime.controller.snapshot()).toMatchObject({
+      phase: "tail-intake",
+      currentStageId: firstStage.id,
+      plannedReadyStageId: draft.stages[1]?.id
+    });
+
+    const originalObserveViolation = runtime.controller.observeViolation.bind(runtime.controller);
+    const observeViolation = vi.spyOn(runtime.controller, "observeViolation").mockImplementation((...args) => {
+      runtime.controller.reschedule(performance.now() + 60_000);
+      originalObserveViolation(...args);
+    });
+    const versionsBefore = runtime.engine.snapshot().scoreboardVersions.length;
+    const attentionsBefore = service.snapshot(record.id).runtime.attentionItems
+      .filter((item) => item.id.startsWith("excluded:")).length;
+
+    manager.ingestLine(runtime, "[07-01 12:00:02] [CHEAT] (#12, BoundaryCheater) did not finish Level 01 (furthest reach: sector 4).");
+    observeViolation.mockRestore();
+
+    expect(runtime.controller.snapshot()).toMatchObject({
+      currentStageId: draft.stages[1]?.id,
+      attempts: [expect.objectContaining({
+        stageId: firstStage.id,
+        intakeOpen: false,
+        results: [expect.objectContaining({ playerId: "Threshold", status: "finished" })]
+      })]
+    });
+    expect(runtime.controller.snapshot().attempts[0]?.results)
+      .not.toContainEqual(expect.objectContaining({ playerId: "BoundaryCheater" }));
+    expect(runtime.engine.snapshot().scoreboardVersions).toHaveLength(versionsBefore);
+    expect(runtime.engine.snapshot().currentScoreboard.find((entry) => entry.playerId === "BoundaryCheater")?.stages[firstStage.id])
+      .toBeUndefined();
+    expect(service.snapshot(record.id).runtime.attentionItems
+      .filter((item) => item.id.startsWith("excluded:"))).toHaveLength(attentionsBefore);
+  });
+
+  it("applies a [CHEAT] finish atomically before an immediate T-60 plan can switch stages", async () => {
+    dataRoot = mkdtempSync(join(tmpdir(), "ballance-cheat-finish-boundary-"));
+    database = openDatabase(join(dataRoot, "console.sqlite"));
+    const service = new CompetitionService(undefined, { database, dataRoot });
+    const record = service.create({ name: "Atomic cheat finish", mode: "work", idempotencyKey: "atomic-cheat-finish" });
+    const draft = service.snapshot(record.id).config;
+    service.updateDraft(record.id, {
+      expectedStateVersion: 0,
+      idempotencyKey: "atomic-cheat-finish-flow",
+      flow: { ...draft.flow, intermissionMs: 30_000 }
+    });
+    service.publish(record.id, 1, "publish-atomic-cheat-finish");
+    const manager = workRuntimeManager(service);
+    const runtime = manager.makeRuntime(record.id, service.snapshot(record.id).publishedConfig as CompetitionConfig, { write: async () => undefined });
+    manager.register(record.id, runtime);
+    establishAuthenticatedReferee(runtime);
+
+    manager.ingestLine(runtime, "[07-01 12:00:00] [7, *ContestConsole]: Level 01 - Go!");
+    manager.ingestLine(runtime, "[07-01 12:00:01] (#11, Alpha) finished Level 01 in 1st place (score: 100; real time: 00:00:01.000).");
+    manager.ingestLine(runtime, "[07-01 12:00:02] (#12, Beta) finished Level 01 in 2nd place (score: 90; real time: 00:00:02.000).");
+    manager.ingestLine(runtime, "[07-01 12:00:03] [CHEAT] (#13, Cheater) finished Level 01 in 3rd place (score: 80; real time: 00:00:03.000).");
+
+    expect(runtime.controller.snapshot()).toMatchObject({
+      phase: "running",
+      currentStageId: "sr-1",
+      attempts: [expect.objectContaining({
+        stageId: "sr-1",
+        intakeOpen: true,
+        results: expect.arrayContaining([
+          expect.objectContaining({
+            playerId: "Cheater",
+            status: "excluded",
+            reason: "cheat-finish",
+            finishSourceId: expect.any(String)
+          })
+        ])
+      })]
+    });
+    expect(runtime.engine.snapshot().currentScoreboard.find((entry) => entry.playerId === "Cheater")?.stages["sr-1"])
+      .toMatchObject({ status: "excluded", reason: "cheat-finish", finishSourceId: expect.any(String) });
+    expect(runtime.controller.snapshot().plannedReadyStageId).toBeUndefined();
+    await service.close();
+  });
+
   it("warns once after cheat-off and mirrors a cheat-on reconnect into the live scoreboard at Go", async () => {
     dataRoot = mkdtempSync(join(tmpdir(), "ballance-cheat-reconnect-"));
     database = openDatabase(join(dataRoot, "console.sqlite"));
@@ -503,6 +629,395 @@ describe("CompetitionService dynamic participants", () => {
     expect(snapshot.runtime.attentionItems.filter((item) => item.title === "违规成绩已排除")).toHaveLength(0);
     expect(snapshot.runtime.blockers.some((blocker) => blocker.code === "PARTICIPANT_CHEAT")).toBe(false);
     expect(service.getRawClientLogs(record.id).some((line) => line.rawLine.includes("finished Level 02"))).toBe(true);
+  });
+
+  it("closes controller and scoring-engine intake at T-60 and keeps later live results raw-only", async () => {
+    dataRoot = mkdtempSync(join(tmpdir(), "ballance-t60-live-boundary-"));
+    database = openDatabase(join(dataRoot, "console.sqlite"));
+    const service = new CompetitionService(undefined, { database, dataRoot });
+    const record = service.create({ name: "T-60 live boundary", mode: "work", idempotencyKey: "t60-live-boundary" });
+    service.updateDraft(record.id, {
+      expectedStateVersion: 0,
+      idempotencyKey: "t60-live-stages",
+      stages: [
+        { id: "sr-1", order: 1, label: "SR1", level: 1, mode: "SR", mapKind: "official", timeLimitMs: 600_000, scoring: [20, 15, 12], minimumScoringPlace: 3 },
+        { id: "sr-2", order: 2, label: "SR2", level: 2, mode: "SR", mapKind: "official", timeLimitMs: 600_000, scoring: [20, 15, 12], minimumScoringPlace: 3 }
+      ]
+    });
+    service.publish(record.id, 1, "publish-t60-live-boundary");
+    const manager = workRuntimeManager(service);
+    const config = service.snapshot(record.id).config;
+    const runtime = manager.makeRuntime(record.id, config, { write: async () => undefined });
+    let clockNow = 0;
+    runtime.controller = new CompetitionController({
+      competitionId: record.id,
+      participants: [],
+      dynamicParticipants: true,
+      stages: config.stages.map((stage) => ({
+        id: stage.id,
+        map: `level ${stage.level}`,
+        displayName: stage.label,
+        mode: stage.mode.toLowerCase() as "sr" | "hs",
+        timeLimitMs: stage.timeLimitMs,
+        minimumScoringPlace: stage.minimumScoringPlace
+      })),
+      policy: { intermissionMs: 180_000 }
+    }, { now: () => clockNow });
+    manager.register(record.id, runtime);
+    establishAuthenticatedReferee(runtime);
+
+    manager.ingestLine(runtime, "[07-03 20:00:00] [7, *ContestConsole]: Level 01 - Go!");
+    for (const [index, player] of ["Alpha", "Beta", "Gamma"].entries()) {
+      const place = ["1st", "2nd", "3rd"][index];
+      manager.ingestLine(runtime, `[07-03 20:00:0${index + 1}] (#${index + 10}, ${player}) finished Level 01 in ${place} place (score: ${100 - index}; real time: 00:00:0${index + 1}.000).`);
+    }
+    expect(runtime.controller.snapshot()).toMatchObject({
+      phase: "tail-intake",
+      currentStageId: "sr-1",
+      plannedReadyAtMs: 180_000,
+      plannedReadyStageId: "sr-2"
+    });
+    expect(runtime.engine.snapshot().scoreboardVersions).toHaveLength(3);
+
+    clockNow = 120_000;
+    const boundarySnapshot = service.snapshot(record.id);
+    expect(runtime.controller.snapshot()).toMatchObject({
+      phase: "preparing",
+      currentStageId: "sr-2",
+      attempts: [{ stageId: "sr-1", intakeOpen: false, intakeClosedAtMs: 120_000 }]
+    });
+    expect(runtime.engine.snapshot().attempts[0]).toMatchObject({ stageId: "sr-1", open: false, voided: false });
+    expect(boundarySnapshot.runtime.scoreEditPermissions).toContainEqual({ stageId: "sr-1", editable: true });
+    expect(service.journal.after(0)).toContainEqual(expect.objectContaining({
+      type: "work.stage-boundary",
+      competitionId: record.id,
+      data: expect.objectContaining({ previousStageId: "sr-1", currentStageId: "sr-2" })
+    }));
+
+    manager.ingestLine(runtime, "[07-03 20:02:01] (#99, LateRunner) finished Level 01 in 4th place (score: 90; real time: 00:02:01.000).");
+    manager.ingestLine(runtime, "[07-03 20:02:02] (#100, LateDnf) did not finish Level 01 (furthest reach: sector 4).");
+    manager.ingestLine(runtime, "[07-03 20:02:03] [Warning] LateWarning just pressed the Reset hotkey at Level 01!");
+    manager.ingestLine(runtime, "[07-03 20:02:04] [CHEAT] (#101, LateCheat) finished Level 01 in 5th place (score: 80; real time: 00:02:04.000).");
+    manager.ingestLine(runtime, "[07-03 20:02:05] [7, *ContestConsole]: Level 01 - Go!");
+    expect(runtime.engine.snapshot().scoreboardVersions).toHaveLength(3);
+    expect(runtime.engine.snapshot().currentScoreboard.some((entry) => entry.playerId === "LateRunner")).toBe(false);
+    expect(runtime.engine.snapshot().attempts).toHaveLength(1);
+    expect(runtime.controller.snapshot()).toMatchObject({ currentStageId: "sr-2", attempts: [{ stageId: "sr-1", intakeOpen: false }] });
+    expect(runtime.controller.snapshot().attempts).toHaveLength(1);
+    const rawLines = service.getRawClientLogs(record.id, 100).map((line) => line.rawLine);
+    for (const evidence of ["LateRunner", "LateDnf", "LateWarning", "LateCheat", "Level 01 - Go!"]) {
+      expect(rawLines.some((line) => line.includes(evidence))).toBe(true);
+    }
+    expect(service.snapshot(record.id).runtime.attentionItems.filter((item) => item.title === "违规成绩已排除")).toHaveLength(0);
+
+    manager.saveSnapshot(runtime);
+    await service.close();
+    const restoredService = new CompetitionService(undefined, { database, dataRoot });
+    const restored = restoredService.snapshot(record.id);
+    expect(restored.runtime).toMatchObject({
+      phase: "paused",
+      currentStageId: "sr-2",
+      attempts: [{ stageId: "sr-1", intakeOpen: false }]
+    });
+    expect(restored.runtime.scoreEditPermissions).toContainEqual({ stageId: "sr-1", editable: true });
+    expect(restored.currentScoreboard.some((entry) => ["LateRunner", "LateDnf", "LateWarning", "LateCheat"].includes(entry.playerId))).toBe(false);
+    const scoreConfirmation = restoredService.createConfirmation(record.id, {
+      kind: "scoreboard-override",
+      intent: "scoreboard-set-place",
+      target: "Alpha:sr-1",
+      playerId: "Alpha",
+      stageId: "sr-1",
+      operation: "set-place",
+      place: 2,
+      rankPolicy: "shift"
+    });
+    const revised = restoredService.applyScoreboardOverride(record.id, {
+      expectedStateVersion: restored.competition.stateVersion,
+      idempotencyKey: "offline-t60-score-edit",
+      playerId: "Alpha",
+      stageId: "sr-1",
+      operation: "set-place",
+      place: 2,
+      rankPolicy: "shift",
+      confirmationToken: scoreConfirmation.token,
+      impactHash: scoreConfirmation.impactHash
+    });
+    expect(revised.entries.find((entry) => entry.playerId === "Alpha")?.stages["sr-1"]).toMatchObject({
+      status: "finished",
+      place: 2
+    });
+    await restoredService.close();
+  });
+
+  it("records a live deadline closure separately from a stage boundary", () => {
+    dataRoot = mkdtempSync(join(tmpdir(), "ballance-live-deadline-audit-"));
+    database = openDatabase(join(dataRoot, "console.sqlite"));
+    const service = new CompetitionService(undefined, { database, dataRoot });
+    const record = service.create({ name: "Live deadline audit", mode: "work", idempotencyKey: "live-deadline-audit" });
+    service.publish(record.id, 0, "publish-live-deadline-audit");
+    const manager = workRuntimeManager(service);
+    const config = service.snapshot(record.id).publishedConfig as CompetitionConfig;
+    const runtime = manager.makeRuntime(record.id, config, { write: async () => undefined });
+    let clockNow = 0;
+    const stage = config.stages[0];
+    if (!stage) throw new Error("missing stage");
+    runtime.controller = new CompetitionController({
+      competitionId: record.id,
+      participants: [],
+      dynamicParticipants: true,
+      stages: [{
+        id: stage.id,
+        map: `level ${stage.level}`,
+        displayName: stage.label,
+        mode: stage.mode.toLowerCase() as "sr" | "hs",
+        timeLimitMs: 1_000,
+        minimumScoringPlace: stage.minimumScoringPlace
+      }]
+    }, { now: () => clockNow });
+    manager.register(record.id, runtime);
+    establishAuthenticatedReferee(runtime);
+    manager.ingestLine(runtime, "[07-03 20:00:00] [7, *ContestConsole]: Level 01 - Go!");
+
+    clockNow = 1_000;
+    manager.saveSnapshot(runtime);
+
+    expect(runtime.controller.snapshot()).toMatchObject({
+      currentStageId: "sr-1",
+      phase: "review",
+      attempts: [{ stageId: "sr-1", intakeOpen: false, intakeClosedAtMs: 1_000 }]
+    });
+    expect(runtime.engine.snapshot().attempts[0]).toMatchObject({ stageId: "sr-1", open: false });
+    expect(service.journal.after(0)).toContainEqual(expect.objectContaining({
+      type: "work.stage-deadline",
+      competitionId: record.id,
+      data: expect.objectContaining({
+        previousStageId: "sr-1",
+        currentStageId: "sr-1",
+        stageChanged: false
+      })
+    }));
+    expect(service.journal.after(0)).not.toContainEqual(expect.objectContaining({
+      type: "work.stage-boundary",
+      competitionId: record.id,
+      data: expect.objectContaining({ previousStageId: "sr-1", currentStageId: "sr-1" })
+    }));
+  });
+
+  it("atomically catches up and persists a missed T-60 boundary before a work runtime is recreated", async () => {
+    dataRoot = mkdtempSync(join(tmpdir(), "ballance-t60-offline-recovery-"));
+    database = openDatabase(join(dataRoot, "console.sqlite"));
+    const first = new CompetitionService(undefined, { database, dataRoot });
+    const record = first.create({ name: "Offline T-60 recovery", mode: "work", idempotencyKey: "offline-t60-recovery" });
+    first.updateDraft(record.id, {
+      expectedStateVersion: 0,
+      idempotencyKey: "offline-t60-stages",
+      stages: [
+        { id: "sr-1", order: 1, label: "SR1", level: 1, mode: "SR", mapKind: "official", timeLimitMs: 600_000, scoring: [20, 15, 12], minimumScoringPlace: 3 },
+        { id: "sr-2", order: 2, label: "SR2", level: 2, mode: "SR", mapKind: "official", timeLimitMs: 600_000, scoring: [20, 15, 12], minimumScoringPlace: 3 }
+      ]
+    });
+    first.publish(record.id, 1, "publish-offline-t60-recovery");
+    await first.close();
+
+    const now = performance.now();
+    const wallClockOriginMs = Date.now() - now;
+    const plannedReadyAtMs = now + 30_000;
+    const attempt = {
+      id: "offline-attempt",
+      stageId: "sr-1",
+      attemptNumber: 1,
+      goAtMs: now - 120_000,
+      deadlineAtMs: now + 480_000,
+      intakeOpen: true,
+      voided: false,
+      results: [{
+        playerId: "Alpha",
+        status: "finished" as const,
+        sourceId: "offline-alpha-finish",
+        receivedAtMs: now - 90_000
+      }]
+    };
+    const storedRow = database.sqlite.prepare("SELECT payload FROM runtime_snapshots WHERE competition_id=?")
+      .get(record.id) as { payload: string };
+    const storedPayload = JSON.parse(storedRow.payload) as Record<string, unknown>;
+    database.sqlite.prepare("UPDATE runtime_snapshots SET payload=? WHERE competition_id=?").run(JSON.stringify({
+      ...storedPayload,
+      work: {
+        started: true,
+        automation: {
+          phase: "tail-intake",
+          stateVersion: 7,
+          automationEnabled: true,
+          clockNowMs: now - 90_000,
+          wallClockOriginMs,
+          currentStageId: "sr-1",
+          plannedReadyAtMs,
+          plannedReadyStageId: "sr-2",
+          nextStagePending: true,
+          restartPending: false,
+          blockers: [],
+          waitingParticipants: [],
+          attempts: [attempt],
+          incidents: [],
+          rejectedResults: [],
+          actions: []
+        },
+        engine: {
+          attempts: [{
+            id: attempt.id,
+            stageId: attempt.stageId,
+            attemptNumber: attempt.attemptNumber,
+            goSourceId: "offline-go",
+            goAtMs: attempt.goAtMs,
+            deadlineAtMs: attempt.deadlineAtMs,
+            open: true,
+            voided: false
+          }],
+          scoreboardVersions: [],
+          anomalies: [],
+          currentScoreboard: []
+        },
+        mapEchoPrefixes: {}
+      }
+    }), record.id);
+
+    const restoredService = new CompetitionService(undefined, { database, dataRoot });
+    const restored = restoredService.snapshot(record.id);
+    expect(restored.runtime).toMatchObject({
+      phase: "paused",
+      currentStageId: "sr-2",
+      attempts: [{ stageId: "sr-1", intakeOpen: false }]
+    });
+    expect(restored.runtime.scoreEditPermissions).toContainEqual({ stageId: "sr-1", editable: true });
+    const persistedRow = database.sqlite.prepare("SELECT payload FROM runtime_snapshots WHERE competition_id=?")
+      .get(record.id) as { payload: string };
+    const persisted = JSON.parse(persistedRow.payload) as {
+      work: {
+        automation: { currentStageId: string; attempts: Array<{ intakeOpen: boolean; intakeClosedAtMs?: number }> };
+        engine: { attempts: Array<{ open: boolean }> };
+      };
+    };
+    expect(persisted.work.automation.currentStageId).toBe("sr-2");
+    expect(persisted.work.automation.attempts[0]).toMatchObject({ intakeOpen: false, intakeClosedAtMs: expect.any(Number) });
+    expect(persisted.work.engine.attempts[0]).toMatchObject({ open: false });
+    await restoredService.close();
+  });
+
+  it("closes and persists an expired attempt offline even before the next T-60 boundary", async () => {
+    dataRoot = mkdtempSync(join(tmpdir(), "ballance-deadline-offline-recovery-"));
+    database = openDatabase(join(dataRoot, "console.sqlite"));
+    const first = new CompetitionService(undefined, { database, dataRoot });
+    const record = first.create({ name: "Offline deadline recovery", mode: "work", idempotencyKey: "offline-deadline-recovery" });
+    first.updateDraft(record.id, {
+      expectedStateVersion: 0,
+      idempotencyKey: "offline-deadline-stages",
+      stages: [
+        { id: "sr-1", order: 1, label: "SR1", level: 1, mode: "SR", mapKind: "official", timeLimitMs: 600_000, scoring: [20], minimumScoringPlace: 1 },
+        { id: "sr-2", order: 2, label: "SR2", level: 2, mode: "SR", mapKind: "official", timeLimitMs: 600_000, scoring: [20], minimumScoringPlace: 1 }
+      ]
+    });
+    first.publish(record.id, 1, "publish-offline-deadline-recovery");
+    await first.close();
+
+    const now = performance.now();
+    const wallClockOriginMs = Date.now() - now;
+    const deadlineAtMs = now - 30_000;
+    const plannedReadyAtMs = now + 180_000;
+    const attempt = {
+      id: "offline-expired-attempt",
+      stageId: "sr-1",
+      attemptNumber: 1,
+      goAtMs: now - 90_000,
+      deadlineAtMs,
+      intakeOpen: true,
+      voided: false,
+      results: []
+    };
+    const storedRow = database.sqlite.prepare("SELECT payload FROM runtime_snapshots WHERE competition_id=?")
+      .get(record.id) as { payload: string };
+    const storedPayload = JSON.parse(storedRow.payload) as Record<string, unknown>;
+    database.sqlite.prepare("UPDATE runtime_snapshots SET payload=? WHERE competition_id=?").run(JSON.stringify({
+      ...storedPayload,
+      work: {
+        started: true,
+        automation: {
+          phase: "tail-intake",
+          stateVersion: 11,
+          automationEnabled: true,
+          clockNowMs: now - 45_000,
+          wallClockOriginMs,
+          currentStageId: "sr-1",
+          plannedReadyAtMs,
+          plannedReadyStageId: "sr-2",
+          nextStagePending: true,
+          restartPending: false,
+          blockers: [],
+          waitingParticipants: [],
+          attempts: [attempt],
+          incidents: [],
+          rejectedResults: [],
+          actions: []
+        },
+        engine: {
+          attempts: [{
+            id: attempt.id,
+            stageId: attempt.stageId,
+            attemptNumber: attempt.attemptNumber,
+            goSourceId: "offline-expired-go",
+            goAtMs: attempt.goAtMs,
+            deadlineAtMs: attempt.deadlineAtMs,
+            open: true,
+            voided: false
+          }],
+          scoreboardVersions: [],
+          anomalies: [],
+          currentScoreboard: []
+        },
+        mapEchoPrefixes: {}
+      }
+    }), record.id);
+
+    const restoredService = new CompetitionService(undefined, { database, dataRoot });
+    const restored = restoredService.snapshot(record.id);
+    expect(restored.runtime).toMatchObject({
+      phase: "paused",
+      currentStageId: "sr-1",
+      plannedReadyStageId: "sr-2",
+      attempts: [{ stageId: "sr-1", intakeOpen: false, intakeClosedAtMs: expect.any(Number) }]
+    });
+    expect(restored.runtime.scoreEditPermissions).toContainEqual(expect.objectContaining({
+      stageId: "sr-1",
+      editable: false
+    }));
+    const persistedRow = database.sqlite.prepare("SELECT payload FROM runtime_snapshots WHERE competition_id=?")
+      .get(record.id) as { payload: string };
+    const persisted = JSON.parse(persistedRow.payload) as {
+      work: {
+        automation: {
+          currentStageId: string;
+          attempts: Array<{ intakeOpen: boolean; intakeClosedAtMs?: number }>;
+          actions: Array<{ kind: string; stageId: string; status: string }>;
+        };
+        engine: { attempts: Array<{ open: boolean }> };
+      };
+    };
+    expect(persisted.work.automation.currentStageId).toBe("sr-1");
+    expect(persisted.work.automation.attempts[0]).toMatchObject({
+      intakeOpen: false,
+      intakeClosedAtMs: expect.any(Number)
+    });
+    expect(persisted.work.automation.actions).toContainEqual(expect.objectContaining({
+      kind: "announce",
+      stageId: "sr-1",
+      status: "cancelled"
+    }));
+    expect(persisted.work.engine.attempts[0]).toMatchObject({ open: false });
+    expect(restoredService.journal.after(0)).toContainEqual(expect.objectContaining({
+      type: "work.stage-deadline-recovered",
+      competitionId: record.id,
+      data: expect.objectContaining({ stageChanged: false, intakeChanged: true })
+    }));
+    await restoredService.close();
   });
 
   it("recovers sent commands as uncertain and keeps automation paused after restart", async () => {
@@ -657,7 +1172,7 @@ describe("CompetitionService dynamic participants", () => {
         confirmationToken: staleLifecycleConfirmation.token,
         impactHash: staleLifecycleConfirmation.impactHash
       }
-    })).rejects.toMatchObject({ code: "CONFIRMATION_INVALID", statusCode: 409 });
+    })).rejects.toMatchObject({ code: "CONFIRMATION_STALE", statusCode: 409 });
 
     runtime.connection = { ...runtime.connection, status: "blocked" };
     const expectedStateVersion = service.snapshot(record.id).competition.stateVersion;
@@ -669,7 +1184,7 @@ describe("CompetitionService dynamic participants", () => {
     await expect(service.performAction(record.id, {
       expectedStateVersion,
       idempotencyKey: "blocked-ready",
-      action: { type: "ready" }
+      action: { type: "ready", confirmationToken: "unused-while-blocked", impactHash: "unused-while-blocked" }
     })).rejects.toMatchObject({ code: "ACTION_UNAVAILABLE", statusCode: 409 });
     const rawConfirmation = service.createConfirmation(record.id, {
       kind: "high-risk",
@@ -902,17 +1417,17 @@ describe("CompetitionService dynamic participants", () => {
       consequences: expect.arrayContaining(["立即发布本关发令预告，并把第一条 Ready 安排在 1 分钟后。"])
     });
 
-    const endStage = service.createConfirmation(record.id, {
+    const manualReady = service.createConfirmation(record.id, {
       kind: "manual-action",
-      intent: "end-stage",
+      intent: "ready",
       target: record.id,
       stageId
     });
-    expect(endStage.effect.title).toBe("提前结束 SR1？");
+    expect(manualReady.effect.title).toBe("发送一次 SR1 Ready？");
     await expect(service.performAction(record.id, {
       expectedStateVersion: snapshot.competition.stateVersion,
       idempotencyKey: "wrong-confirmation-intent",
-      action: { type: "start-ready-flow", confirmationToken: endStage.token, impactHash: endStage.impactHash }
+      action: { type: "start-ready-flow", confirmationToken: manualReady.token, impactHash: manualReady.impactHash }
     })).rejects.toThrow(/确认令牌与当前操作不匹配/);
 
     const rawCommand = service.createConfirmation(record.id, {
@@ -935,6 +1450,153 @@ describe("CompetitionService dynamic participants", () => {
       title: "永久删除比赛“Specific confirmations”？",
       consequences: expect.arrayContaining(["已生成的归档文件会保留，但比赛无法从控制台恢复。"])
     });
+    await service.close();
+  });
+
+  it("binds stage actions to the backend SR3 target and rejects confirmations after target changes", async () => {
+    dataRoot = mkdtempSync(join(tmpdir(), "ballance-stage-target-binding-"));
+    database = openDatabase(join(dataRoot, "console.sqlite"));
+    const service = new CompetitionService(undefined, { database, dataRoot });
+    const record = service.create({ name: "Stage target binding", mode: "test", idempotencyKey: "stage-target-binding" });
+    service.updateDraft(record.id, {
+      expectedStateVersion: 0,
+      idempotencyKey: "stage-target-stages",
+      stages: [
+        { id: "sr-1", order: 1, label: "SR1", level: 1, mode: "SR", mapKind: "official", timeLimitMs: 600_000, scoring: [20, 15, 12], minimumScoringPlace: 3 },
+        { id: "sr-2", order: 2, label: "SR2", level: 2, mode: "SR", mapKind: "official", timeLimitMs: 600_000, scoring: [20, 15, 12], minimumScoringPlace: 3 },
+        { id: "sr-3", order: 3, label: "SR3", level: 3, mode: "SR", mapKind: "official", timeLimitMs: 600_000, scoring: [20, 15, 12], minimumScoringPlace: 3 }
+      ]
+    });
+    service.publish(record.id, 1, "publish-stage-target-binding");
+    const runId = service.createTestRunFromScenario(record.id, "normal-player-roster").runId;
+    const runtime = testRuntimeManager(service).getRuntime(record.id, runId);
+    const [stage1, stage2, stage3] = runtime.definition.stages;
+    if (!stage1 || !stage2 || !stage3) throw new Error("missing three-stage runtime");
+    const base = runtime.automation.snapshot();
+    const initialSnapshot: ReturnType<CompetitionController["snapshot"]> = {
+      ...base,
+      phase: "tail-intake",
+      stateVersion: 42,
+      automationEnabled: true,
+      currentStageId: stage2.id,
+      plannedReadyAtMs: 120_000,
+      plannedReadyStageId: stage3.id,
+      nextStagePending: true,
+      attempts: [{
+        id: "stage-2-attempt",
+        stageId: stage2.id,
+        attemptNumber: 1,
+        goAtMs: 0,
+        deadlineAtMs: 600_000,
+        intakeOpen: true,
+        voided: false,
+        results: []
+      }],
+      actions: [],
+      incidents: [],
+      rejectedResults: [],
+      blockers: []
+    };
+    const controllerConfiguration = {
+      competitionId: record.id,
+      participants: runtime.definition.players.map((player) => player.id),
+      stages: runtime.definition.stages.map((stage) => ({
+        id: stage.id,
+        map: `level ${stage.level}`,
+        ...(stage.displayName === undefined ? {} : { displayName: stage.displayName }),
+        mode: stage.mode.toLowerCase() as "sr" | "hs",
+        timeLimitMs: stage.timeLimitMs,
+        minimumScoringPlace: stage.minimumScoringPlace
+      }))
+    };
+    runtime.automation = new CompetitionController({ ...controllerConfiguration, initialSnapshot }, runtime.automationClock);
+
+    let snapshot = service.snapshot(record.id);
+    expect(snapshot.runtime.availableActions).toEqual(expect.arrayContaining([
+      expect.objectContaining({ action: "start-ready-flow", targetStageId: "sr-3" }),
+      expect.objectContaining({ action: "ready", targetStageId: "sr-3" }),
+      expect.objectContaining({ action: "manual-go", targetStageId: "sr-3" }),
+      expect.objectContaining({ action: "end-stage", targetStageId: "sr-2", enabled: true })
+    ]));
+    const confirmation = service.createConfirmation(record.id, {
+      kind: "manual-action",
+      intent: "ready",
+      target: record.id,
+      stageId: "sr-2"
+    });
+    expect(confirmation).toMatchObject({
+      target: "sr-3",
+      runtimeStateVersion: 42,
+      effect: { title: "发送一次 SR3 Ready？", target: "sr-3" }
+    });
+    await service.performAction(record.id, {
+      expectedStateVersion: snapshot.competition.stateVersion,
+      idempotencyKey: "execute-backend-targeted-sr3-ready",
+      action: {
+        type: "ready",
+        confirmationToken: confirmation.token,
+        impactHash: confirmation.impactHash
+      }
+    });
+    expect(runtime.automation.snapshot().actions).toContainEqual(expect.objectContaining({
+      kind: "ready",
+      stageId: "sr-3",
+      manual: true
+    }));
+    const staleConfirmation = service.createConfirmation(record.id, {
+      kind: "manual-action",
+      intent: "ready",
+      target: record.id,
+      stageId: "sr-2"
+    });
+
+    const retargetedSnapshot = {
+      ...runtime.automation.snapshot(),
+      phase: "preparing" as const,
+      stateVersion: runtime.automation.snapshot().stateVersion + 1,
+      currentStageId: "sr-2",
+      nextStagePending: false
+    };
+    delete retargetedSnapshot.plannedReadyAtMs;
+    delete retargetedSnapshot.plannedReadyStageId;
+    runtime.automation = new CompetitionController({
+      ...controllerConfiguration,
+      initialSnapshot: retargetedSnapshot
+    }, runtime.automationClock);
+    snapshot = service.snapshot(record.id);
+    const readyAfterRuntimeChange = snapshot.runtime.availableActions.find((action) => action.action === "ready");
+    expect(readyAfterRuntimeChange?.disabledReason).toBeUndefined();
+    expect(readyAfterRuntimeChange).toMatchObject({ enabled: true, targetStageId: "sr-2" });
+    await expect(service.performAction(record.id, {
+      expectedStateVersion: snapshot.competition.stateVersion,
+      idempotencyKey: "stale-ready-target-impact",
+      action: {
+        type: "ready",
+        confirmationToken: staleConfirmation.token,
+        impactHash: staleConfirmation.impactHash
+      }
+    })).rejects.toMatchObject({ code: "CONFIRMATION_STALE", statusCode: 409 });
+
+    const pausedFromRunning = {
+      ...runtime.automation.snapshot(),
+      phase: "paused" as const,
+      pausedFromPhase: "running" as const,
+      currentStageId: "sr-2",
+      nextStagePending: false,
+      attempts: initialSnapshot.attempts
+    };
+    delete pausedFromRunning.plannedReadyAtMs;
+    delete pausedFromRunning.plannedReadyStageId;
+    const internals = service as unknown as {
+      availableActionsFor(competitionId: string, automation: ReturnType<CompetitionController["snapshot"]>): Array<{ action: string; enabled: boolean; targetStageId?: string }>;
+    };
+    const pausedActions = internals.availableActionsFor(record.id, pausedFromRunning);
+    expect(pausedActions).toEqual(expect.arrayContaining([
+      expect.objectContaining({ action: "start-ready-flow", enabled: false, targetStageId: "sr-2" }),
+      expect.objectContaining({ action: "ready", enabled: false, targetStageId: "sr-2" }),
+      expect.objectContaining({ action: "manual-go", enabled: false, targetStageId: "sr-2" }),
+      expect.objectContaining({ action: "end-stage", enabled: true, targetStageId: "sr-2" })
+    ]));
     await service.close();
   });
 
@@ -1112,7 +1774,101 @@ describe("CompetitionService dynamic participants", () => {
     await service.close();
   });
 
-  it("keeps accepting post-threshold finishes before the next Ready starts", () => {
+  it.each([
+    { seed: 1, expectedLastViolation: "warning" },
+    { seed: 2, expectedLastViolation: "cheat" }
+  ] as const)("keeps a final $expectedLastViolation exclusion and its finish evidence on the old attempt across an immediate T-60 boundary", async ({
+    seed,
+    expectedLastViolation
+  }) => {
+    dataRoot = mkdtempSync(join(tmpdir(), `ballance-atomic-${expectedLastViolation}-boundary-`));
+    database = openDatabase(join(dataRoot, "console.sqlite"));
+    const service = new CompetitionService(undefined, { database, dataRoot });
+    const record = service.create({
+      name: `Atomic ${expectedLastViolation} boundary`,
+      mode: "test",
+      idempotencyKey: `atomic-${expectedLastViolation}-boundary`
+    });
+    const initialConfig = service.snapshot(record.id).config;
+    service.updateDraft(record.id, {
+      expectedStateVersion: 0,
+      idempotencyKey: `atomic-${expectedLastViolation}-config`,
+      flow: { ...initialConfig.flow, intermissionMs: 30_000 },
+      stages: [
+        { id: "sr-1", order: 1, label: "SR1", level: 1, mode: "SR", mapKind: "official", timeLimitMs: 600_000, scoring: [20, 15, 12], minimumScoringPlace: 3 },
+        { id: "sr-2", order: 2, label: "SR2", level: 2, mode: "SR", mapKind: "official", timeLimitMs: 600_000, scoring: [20, 15, 12], minimumScoringPlace: 3 }
+      ]
+    });
+    service.publish(record.id, 1, `publish-atomic-${expectedLastViolation}-boundary`);
+
+    const players = Array.from({ length: 15 }, (_unused, index) => ({
+      id: `p${index + 1}`,
+      displayName: `Player ${index + 1}`,
+      connectionId: String(700 + index),
+      profile: "disruptor" as const
+    }));
+    const lastPlayer = [...players].sort((left, right) => {
+      const leftDelay = Math.round(20_000 + seededBehaviorRandom(seed, "sr-1", 1, left.id, "disrupt-time") * 70_000);
+      const rightDelay = Math.round(20_000 + seededBehaviorRandom(seed, "sr-1", 1, right.id, "disrupt-time") * 70_000);
+      return leftDelay - rightDelay || left.id.localeCompare(right.id);
+    }).at(-1);
+    if (!lastPlayer) throw new Error("missing final disruptor");
+    const lastViolation = seededBehaviorRandom(seed, "sr-1", 1, lastPlayer.id, "disrupt-kind") < 0.5
+      ? "warning"
+      : "cheat";
+    expect(lastViolation).toBe(expectedLastViolation);
+
+    const definition: ScenarioDefinition = {
+      schemaVersion: 1,
+      kind: "player-behavior",
+      id: `atomic-${expectedLastViolation}-scenario`,
+      name: `Atomic ${expectedLastViolation} scenario`,
+      year: 2026,
+      timezone: "Asia/Shanghai",
+      refereeConnectionId: "atomic-referee",
+      randomSeed: seed,
+      players,
+      stages: [],
+      events: [],
+      expected: { attempts: 2, scoreboardVersions: 30 }
+    };
+    const runId = service.createTestRun(record.id, definition).runId;
+    service.startTestAutomation(record.id, runId);
+    service.advanceTestAutomation(record.id, runId, 130_000);
+
+    const runtime = testRuntimeManager(service).getRuntime(record.id, runId);
+    const automation = runtime.automation.snapshot();
+    const engine = runtime.engine.snapshot();
+    const controllerAttempt = automation.attempts.find((attempt) => attempt.stageId === "sr-1");
+    const engineAttempt = engine.attempts.find((attempt) => attempt.stageId === "sr-1");
+    expect(automation).toMatchObject({
+      phase: "preparing",
+      currentStageId: "sr-2",
+      plannedReadyStageId: "sr-2"
+    });
+    expect(controllerAttempt).toMatchObject({ intakeOpen: false, voided: false });
+    expect(engineAttempt).toMatchObject({ open: false, voided: false });
+    expect(controllerAttempt?.results).toHaveLength(players.length);
+
+    const engineResultByPlayer = new Map(engine.currentScoreboard.map((entry) => [entry.playerId, entry.stages["sr-1"]]));
+    for (const result of controllerAttempt?.results ?? []) {
+      expect(result).toMatchObject({ status: "excluded", finishSourceId: expect.any(String) });
+      expect(engineResultByPlayer.get(result.playerId)).toMatchObject({
+        status: "excluded",
+        finishSourceId: result.finishSourceId
+      });
+    }
+    expect(engine.currentScoreboard.every((entry) => entry.stages["sr-2"] === undefined)).toBe(true);
+    expect(engine.anomalies.filter((anomaly) => anomaly.code === "practice-result")).toEqual([]);
+
+    const exclusionAttentions = service.snapshot(record.id).runtime.attentionItems
+      .filter((item) => item.id.startsWith("excluded:"));
+    expect(exclusionAttentions).toHaveLength(players.length);
+    expect(exclusionAttentions.every((item) => item.stageId === "sr-1")).toBe(true);
+    await service.close();
+  });
+
+  it("keeps accepting post-threshold finishes before the next T-60 preparation boundary", () => {
     const service = new CompetitionService();
     const record = service.create({ name: "Tail intake accepts finishes", mode: "test", idempotencyKey: "tail-intake-finish" });
     service.updateDraft(record.id, {

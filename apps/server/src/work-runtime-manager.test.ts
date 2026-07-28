@@ -190,6 +190,25 @@ const configureSingleStage = (service: CompetitionService, competitionId: string
   service.publish(competitionId, 1, "publish");
 };
 
+const configureTwoStages = (service: CompetitionService, competitionId: string): void => {
+  service.updateDraft(competitionId, {
+    expectedStateVersion: 0,
+    idempotencyKey: "two-stages",
+    stages: [1, 2].map((level) => ({
+      id: `sr-${level}`,
+      order: level,
+      label: `SR${level}`,
+      level,
+      mode: "SR" as const,
+      mapKind: "official" as const,
+      timeLimitMs: 60_000,
+      scoring: [20],
+      minimumScoringPlace: 1
+    }))
+  });
+  service.publish(competitionId, 1, "publish");
+};
+
 const configureCustomStages = (count: number) => (service: CompetitionService, competitionId: string): void => {
   service.updateDraft(competitionId, {
     expectedStateVersion: 0,
@@ -415,6 +434,61 @@ describe("WorkRuntimeManager connection lifecycle", () => {
     expect(context.lifecycle).not.toContain("soft-reconnect");
     expect(context.service.snapshot(context.competitionId).runtime.blockers)
       .toContainEqual(expect.objectContaining({ code: "PERMISSION_DENIED", severity: "critical" }));
+  });
+
+  it("resets every participant stage status when T-60 changes the current work stage", async () => {
+    const context = setup([{ connectionId: "101" }], {}, configureTwoStages);
+    context.service.startWorkMode(context.competitionId);
+    await vi.waitFor(() => expect(context.service.snapshot(context.competitionId).runtime.workConnection).toMatchObject({
+      status: "healthy",
+      refereeConnectionId: "101"
+    }), { timeout: 3_000 });
+    const manager = managerFor(context.service);
+    const runtime = manager.get(context.competitionId);
+    if (!runtime) throw new Error("missing work runtime");
+
+    manager.ingestLine(runtime, "[07-22 12:00:01] [101, *ContestConsole]: Level 01 - Go!");
+    manager.ingestLine(runtime, "[07-22 12:00:02] (#41, DnfRunner) did not finish Level 01 (furthest reach: sector 4).");
+    manager.ingestLine(runtime, "[07-22 12:00:03] [CHEAT] (#42, Cheater) finished Level 01 in 1st place (score: 100; real time: 00:00:02.000).");
+    manager.ingestLine(runtime, "[07-22 12:00:04] (#43, Finisher) finished Level 01 in 2nd place (score: 90; real time: 00:00:03.000).");
+
+    expect(context.service.snapshot(context.competitionId).config.participants).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: "DnfRunner", currentStageStatus: "dnf", online: true, connectionIds: ["41"] }),
+      expect.objectContaining({ id: "Cheater", currentStageStatus: "excluded", online: true, connectionIds: ["42"] }),
+      expect.objectContaining({ id: "Finisher", currentStageStatus: "finished", online: true, connectionIds: ["43"] })
+    ]));
+    expect(runtime.controller.snapshot()).toMatchObject({
+      phase: "tail-intake",
+      currentStageId: "sr-1",
+      plannedReadyStageId: "sr-2"
+    });
+
+    runtime.controller.reschedule(performance.now() + 60_000);
+    manager.saveSnapshot(runtime);
+
+    expect(runtime.controller.snapshot()).toMatchObject({
+      phase: "preparing",
+      currentStageId: "sr-2",
+      plannedReadyStageId: "sr-2"
+    });
+    expect(runtime.engine.snapshot().attempts[0]).toMatchObject({
+      stageId: "sr-1",
+      open: false,
+      voided: false
+    });
+    expect((context.service as unknown as {
+      getPayload(competitionId: string): {
+        work?: { engine?: { attempts: Array<{ stageId: string; open: boolean }> } };
+      };
+    }).getPayload(context.competitionId).work?.engine?.attempts[0]).toMatchObject({
+      stageId: "sr-1",
+      open: false
+    });
+    expect(context.service.snapshot(context.competitionId).config.participants).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: "DnfRunner", currentStageStatus: "waiting", online: true, connectionIds: ["41"] }),
+      expect.objectContaining({ id: "Cheater", currentStageStatus: "waiting", online: true, connectionIds: ["42"] }),
+      expect.objectContaining({ id: "Finisher", currentStageStatus: "waiting", online: true, connectionIds: ["43"] })
+    ]));
   });
 
   it("cuts over queued and sent commands and accepts only the new soft-reconnect identity", async () => {

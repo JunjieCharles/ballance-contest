@@ -157,6 +157,20 @@ describe("CompetitionEngine", () => {
     expect(snapshot.currentScoreboard.find((entry) => entry.playerId === "p2")?.stages[stage.id]).toMatchObject({ sourceId: "new-p2", place: 1 });
   });
 
+  it("closes a score intake attempt without voiding its recorded results", () => {
+    const definition = loadMain();
+    const engine = new CompetitionEngine(definition);
+    engine.apply({ atMs: 0, sourceId: "go", type: "go", stageId: "s1", refereeConnectionId: definition.refereeConnectionId });
+    engine.apply({ atMs: 10, sourceId: "accepted", type: "finish", stageId: "s1", playerId: "p1", score: 10, elapsedMs: 10 });
+    engine.closeAttempt("s1", 1);
+    engine.apply({ atMs: 20, sourceId: "after-boundary", type: "finish", stageId: "s1", playerId: "p2", score: 9, elapsedMs: 20 });
+
+    expect(engine.snapshot().attempts[0]).toMatchObject({ open: false, voided: false });
+    expect(engine.snapshot().currentScoreboard.find((entry) => entry.playerId === "p1")?.stages.s1).toBeDefined();
+    expect(engine.snapshot().currentScoreboard.find((entry) => entry.playerId === "p2")?.stages.s1).toBeUndefined();
+    expect(engine.snapshot().anomalies).toContainEqual(expect.objectContaining({ sourceId: "after-boundary", code: "practice-result" }));
+  });
+
   it("rejects an unauthorized Go and never creates an attempt", () => {
     const definition = loadMain();
     const engine = new CompetitionEngine(definition);

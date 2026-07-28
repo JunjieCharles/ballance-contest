@@ -25,6 +25,13 @@ export interface PersistedTestRun {
   definition: ScenarioDefinition;
   playedEvents: number;
   operations: PersistedTestOperation[];
+  automation?: AutomationSnapshot;
+  engine?: EngineSnapshot;
+  pendingCountdown?: PendingTestCountdown;
+  appliedFaultIds?: string[];
+  stageFinishOrdinals?: Record<string, number>;
+  phaseStartedAt?: Record<string, number>;
+  recoveries?: ScheduledTestRecovery[];
   createdAt: string;
   updatedAt: string;
 }
@@ -38,6 +45,7 @@ export interface ServiceSnapshotPayload {
   work?: {
     started: boolean;
     mockClientVersion?: string;
+    participantStageId?: string;
     automation?: AutomationSnapshot;
     engine?: EngineSnapshot;
     mapEchoPrefixes?: Record<string, string>;

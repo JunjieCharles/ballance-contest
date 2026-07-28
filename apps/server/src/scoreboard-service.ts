@@ -109,7 +109,7 @@ export class ScoreboardService {
         stageId: stage.id,
         editable: false,
         reason: stage.id === currentStageId
-          ? "当前关仍由自动或现场成绩接收；进入下一关 Ready 后才能修订"
+          ? "当前关仍由自动或现场成绩接收；进入下一关 Ready 前 1 分钟的准备阶段后才能修订"
           : "该关尚未进入可修订范围"
       };
     });

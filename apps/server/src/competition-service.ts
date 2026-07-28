@@ -7,6 +7,7 @@ import {
   createDefaultCompetitionConfig,
   defaultFlowPolicy,
   minimumScoringPlaceFor,
+  stageCommandTarget,
   stageDisplayName,
   stageMapKind,
   validateCompetitionConfigForPublish,
@@ -35,7 +36,7 @@ import {
   ScoreboardRevisionLedger,
   type AutomationAction,
   type AutomationSnapshot,
-  type CompetitionController,
+  CompetitionController,
   type EngineSnapshot,
   type ScoreboardVersion
 } from "@ballance/core";
@@ -45,6 +46,7 @@ import { CompetitionAuditService } from "./competition-audit-service.js";
 import { EventJournal } from "./event-journal.js";
 import {
   automationView,
+  automationPolicyFor,
   commandView,
   isUnresolvedAutomationAction,
   plannedReadyAt,
@@ -84,11 +86,29 @@ interface ConfirmationRecord {
   competitionId: string;
   target: string;
   stateVersion: number;
+  runtimeStateVersion?: number;
   impactHash: string;
   expiresAtMs: number;
   intent?: ConfirmationIntent;
   boundInput?: string;
 }
+
+const stageBoundActionForIntent = (intent: ConfirmationIntent | undefined): RefereeActionId | undefined => {
+  switch (intent) {
+    case "start-ready-flow":
+    case "ready":
+    case "manual-go":
+    case "delay-ready":
+    case "extend-stage-deadline":
+    case "reschedule":
+    case "reschedule-stage-deadline":
+    case "end-stage":
+    case "restart-stage":
+      return intent;
+    default:
+      return undefined;
+  }
+};
 
 interface ConfirmationBindingInput {
   milliseconds?: number;
@@ -147,6 +167,8 @@ const actionIdempotencyIdentity = (action: CompetitionAction): string => {
   if (action.type === "kick") semanticAction.playerName = action.playerName.trim();
   return canonicalJson(semanticAction);
 };
+
+const READY_PREPARATION_LEAD_MS = 60_000;
 
 const formatConfirmationDateTime = (value?: string): string => value
   ? `${new Intl.DateTimeFormat("zh-CN", {
@@ -262,6 +284,7 @@ export class CompetitionService {
       workRuntimeManager: this.workRuntimeManager
     });
     this.loadCompetitions();
+    this.reconcileAllPersistedStageBoundaries();
     this.recoverAllSentCommands();
     this.recoverPersistedWorkGaps();
   }
@@ -359,15 +382,17 @@ export class CompetitionService {
   public snapshot(id: string): CompetitionSnapshot {
     const competition = this.toRecordView(this.get(id));
     const payload = this.getPayload(id);
-    const config = this.getDraftConfig(id);
     const activeRunId = competition.activeRunId ?? payload.activeRunId;
     const testRun = activeRunId ? this.getTestRunSnapshot(id, activeRunId) : undefined;
     const workRuntime = this.workRuntimeManager.get(id);
     const persistedWorkAutomation = payload.work?.automation;
     const preparedPersistedWorkAutomation = persistedWorkAutomation
-      ? this.prepareAutomationSnapshot(id, Date.now() - performance.now())
+      ? this.reconcilePersistedStageBoundary(id, Date.now() - performance.now())
       : undefined;
-    const workAutomation = workRuntime?.controller.snapshot() ?? (preparedPersistedWorkAutomation
+    const liveWorkAutomation = workRuntime
+      ? this.workRuntimeManager.synchronizeStageBoundary(workRuntime)
+      : undefined;
+    const workAutomation = liveWorkAutomation ?? (preparedPersistedWorkAutomation
       ? competition.status === "finished" || competition.status === "archived"
         ? preparedPersistedWorkAutomation
         : {
@@ -380,6 +405,7 @@ export class CompetitionService {
             ]
           }
       : undefined);
+    const config = this.getDraftConfig(id);
     const workScoreboard = workRuntime?.engine.snapshot().scoreboardVersions.map(scoreboardView) ?? this.storedScoreboardVersions(id);
     const persistedWorkConnection = payload.work?.connection;
     const workConnection = workRuntime?.connection ?? (payload.work?.started
@@ -522,11 +548,14 @@ export class CompetitionService {
           return runId ? this.testRuntimeManager.getRuntime(competitionId, runId).automation : undefined;
         })()
       : this.workRuntimeManager.get(competitionId)?.controller;
-    const unresolved = controller?.snapshot().actions.filter(isUnresolvedAutomationAction) ?? [];
+    const controllerSnapshot = competition.mode === "work"
+      ? this.runtimeAutomationSnapshot(competitionId)
+      : controller?.snapshot();
+    const unresolved = controllerSnapshot?.actions.filter(isUnresolvedAutomationAction) ?? [];
     if (unresolved.length > 0) {
       throw new ServiceError("ACTION_UNAVAILABLE", "请先逐条确认已执行或执行重发，再恢复自动化", 409, { actionIds: unresolved.map((action) => action.id) });
     }
-    const unresolvedCommands = this.unconfirmedCommandsFor(competitionId, controller?.snapshot());
+    const unresolvedCommands = this.unconfirmedCommandsFor(competitionId, controllerSnapshot);
     if (unresolvedCommands.length > 0) {
       throw new ServiceError("ACTION_UNAVAILABLE", "请先逐条处置失败或结果不确定的真实命令，再恢复自动化", 409, { commandIds: unresolvedCommands.map((command) => command.id) });
     }
@@ -547,13 +576,15 @@ export class CompetitionService {
       return result;
     }
     const runtime = this.workRuntimeManager.get(competitionId);
-    this.assertActionAvailable(competitionId, "enable-automation", runtime?.controller.snapshot());
     if (!runtime) throw new ServiceError("NOT_FOUND", "请先建立比赛连接", 404);
+    const runtimeSnapshot = this.workRuntimeManager.synchronizeStageBoundary(runtime);
+    this.assertActionAvailable(competitionId, "enable-automation", runtimeSnapshot);
     this.workRuntimeManager.requireHealthy(competitionId);
-    const runtimeSnapshot = runtime.controller.snapshot();
     const initialReadyInMs = input.readyInMs ?? this.getDraftConfig(competitionId).flow.intermissionMs;
     runtime.controller.enable(runtimeSnapshot.plannedReadyAtMs ?? performance.now() + initialReadyInMs);
+    this.workRuntimeManager.synchronizeStageBoundary(runtime);
     await runtime.runtime.dispatch();
+    this.workRuntimeManager.synchronizeStageBoundary(runtime);
     for (const action of runtime.controller.snapshot().actions.filter((candidate) => candidate.status === "acknowledged")) this.recordAutomationAttention(competitionId, action);
     this.workRuntimeManager.register(competitionId, runtime);
     this.workRuntimeManager.startRealtime(runtime);
@@ -574,6 +605,7 @@ export class CompetitionService {
       this.assertActionAvailable(competitionId, "pause-automation", this.testRuntimeManager.getRuntime(competitionId, runId).automation.snapshot());
       const runtime = this.testRuntimeManager.getRuntime(competitionId, runId);
       runtime.automation.pause();
+      this.testRuntimeManager.settle(runtime);
       this.testRuntimeManager.persist(runtime);
       const snapshot = runtime.automation.snapshot();
       const origin = Date.parse(runtime.createdAt);
@@ -582,8 +614,10 @@ export class CompetitionService {
     }
     const runtime = this.workRuntimeManager.get(competitionId);
     if (!runtime) throw new ServiceError("NOT_FOUND", "比赛连接尚未建立", 404);
-    this.assertActionAvailable(competitionId, "pause-automation", runtime.controller.snapshot());
+    const synchronized = this.workRuntimeManager.synchronizeStageBoundary(runtime);
+    this.assertActionAvailable(competitionId, "pause-automation", synchronized);
     runtime.controller.pause();
+    this.workRuntimeManager.synchronizeStageBoundary(runtime);
     this.workRuntimeManager.saveSnapshot(runtime);
     const snapshot = runtime.controller.snapshot();
     const origin = Date.now() - performance.now();
@@ -627,6 +661,47 @@ export class CompetitionService {
         throw new ServiceError("CONFIRMATION_UNAVAILABLE", availability?.disabledReason ?? "当前连接状态不能执行该恢复动作", 409);
       }
     }
+    const stageBoundAction = stageBoundActionForIntent(intent);
+    let runtimeStateVersion: number | undefined;
+    let runtimeStageImpact: unknown;
+    if (stageBoundAction) {
+      if (!runtimeSnapshot) throw new ServiceError("CONFIRMATION_UNAVAILABLE", "当前没有可绑定的比赛运行", 409);
+      const availability = this.availableActionsFor(competitionId, runtimeSnapshot)
+        .find((candidate) => candidate.action === stageBoundAction);
+      if (!availability?.targetStageId) {
+        throw new ServiceError("CONFIRMATION_UNAVAILABLE", availability?.disabledReason ?? "当前动作没有可绑定的目标关卡", 409);
+      }
+      if (!availability.enabled) {
+        throw new ServiceError("CONFIRMATION_UNAVAILABLE", availability.disabledReason ?? "当前阶段不能执行该关卡动作", 409);
+      }
+      target = availability.targetStageId;
+      runtimeStateVersion = runtimeSnapshot.stateVersion;
+      const targetAttempt = runtimeSnapshot.attempts
+        .filter((attempt) => attempt.stageId === target)
+        .at(-1);
+      runtimeStageImpact = {
+        runtimeStateVersion,
+        targetStageId: target,
+        phase: runtimeSnapshot.phase,
+        pausedFromPhase: runtimeSnapshot.pausedFromPhase,
+        currentStageId: runtimeSnapshot.currentStageId,
+        plannedReadyAtMs: runtimeSnapshot.plannedReadyAtMs,
+        plannedReadyStageId: runtimeSnapshot.plannedReadyStageId,
+        nextStagePending: runtimeSnapshot.nextStagePending,
+        restartPending: runtimeSnapshot.restartPending,
+        attempt: targetAttempt === undefined ? null : {
+          id: targetAttempt.id,
+          attemptNumber: targetAttempt.attemptNumber,
+          intakeOpen: targetAttempt.intakeOpen,
+          voided: targetAttempt.voided,
+          deadlineAtMs: targetAttempt.deadlineAtMs,
+          resultSourceIds: targetAttempt.results.map((result) => result.sourceId)
+        },
+        unresolvedTargetActions: runtimeSnapshot.actions
+          .filter((action) => action.stageId === target && ["pending", "failed", "uncertain"].includes(action.status))
+          .map((action) => ({ id: action.id, kind: action.kind, status: action.status }))
+      };
+    }
     const boundInput = confirmationInputBinding(intent, input);
     let impactHash = createHash("sha256").update(JSON.stringify({
       competitionId,
@@ -642,7 +717,8 @@ export class CompetitionService {
       milliseconds: input.milliseconds,
       plannedReadyAt: input.plannedReadyAt,
       deadlineAt: input.deadlineAt,
-      command: input.command
+      command: input.command,
+      runtimeStageImpact
     })).digest("hex");
     let runtimeToken: string | undefined;
     const unresolvedAutomationAction = input.kind === "automation-command-resolution"
@@ -764,6 +840,7 @@ export class CompetitionService {
       competitionId,
       target,
       stateVersion: competition.stateVersion,
+      ...(runtimeStateVersion === undefined ? {} : { runtimeStateVersion }),
       impactHash,
       expiresAtMs,
       ...(intent === undefined ? {} : { intent }),
@@ -771,7 +848,7 @@ export class CompetitionService {
     };
     this.confirmations.set(token, record);
     const displayConfig = this.getPublishedConfig(competitionId) ?? this.getDraftConfig(competitionId);
-    const displayStageId = input.stageId ?? runtimeSnapshot?.currentStageId;
+    const displayStageId = stageBoundAction ? target : input.stageId ?? runtimeSnapshot?.currentStageId;
     const displayStage = displayConfig.stages.find((stage) => stage.id === displayStageId);
     const displayStageName = displayStage ? stageDisplayName(displayStage) : displayStageId ?? "本关";
     const displayPlayerName = scorePreview?.affectedPlayers.find((player) => player.playerId === input.playerId)?.displayName
@@ -964,6 +1041,7 @@ export class CompetitionService {
       expiresAt: new Date(expiresAtMs).toISOString(),
       target,
       stateVersion: competition.stateVersion,
+      ...(runtimeStateVersion === undefined ? {} : { runtimeStateVersion }),
       impactHash,
       summary: `${competition.name} · ${input.kind} · 目标 ${target} · 版本 ${competition.stateVersion}`,
       effect: {
@@ -1169,12 +1247,22 @@ export class CompetitionService {
         idempotencyKey: input.idempotencyKey
       });
     }
+    const stageBoundConfirmation = stageBoundActionForIntent(input.action.type as ConfirmationIntent) !== undefined;
+    const confirmationToken = "confirmationToken" in input.action
+      ? input.action.confirmationToken
+      : undefined;
+    const validateStageBindingFirst = stageBoundConfirmation
+      && typeof confirmationToken === "string"
+      && this.confirmations.has(confirmationToken);
+    let confirmation = validateStageBindingFirst
+      ? this.consumeActionConfirmation(competitionId, input.action)
+      : undefined;
     const actionId = this.actionIdFor(input.action);
     if (actionId) this.assertActionAvailable(competitionId, actionId, this.runtimeAutomationSnapshot(competitionId));
     if (competition.mode === "work" && ["notification", "start-ready-flow", "ready", "cheat-off", "manual-go", "kick", "raw-command"].includes(input.action.type)) {
       this.workRuntimeManager.requireHealthy(competitionId);
     }
-    const confirmation = this.consumeActionConfirmation(competitionId, input.action);
+    confirmation ??= this.consumeActionConfirmation(competitionId, input.action);
     const restartUnconfirmedCommands = input.action.type === "restart-stage"
       ? this.unconfirmedCommandsFor(competitionId, this.runtimeAutomationSnapshot(competitionId))
       : [];
@@ -1504,13 +1592,87 @@ export class CompetitionService {
     return candidates.length > 0 ? candidates[Math.floor(candidates.length / 2)] as number : fallback;
   }
 
+  private reconcileAllPersistedStageBoundaries(): void {
+    const targetWallClockOriginMs = Date.now() - performance.now();
+    for (const competition of this.competitions.values()) {
+      if (competition.mode !== "work") continue;
+      this.reconcilePersistedStageBoundary(competition.id, targetWallClockOriginMs);
+    }
+  }
+
+  private reconcilePersistedStageBoundary(
+    competitionId: string,
+    targetWallClockOriginMs: number
+  ): AutomationSnapshot | undefined {
+    const payload = this.getPayload(competitionId);
+    const stored = payload.work?.automation;
+    if (!stored) return undefined;
+    const prepared = this.prepareAutomationSnapshot(competitionId, targetWallClockOriginMs);
+    if (!prepared) return undefined;
+    const stageChanged = prepared.currentStageId !== stored.currentStageId;
+    const intakeChanged = prepared.attempts.some((attempt, index) =>
+      attempt.intakeOpen !== stored.attempts[index]?.intakeOpen
+      || attempt.intakeClosedAtMs !== stored.attempts[index]?.intakeClosedAtMs);
+    if (!stageChanged && !intakeChanged) return prepared;
+
+    const restoredEngine = this.restoredEngineSnapshot(competitionId, prepared);
+    const engine = restoredEngine === undefined
+      ? undefined
+      : {
+          ...restoredEngine,
+          attempts: restoredEngine.attempts.map((attempt) => {
+            const controllerAttempt = prepared.attempts.find((candidate) =>
+              candidate.stageId === attempt.stageId && candidate.attemptNumber === attempt.attemptNumber);
+            return controllerAttempt === undefined
+              ? attempt
+              : {
+                  ...attempt,
+                  open: controllerAttempt.intakeOpen,
+                  voided: controllerAttempt.voided
+                };
+          })
+        };
+    if (stageChanged) {
+      const config = this.getDraftConfig(competitionId);
+      const participants = config.participants.map((participant) =>
+        participant.role === "participant" && participant.currentStageStatus !== "waiting"
+          ? { ...participant, currentStageStatus: "waiting" as const }
+          : participant);
+      if (participants.some((participant, index) => participant !== config.participants[index])) {
+        this.upsertConfig(competitionId, 0, false, { ...config, participants });
+      }
+    }
+    this.savePayload(competitionId, {
+      ...payload,
+      work: {
+        ...payload.work,
+        started: true,
+        participantStageId: prepared.currentStageId,
+        automation: prepared,
+        ...(engine === undefined ? {} : { engine })
+      }
+    });
+    this.journal.append({
+      type: stageChanged ? "work.stage-boundary-recovered" : "work.stage-deadline-recovered",
+      competitionId,
+      data: {
+        previousStageId: stored.currentStageId,
+        currentStageId: prepared.currentStageId,
+        stageChanged,
+        intakeChanged,
+        stateVersion: prepared.stateVersion
+      }
+    });
+    return prepared;
+  }
+
   private prepareAutomationSnapshot(competitionId: string, targetWallClockOriginMs: number): AutomationSnapshot | undefined {
     const stored = this.getPayload(competitionId).work?.automation;
     if (!stored) return undefined;
     const sourceOrigin = this.inferSnapshotWallClockOrigin(competitionId, stored, targetWallClockOriginMs);
     const delta = sourceOrigin - targetWallClockOriginMs;
     const shift = (value: number | undefined): number | undefined => value === undefined ? undefined : value + delta;
-    return {
+    const shifted: AutomationSnapshot = {
       ...stored,
       ...(shift(stored.clockNowMs) === undefined ? {} : { clockNowMs: shift(stored.clockNowMs) as number }),
       wallClockOriginMs: targetWallClockOriginMs,
@@ -1534,6 +1696,61 @@ export class CompetitionService {
         ...(action.acknowledgedAtMs === undefined ? {} : { acknowledgedAtMs: action.acknowledgedAtMs + delta })
       }))
     };
+    return this.synchronizePreparedStageBoundary(competitionId, shifted, performance.now());
+  }
+
+  private synchronizePreparedStageBoundary(
+    competitionId: string,
+    snapshot: AutomationSnapshot,
+    now: number
+  ): AutomationSnapshot {
+    const openAttempt = snapshot.attempts.findLast((attempt) =>
+      attempt.stageId === snapshot.currentStageId && attempt.intakeOpen && !attempt.voided);
+    const boundaryAtMs = snapshot.plannedReadyStageId !== undefined
+      && snapshot.plannedReadyStageId !== snapshot.currentStageId
+      && snapshot.plannedReadyAtMs !== undefined
+      ? snapshot.plannedReadyAtMs - READY_PREPARATION_LEAD_MS
+      : undefined;
+    if ((openAttempt === undefined || now < openAttempt.deadlineAtMs)
+      && (boundaryAtMs === undefined || now < boundaryAtMs)) {
+      return snapshot;
+    }
+
+    const config = this.getPublishedConfig(competitionId) ?? this.getDraftConfig(competitionId);
+    const controller = new CompetitionController({
+      competitionId,
+      participants: config.participants
+        .filter((participant) => participant.role === "participant")
+        .map((participant) => participant.id),
+      dynamicParticipants: true,
+      stages: config.stages.map((stage) => ({
+        id: stage.id,
+        map: stageCommandTarget(stage),
+        displayName: stageDisplayName(stage),
+        mode: stage.mode.toLowerCase() as "sr" | "hs",
+        timeLimitMs: stage.timeLimitMs,
+        minimumScoringPlace: stage.minimumScoringPlace
+      })),
+      policy: automationPolicyFor(config),
+      ...(snapshot.wallClockOriginMs === undefined ? {} : { wallClockOriginMs: snapshot.wallClockOriginMs }),
+      ...(snapshot.startProtectionUsedStageIds === undefined
+        ? {}
+        : { startProtectionUsedStageIds: snapshot.startProtectionUsedStageIds }),
+      initialSnapshot: snapshot
+    }, { now: () => now });
+    controller.synchronizeStageBoundary();
+    const settled = controller.snapshot();
+    if (settled.stateVersion === snapshot.stateVersion) return snapshot;
+    const existingActionIds = new Set(snapshot.actions.map((action) => action.id));
+    const recovered = {
+      ...settled,
+      blockers: snapshot.blockers,
+      actions: settled.actions.map((action) =>
+        existingActionIds.has(action.id) || action.status !== "pending"
+          ? action
+          : { ...action, status: "cancelled" as const })
+    };
+    return recovered;
   }
 
   private restoredEngineSnapshot(competitionId: string, automation: AutomationSnapshot): EngineSnapshot | undefined {
@@ -1830,7 +2047,10 @@ export class CompetitionService {
 
   private runtimeAutomationSnapshot(competitionId: string): AutomationSnapshot | undefined {
     const competition = this.get(competitionId);
-    if (competition.mode === "work") return this.workRuntimeManager.get(competitionId)?.controller.snapshot();
+    if (competition.mode === "work") {
+      const runtime = this.workRuntimeManager.get(competitionId);
+      return runtime ? this.workRuntimeManager.synchronizeStageBoundary(runtime) : undefined;
+    }
     const runId = this.getPayload(competitionId).activeRunId ?? competition.activeRunId;
     return runId ? this.testRuntimeManager.getRuntime(competitionId, runId).automation.snapshot() : undefined;
   }
@@ -1848,6 +2068,17 @@ export class CompetitionService {
   }
 
   private consumeActionConfirmation(competitionId: string, action: CompetitionAction): ConfirmationRecord | undefined {
+    const stageContext = (intent: ConfirmationIntent): { targetStageId: string; runtimeStateVersion: number } => {
+      const snapshot = this.runtimeAutomationSnapshot(competitionId);
+      const actionId = stageBoundActionForIntent(intent);
+      const targetStageId = actionId === undefined
+        ? undefined
+        : this.availableActionsFor(competitionId, snapshot).find((candidate) => candidate.action === actionId)?.targetStageId;
+      if (!snapshot || !targetStageId) {
+        throw new ServiceError("CONFIRMATION_STALE", "动作目标关卡或运行状态已变化，请重新确认", 409);
+      }
+      return { targetStageId, runtimeStateVersion: snapshot.stateVersion };
+    };
     switch (action.type) {
       case "reconnect-work":
       case "restart-work":
@@ -1859,24 +2090,50 @@ export class CompetitionService {
           this.workLifecycleConfirmationTarget(competitionId, action.type),
           action.type
         );
-      case "manual-go":
-        return this.consumeConfirmation(competitionId, "manual-go", action.confirmationToken, action.impactHash, competitionId, "manual-go");
+      case "manual-go": {
+        const context = stageContext("manual-go");
+        return this.consumeConfirmation(
+          competitionId,
+          "manual-go",
+          action.confirmationToken,
+          action.impactHash,
+          context.targetStageId,
+          "manual-go",
+          undefined,
+          context.runtimeStateVersion
+        );
+      }
       case "start-ready-flow":
-      case "end-stage":
-        return this.consumeConfirmation(competitionId, "manual-action", action.confirmationToken, action.impactHash, competitionId, action.type);
-      case "reschedule":
-      case "reschedule-stage-deadline":
-      case "delay-ready":
-      case "extend-stage-deadline":
+      case "ready":
+      case "end-stage": {
+        const context = stageContext(action.type);
         return this.consumeConfirmation(
           competitionId,
           "manual-action",
           action.confirmationToken,
           action.impactHash,
-          competitionId,
+          context.targetStageId,
           action.type,
-          confirmationInputBinding(action.type, action)
+          undefined,
+          context.runtimeStateVersion
         );
+      }
+      case "reschedule":
+      case "reschedule-stage-deadline":
+      case "delay-ready":
+      case "extend-stage-deadline": {
+        const context = stageContext(action.type);
+        return this.consumeConfirmation(
+          competitionId,
+          "manual-action",
+          action.confirmationToken,
+          action.impactHash,
+          context.targetStageId,
+          action.type,
+          confirmationInputBinding(action.type, action),
+          context.runtimeStateVersion
+        );
+      }
       case "set-start-protection":
         return this.consumeConfirmation(
           competitionId,
@@ -1886,8 +2143,22 @@ export class CompetitionService {
           `${competitionId}:start-protection:${this.runtimeAutomationSnapshot(competitionId)?.currentStageId ?? "unknown"}:${action.used}`,
           "set-start-protection"
         );
-      case "restart-stage":
-        return this.consumeConfirmation(competitionId, "restart-stage", action.confirmationToken, action.impactHash, action.stageId, "restart-stage");
+      case "restart-stage": {
+        const context = stageContext("restart-stage");
+        if (action.stageId !== context.targetStageId) {
+          throw new ServiceError("CONFIRMATION_STALE", "重赛目标关卡已变化，请重新确认", 409);
+        }
+        return this.consumeConfirmation(
+          competitionId,
+          "restart-stage",
+          action.confirmationToken,
+          action.impactHash,
+          context.targetStageId,
+          "restart-stage",
+          undefined,
+          context.runtimeStateVersion
+        );
+      }
       case "scoreboard-override":
         return this.consumeConfirmation(
           competitionId,
@@ -1914,12 +2185,12 @@ export class CompetitionService {
     impactHash: string,
     target?: string,
     intent?: ConfirmationIntent,
-    boundInput?: string
+    boundInput?: string,
+    runtimeStateVersion?: number
   ): ConfirmationRecord {
     const record = this.confirmations.get(token);
     const competition = this.get(competitionId);
     if (!record || record.competitionId !== competitionId || record.kind !== kind || record.impactHash !== impactHash
-      || target !== undefined && record.target !== target
       || record.intent !== intent
       || record.boundInput !== boundInput) {
       throw new ServiceError("CONFIRMATION_INVALID", "确认令牌与当前操作不匹配", 409);
@@ -1930,6 +2201,14 @@ export class CompetitionService {
     }
     if (record.stateVersion !== competition.stateVersion) {
       throw new ServiceError("CONFIRMATION_STALE", "比赛状态已变化，请重新确认", 409, { latestStateVersion: competition.stateVersion });
+    }
+    if (target !== undefined && record.target !== target) {
+      throw new ServiceError("CONFIRMATION_STALE", "动作目标关卡已变化，请重新确认", 409, { latestTarget: target });
+    }
+    if (runtimeStateVersion !== undefined && record.runtimeStateVersion !== runtimeStateVersion) {
+      throw new ServiceError("CONFIRMATION_STALE", "运行阶段、目标关卡、计划或尝试已变化，请重新确认", 409, {
+        latestRuntimeStateVersion: runtimeStateVersion
+      });
     }
     this.confirmations.delete(token);
     return record;
@@ -1965,7 +2244,12 @@ export class CompetitionService {
     const previousGoIndex = targetStageActions.findLastIndex((action) => action.kind === "go" && (action.status === "acknowledged" || action.status === "referee-confirmed"));
     const cheatOffConfirmed = targetStageActions.slice(previousGoIndex + 1).some((action) => action.kind === "cheat-off" && action.status === "acknowledged");
     const hasPendingCommands = snapshot?.actions.some((action) => action.status === "pending") ?? false;
-    const manualGoPhaseBlocked = ["countdown", "running", "review", "incident"].includes(phase);
+    const effectivePhase = (phase === "paused" || phase === "incident") && snapshot?.pausedFromPhase
+      ? snapshot.pausedFromPhase
+      : phase;
+    const pausedFromRunning = (phase === "paused" || phase === "incident") && snapshot?.pausedFromPhase === "running";
+    const manualGoPhaseBlocked = ["countdown", "running", "review", "incident"].includes(phase) || pausedFromRunning;
+    const resultIntakeEffective = effectivePhase === "running" || effectivePhase === "tail-intake";
     const hasRuntime = competition.mode === "work"
       ? this.workRuntimeManager.has(competitionId)
       : Boolean(this.getPayload(competitionId).activeRunId && snapshot);
@@ -1977,8 +2261,16 @@ export class CompetitionService {
       label: string,
       effect: string,
       enabled: boolean,
-      disabledReason: string
-    ): ActionAvailability => ({ action, label, effect, enabled, ...(enabled ? {} : { disabledReason }) });
+      disabledReason: string,
+      targetStageId?: string
+    ): ActionAvailability => ({
+      action,
+      label,
+      effect,
+      enabled,
+      ...(targetStageId === undefined ? {} : { targetStageId }),
+      ...(enabled ? {} : { disabledReason })
+    });
     return [
       descriptor("start-work", hasPersistedWorkRuntime ? "恢复比赛现场" : "连接比赛服务器", hasPersistedWorkRuntime ? "重新建立比赛连接，恢复持久化阶段、尝试、榜单和计划，并保持自动化暂停等待现场核对。" : "建立比赛服务器连接，并立即开始在线名单对账。", competition.mode === "work" && competition.status === "published" && !hasRuntime,
         competition.mode !== "work" ? "测试比赛不连接真实服务器" : competition.status !== "published" ? "请先发布比赛配置" : "比赛连接已经启动"),
@@ -2008,33 +2300,44 @@ export class CompetitionService {
         refereeActionsUnlocked && hasRuntime && workCommandHealthy,
         !refereeActionsUnlocked ? "请先发布比赛配置" : !hasRuntime ? "请先建立比赛连接或创建测试运行" : workConnectionReason),
       descriptor("start-ready-flow", "进入 Ready+发令流程", "立即发布本关预告，把目标关第一条 Ready 设为 1 分钟后，并自动完成 Ready、READY!、关闭 cheat 和发令。",
-        refereeActionsUnlocked && hasRuntime && workCommandHealthy && ["lobby", "preparing", "paused", "restart-preparing", "tail-intake"].includes(phase) && !hasReadyFlowBlockingIssue,
-        !refereeActionsUnlocked ? "请先发布比赛配置" : !hasRuntime ? "请先建立比赛连接或创建测试运行" : !workCommandHealthy ? workConnectionReason : !["lobby", "preparing", "paused", "restart-preparing", "tail-intake"].includes(phase) ? `当前阶段 ${phase} 不能进入发令流程` : "存在权限、事故或不确定命令"),
+        refereeActionsUnlocked && hasRuntime && workCommandHealthy && ["lobby", "preparing", "paused", "restart-preparing", "tail-intake"].includes(phase) && !pausedFromRunning && !hasReadyFlowBlockingIssue,
+        !refereeActionsUnlocked ? "请先发布比赛配置" : !hasRuntime ? "请先建立比赛连接或创建测试运行" : !workCommandHealthy ? workConnectionReason : pausedFromRunning ? "当前从比赛中暂停，不能重新向旧关进入 Ready+发令流程" : !["lobby", "preparing", "paused", "restart-preparing", "tail-intake"].includes(phase) ? `当前阶段 ${phase} 不能进入发令流程` : "存在权限、事故或不确定命令",
+        commandTargetStageId),
       descriptor("ready", "手动 Ready", "只向计划目标关发送一次 Ready；不改变阶段、计划时间、Bulletin 或自动流程进度。",
-        refereeActionsUnlocked && hasRuntime && workCommandHealthy && !["countdown", "running", "review", "incident"].includes(phase) && !hasReadyFlowBlockingIssue,
-        !refereeActionsUnlocked ? "请先发布比赛配置" : !hasRuntime ? "请先建立比赛连接或创建测试运行" : !workCommandHealthy ? workConnectionReason : "当前阶段或流程阻断不允许发送手动 Ready"),
+        refereeActionsUnlocked && hasRuntime && workCommandHealthy && !pausedFromRunning && !["countdown", "running", "review", "incident"].includes(phase) && !hasReadyFlowBlockingIssue,
+        !refereeActionsUnlocked ? "请先发布比赛配置" : !hasRuntime ? "请先建立比赛连接或创建测试运行" : !workCommandHealthy ? workConnectionReason : pausedFromRunning ? "当前从比赛中暂停，不能再次向旧关发送 Ready" : "当前阶段或流程阻断不允许发送手动 Ready",
+        commandTargetStageId),
       descriptor("cheat-off", "关闭 cheat", "只发送一次关闭 cheat 命令；成功回显将作为目标关手动发令的前置证据，不改变计划。", refereeActionsUnlocked && hasRuntime && workCommandHealthy && !["review", "incident"].includes(phase) && !hasUnconfirmedAutomationActions,
-        !refereeActionsUnlocked ? "请先发布比赛配置" : !hasRuntime ? "请先建立比赛连接或创建测试运行" : !workCommandHealthy ? workConnectionReason : "当前阶段不可发送"),
+        !refereeActionsUnlocked ? "请先发布比赛配置" : !hasRuntime ? "请先建立比赛连接或创建测试运行" : !workCommandHealthy ? workConnectionReason : "当前阶段不可发送",
+        commandTargetStageId),
       descriptor("manual-go", "手动发令", "不等待计划时间并立即触发仅作用于相同地图玩家的真实 3/2/1；只有权威 Go 回显后才创建尝试和设置本关时间。",
         refereeActionsUnlocked && hasRuntime && workCommandHealthy && !manualGoPhaseBlocked && cheatOffConfirmed && !hasPendingCommands && !hasBlockingIssue,
-        !refereeActionsUnlocked ? "请先发布比赛配置" : !hasRuntime ? "请先建立比赛连接或创建测试运行" : !workCommandHealthy ? workConnectionReason : manualGoPhaseBlocked ? `当前阶段 ${phase} 不能重复发令` : !cheatOffConfirmed ? "目标关尚无关闭 cheat 成功回显" : hasPendingCommands ? "仍有命令等待回显" : "存在权限、连接或未决命令阻断"),
+        !refereeActionsUnlocked ? "请先发布比赛配置" : !hasRuntime ? "请先建立比赛连接或创建测试运行" : !workCommandHealthy ? workConnectionReason : manualGoPhaseBlocked ? `当前阶段 ${phase} 不能重复发令` : !cheatOffConfirmed ? "目标关尚无关闭 cheat 成功回显" : hasPendingCommands ? "仍有命令等待回显" : "存在权限、连接或未决命令阻断",
+        commandTargetStageId),
       descriptor("delay-ready", "Ready 延后 1 分钟", "将下一次已安排的 Ready 时间顺延 1 分钟。", refereeActionsUnlocked && snapshot?.plannedReadyAtMs !== undefined && ["preparing", "pre-start-wait", "tail-intake", "restart-preparing"].includes(phase),
-        !refereeActionsUnlocked ? "请先发布比赛配置" : "当前没有可延后的 Ready 计划"),
+        !refereeActionsUnlocked ? "请先发布比赛配置" : "当前没有可延后的 Ready 计划",
+        snapshot?.plannedReadyStageId),
       descriptor("reschedule", "Ready 改期", "把下一次 Ready 改到指定时间，不改变本关时限。", refereeActionsUnlocked && snapshot?.plannedReadyAtMs !== undefined && ["preparing", "pre-start-wait", "tail-intake", "restart-preparing"].includes(phase),
-        !refereeActionsUnlocked ? "请先发布比赛配置" : "当前没有可改期的 Ready 计划"),
+        !refereeActionsUnlocked ? "请先发布比赛配置" : "当前没有可改期的 Ready 计划",
+        snapshot?.plannedReadyStageId),
       descriptor("extend-stage-deadline", "本关时限延长 1 分钟", "立即把当前关卡最晚结束时间顺延 1 分钟。", refereeActionsUnlocked && Boolean(openAttempt) && ["running", "tail-intake"].includes(phase),
-        !refereeActionsUnlocked ? "请先发布比赛配置" : "当前没有开放的成绩接收窗口"),
+        !refereeActionsUnlocked ? "请先发布比赛配置" : "当前没有开放的成绩接收窗口",
+        openAttempt?.stageId),
       descriptor("reschedule-stage-deadline", "关卡时限改期", "把当前关卡最晚结束时间改到指定时间，不改变下一次 Ready。", refereeActionsUnlocked && Boolean(openAttempt) && ["running", "tail-intake"].includes(phase),
-        !refereeActionsUnlocked ? "请先发布比赛配置" : "当前没有开放的成绩接收窗口"),
-      descriptor("end-stage", "提前结束本关", "关闭成绩窗口；未完成选手不补造 DNF，裁判需要 DNF 时应在成绩页修订。", refereeActionsUnlocked && Boolean(openAttempt) && ["running", "tail-intake"].includes(phase),
-        !refereeActionsUnlocked ? "请先发布比赛配置" : "当前没有可结束的开放关卡"),
+        !refereeActionsUnlocked ? "请先发布比赛配置" : "当前没有开放的成绩接收窗口",
+        openAttempt?.stageId),
+      descriptor("end-stage", "提前结束本关", "关闭成绩窗口；未完成选手不补造 DNF，裁判需要 DNF 时应在成绩页修订。", refereeActionsUnlocked && Boolean(openAttempt) && resultIntakeEffective,
+        !refereeActionsUnlocked ? "请先发布比赛配置" : "当前没有可结束的开放关卡",
+        openAttempt?.stageId),
       descriptor("restart-stage", "重赛本关", "强制隔离当前阻断并立即把当前关重置到 Ready；已有尝试作废，所有原始证据与审计保留。",
         competition.status === "published" && hasRuntime && Boolean(snapshot?.currentStageId),
-        competition.status !== "published" ? "只有已发布且未结束的比赛可以重赛" : !hasRuntime ? "请先建立比赛连接或创建测试运行" : "当前运行没有可重置的关卡"),
+        competition.status !== "published" ? "只有已发布且未结束的比赛可以重赛" : !hasRuntime ? "请先建立比赛连接或创建测试运行" : "当前运行没有可重置的关卡",
+        snapshot?.currentStageId),
       descriptor("set-start-protection", startProtectionUsed ? "将起跑保护重置为未使用" : "将起跑保护标记为已使用",
         startProtectionUsed ? "允许本关后续首次有效敏感期掉线再次触发起跑保护。" : "本关后续敏感期掉线不再自动延时或作废尝试。",
         refereeActionsUnlocked && hasRuntime && startProtectionEnabled && Boolean(snapshot?.currentStageId) && phase !== "review",
-        !startProtectionEnabled ? "比赛配置未启用起跑保护" : !refereeActionsUnlocked ? "请先发布比赛配置" : !hasRuntime ? "请先建立比赛连接或创建测试运行" : "比赛已进入复核"),
+        !startProtectionEnabled ? "比赛配置未启用起跑保护" : !refereeActionsUnlocked ? "请先发布比赛配置" : !hasRuntime ? "请先建立比赛连接或创建测试运行" : "比赛已进入复核",
+        snapshot?.currentStageId),
       descriptor("kick", "Kick 玩家", "从服务器移除目标玩家；结果不确定时不会自动重试。", refereeActionsUnlocked && competition.mode === "work" && hasRuntime && workCommandHealthy,
         !refereeActionsUnlocked ? "请先发布比赛配置" : competition.mode !== "work" ? "测试模式不发送真实 Kick" : !hasRuntime ? "请先建立比赛连接" : workConnectionReason),
       descriptor("raw-command", "发送原始命令", "原样发送一条 MockClient 命令；结果不确定时不会自动重试。", refereeActionsUnlocked && competition.mode === "work" && hasRuntime && workCommandHealthy,
@@ -2049,10 +2352,14 @@ export class CompetitionService {
   private scoreEditPermissionsFor(
     competitionId: string,
     status = this.get(competitionId).status,
-    currentStageId = this.runtimeAutomationSnapshot(competitionId)?.currentStageId
+    currentStageId?: string
   ): RuntimeSnapshot["scoreEditPermissions"] {
     const stages = (this.getPublishedConfig(competitionId) ?? this.getDraftConfig(competitionId)).stages;
-    return this.scoreboardService.editPermissions(stages, status, currentStageId);
+    const runtimeStageId = currentStageId ?? this.runtimeAutomationSnapshot(competitionId)?.currentStageId;
+    const persistedStageId = runtimeStageId ?? (this.getPayload(competitionId).work?.automation
+      ? this.reconcilePersistedStageBoundary(competitionId, Date.now() - performance.now())?.currentStageId
+      : undefined);
+    return this.scoreboardService.editPermissions(stages, status, persistedStageId);
   }
 
   private assertActionAvailable(competitionId: string, action: RefereeActionId, snapshot?: AutomationSnapshot): void {
