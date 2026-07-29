@@ -220,7 +220,16 @@ test("edits per-stage scoring and replaces the stage draft through inline confir
   await protectionToggle.uncheck();
   await expect(page.getByText("未启用", { exact: true })).toBeVisible();
   await protectionToggle.check();
-  await expect(page.getByText("已启用（默认）", { exact: true })).toBeVisible();
+  const protectionStatus = page.getByText("已启用（默认）", { exact: true });
+  await expect(protectionStatus).toBeVisible();
+  const [protectionRowBox, protectionToggleBox, protectionStatusBox] = await Promise.all([
+    protectionToggle.locator("..").boundingBox(),
+    protectionToggle.boundingBox(),
+    protectionStatus.boundingBox()
+  ]);
+  if (!protectionRowBox || !protectionToggleBox || !protectionStatusBox) throw new Error("起跑保护行未完成布局");
+  expect(protectionStatusBox.x - (protectionToggleBox.x + protectionToggleBox.width)).toBeLessThanOrEqual(12);
+  expect(protectionStatusBox.x + protectionStatusBox.width).toBeLessThanOrEqual(protectionRowBox.x + protectionRowBox.width + 1);
   await page.getByRole("button", { name: "大型赛事预设" }).click();
   const scoringPresetConfirmation = page.locator(".grid.two .panel .inline-confirm").filter({ hasText: "用大型赛事预设覆盖当前计分" });
   await expect(scoringPresetConfirmation).toBeVisible();
