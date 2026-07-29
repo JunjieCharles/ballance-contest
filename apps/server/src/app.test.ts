@@ -404,6 +404,123 @@ describe("local API", () => {
     expect(afterNewGo.currentScoreboard.some((entry) => entry.stages.s1)).toBe(true);
   });
 
+  it("executes explicit mark, force-reset, and force-next recovery through the API", async () => {
+    const scenario = JSON.parse(readFileSync(resolve("test/fixtures/scenarios/three-stage-main/scenario.json"), "utf8")) as Record<string, unknown>;
+    const stages = (scenario.stages as Array<{ id: string; order: number; level: number; mode: "SR" | "HS"; timeLimitMs: number; scoring: number[]; minimumScoringPlace: number }>)
+      .slice(0, 2)
+      .map((stage) => ({ ...stage, label: `${stage.mode} ${stage.level}` }));
+    const created = await app.inject({
+      method: "POST",
+      url: "/api/v1/competitions",
+      headers: auth(token),
+      payload: { name: "Explicit API stage recovery", mode: "test", idempotencyKey: "explicit-api-stage-recovery" }
+    });
+    const competitionId = created.json<{ data: { id: string } }>().data.id;
+    await app.inject({
+      method: "PATCH",
+      url: `/api/v1/competitions/${competitionId}/draft`,
+      headers: auth(token),
+      payload: { expectedStateVersion: 0, idempotencyKey: "explicit-api-stages", stages }
+    });
+    await app.inject({
+      method: "POST",
+      url: `/api/v1/competitions/${competitionId}/publish`,
+      headers: auth(token),
+      payload: { expectedStateVersion: 1, idempotencyKey: "publish-explicit-api-stage-recovery" }
+    });
+    const run = await app.inject({
+      method: "POST",
+      url: `/api/v1/competitions/${competitionId}/test-runs/from-scenario`,
+      headers: auth(token),
+      payload: { scenarioId: "normal-player-roster" }
+    });
+    const runId = run.json<{ data: { runId: string } }>().data.runId;
+    const getSnapshot = async () => (await app.inject({
+      method: "GET",
+      url: `/api/v1/competitions/${competitionId}/snapshot`,
+      headers: auth(token)
+    })).json<{
+      data: {
+        competition: { stateVersion: number };
+        runtime: {
+          phase: string;
+          pausedFromPhase?: string;
+          currentStageId?: string;
+          plannedReadyStageId?: string;
+          attempts: Array<{ id: string; stageId: string; origin?: string; voided: boolean }>;
+          availableActions: Array<{ action: string; enabled: boolean; targetStageId?: string }>;
+        };
+      };
+    }>().data;
+    const execute = async (
+      type: "mark-stage-started" | "force-reset-stage" | "force-next-stage",
+      stageId: string,
+      idempotencyKey: string
+    ) => {
+      const before = await getSnapshot();
+      const confirmationResponse = await app.inject({
+        method: "POST",
+        url: `/api/v1/competitions/${competitionId}/confirmations`,
+        headers: auth(token),
+        payload: { kind: "manual-action", intent: type, target: stageId, stageId }
+      });
+      expect(confirmationResponse.statusCode).toBe(200);
+      const confirmation = confirmationResponse.json<{ data: { token: string; impactHash: string } }>().data;
+      return app.inject({
+        method: "POST",
+        url: `/api/v1/competitions/${competitionId}/actions`,
+        headers: auth(token),
+        payload: {
+          expectedStateVersion: before.competition.stateVersion,
+          idempotencyKey,
+          action: { type, stageId, confirmationToken: confirmation.token, impactHash: confirmation.impactHash }
+        }
+      });
+    };
+
+    let snapshot = await getSnapshot();
+    expect(snapshot.runtime.availableActions).toEqual(expect.arrayContaining([
+      expect.objectContaining({ action: "mark-stage-started", enabled: false, targetStageId: "s1" }),
+      expect.objectContaining({ action: "force-reset-stage", enabled: true, targetStageId: "s1" }),
+      expect.objectContaining({ action: "force-next-stage", enabled: true, targetStageId: "s2" })
+    ]));
+    expect((await execute("force-reset-stage", "s1", "api-force-reset")).statusCode).toBe(200);
+    await app.inject({
+      method: "POST",
+      url: `/api/v1/competitions/${competitionId}/test-runs/${runId}/automation/advance`,
+      headers: auth(token),
+      payload: { milliseconds: 60_000 }
+    });
+
+    snapshot = await getSnapshot();
+    expect(snapshot.runtime).toMatchObject({ phase: "ready", currentStageId: "s1" });
+    expect((await execute("mark-stage-started", "s1", "api-mark-started")).statusCode).toBe(200);
+    snapshot = await getSnapshot();
+    expect(snapshot.runtime).toMatchObject({ phase: "paused", pausedFromPhase: "running", currentStageId: "s1" });
+    expect(snapshot.runtime.attempts).toContainEqual(expect.objectContaining({
+      stageId: "s1",
+      origin: "referee-marked-started",
+      voided: false
+    }));
+    expect(snapshot.runtime.availableActions).toContainEqual(expect.objectContaining({
+      action: "mark-stage-started",
+      enabled: false,
+      targetStageId: "s1"
+    }));
+
+    expect((await execute("force-next-stage", "s2", "api-force-next")).statusCode).toBe(200);
+    snapshot = await getSnapshot();
+    expect(snapshot.runtime).toMatchObject({
+      currentStageId: "s2",
+      phase: "preparing",
+      plannedReadyStageId: "s2"
+    });
+    expect(snapshot.runtime.availableActions).toContainEqual(expect.objectContaining({
+      action: "force-next-stage",
+      enabled: false
+    }));
+  });
+
   it("triggers faults from the selected scenario instead of a manual fault endpoint", async () => {
     const created = await app.inject({ method: "POST", url: "/api/v1/competitions", headers: auth(token), payload: { name: "Fault scenario", mode: "test", idempotencyKey: "fault-scenario" } });
     const competitionId = created.json<{ data: { id: string } }>().data.id;

@@ -33,6 +33,18 @@ export interface CommandRecord {
   generation?: number;
 }
 
+export interface CommandCancellationPreview {
+  record: CommandRecord;
+  expected: {
+    id: string;
+    idempotencyKey: string;
+    status: CommandStatus;
+    updatedAt: string;
+    generation?: number;
+    taskState: "none" | "queued" | "write-started";
+  };
+}
+
 const cleanText = (text: string): string => {
   if (text.includes("\n") || text.includes("\r") || text.length > 500) throw new Error("Command text contains invalid control characters or is too long");
   return text.trim();
@@ -225,6 +237,103 @@ export class CommandQueue {
     return true;
   }
 
+  /**
+   * Isolate selected business commands without changing the connection generation.
+   *
+   * A referee recovery action can invalidate a Ready/Go cycle while its commands
+   * are already waiting in this queue. Commands that have not started writing are
+   * safe to cancel. Once stdin writing has started, the server-side outcome is
+   * unknowable, so the existing high-risk uncertainty rule still applies.
+   */
+  public cancelWhere(predicate: (record: Readonly<CommandRecord>) => boolean): readonly CommandRecord[] {
+    return this.applyCancellationPreview(this.previewCancelWhere(predicate), true);
+  }
+
+  /**
+   * Produce the exact records that cancellation would persist without changing
+   * queue tasks or resolving their promises. The caller may durably commit these
+   * records and then apply the preview in the same JavaScript call stack.
+   */
+  public previewCancelWhere(predicate: (record: Readonly<CommandRecord>) => boolean): readonly CommandCancellationPreview[] {
+    const previewedAt = new Date().toISOString();
+    const selected: CommandCancellationPreview[] = [];
+    for (const record of this.records.values()) {
+      if (!predicate(record)) continue;
+      const task = this.tasks.get(record.id);
+      const taskState = !task || task.settled
+        ? "none" as const
+        : task.writeStarted
+          ? "write-started" as const
+          : "queued" as const;
+      const status = taskState === "write-started"
+        ? requiresExplicitCommandResolution(record.action) ? "uncertain" as const : "timed_out" as const
+        : taskState === "queued"
+          ? "cancelled" as const
+          : record.status;
+      selected.push({
+        record: {
+          ...record,
+          action: { ...record.action },
+          status,
+          updatedAt: taskState === "none" ? record.updatedAt : previewedAt
+        },
+        expected: {
+          id: record.id,
+          idempotencyKey: record.idempotencyKey,
+          status: record.status,
+          updatedAt: record.updatedAt,
+          ...(record.generation === undefined ? {} : { generation: record.generation }),
+          taskState
+        }
+      });
+    }
+    return selected;
+  }
+
+  /**
+   * Apply a previously persisted preview. Every selected task is revalidated
+   * before the first mutation so a stale preview fails closed.
+   */
+  public applyCancellationPreview(
+    previews: readonly CommandCancellationPreview[],
+    notify = false
+  ): readonly CommandRecord[] {
+    for (const preview of previews) {
+      const current = this.records.get(preview.expected.idempotencyKey);
+      const task = current ? this.tasks.get(current.id) : undefined;
+      const taskState = !task || task.settled
+        ? "none"
+        : task.writeStarted
+          ? "write-started"
+          : "queued";
+      if (!current
+        || current.id !== preview.expected.id
+        || current.status !== preview.expected.status
+        || current.updatedAt !== preview.expected.updatedAt
+        || current.generation !== preview.expected.generation
+        || taskState !== preview.expected.taskState) {
+        throw new Error("COMMAND_CANCELLATION_PREVIEW_STALE");
+      }
+    }
+    const selected: CommandRecord[] = [];
+    for (const preview of previews) {
+      const current = this.records.get(preview.expected.idempotencyKey) as CommandRecord;
+      const task = this.tasks.get(current.id);
+      if (!task || task.settled) {
+        selected.push(current);
+        continue;
+      }
+      selected.push(this.settleTask(
+        task,
+        preview.record.status,
+        preview.record.responseLine,
+        notify,
+        preview.record.updatedAt
+      ));
+    }
+    return selected;
+  }
+
   public enqueue(action: CommandAction, idempotencyKey: string, onWriteStart?: (record: CommandRecord) => void): Promise<CommandRecord> {
     const old = this.records.get(idempotencyKey);
     if (old) return Promise.resolve(old);
@@ -338,7 +447,9 @@ export class CommandQueue {
   private settleTask(
     task: CommandTask,
     status: CommandStatus,
-    responseLine?: string
+    responseLine?: string,
+    notify = true,
+    updatedAt?: string
   ): CommandRecord {
     if (task.settled) return task.record;
     task.settled = true;
@@ -346,17 +457,23 @@ export class CommandQueue {
     if (task.settleAfterWriteTimeout) clearTimeout(task.settleAfterWriteTimeout);
     if (this.pending?.record.id === task.record.id) this.pending = undefined;
     this.tasks.delete(task.record.id);
-    const record = this.update(task.record, status, responseLine);
+    const record = this.update(task.record, status, responseLine, notify, updatedAt);
     task.resolveResult(record);
     task.finishTurn?.();
     return record;
   }
 
-  private update(record: CommandRecord, status: CommandStatus, responseLine?: string): CommandRecord {
+  private update(
+    record: CommandRecord,
+    status: CommandStatus,
+    responseLine?: string,
+    notify = true,
+    updatedAt = new Date().toISOString()
+  ): CommandRecord {
     record.status = status;
-    record.updatedAt = new Date().toISOString();
+    record.updatedAt = updatedAt;
     if (responseLine !== undefined) record.responseLine = responseLine;
-    this.onChange?.(record);
+    if (notify) this.onChange?.(record);
     return record;
   }
 }

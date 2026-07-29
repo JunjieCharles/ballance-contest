@@ -1600,6 +1600,614 @@ describe("CompetitionService dynamic participants", () => {
     await service.close();
   });
 
+  it("persists explicit stage recovery across SQLite restart and isolates old uncertain flow actions", async () => {
+    dataRoot = mkdtempSync(join(tmpdir(), "ballance-explicit-stage-recovery-"));
+    database = openDatabase(join(dataRoot, "console.sqlite"));
+    let service = new CompetitionService(undefined, { database, dataRoot });
+    const record = service.create({ name: "Explicit stage recovery", mode: "test", idempotencyKey: "explicit-stage-recovery" });
+    service.updateDraft(record.id, {
+      expectedStateVersion: 0,
+      idempotencyKey: "explicit-stage-recovery-stages",
+      stages: [
+        { id: "s1", order: 1, label: "SR1", level: 1, mode: "SR", mapKind: "official", timeLimitMs: 200_000, scoring: [20, 15, 12], minimumScoringPlace: 3 },
+        { id: "s2", order: 2, label: "SR2", level: 2, mode: "SR", mapKind: "official", timeLimitMs: 200_000, scoring: [20, 15, 12], minimumScoringPlace: 3 }
+      ]
+    });
+    service.publish(record.id, 1, "publish-explicit-stage-recovery");
+    const runId = service.createTestRunFromScenario(record.id, "normal-player-roster").runId;
+    service.startTestAutomation(record.id, runId, 0);
+    const manager = testRuntimeManager(service);
+    const runtime = manager.getRuntime(record.id, runId);
+
+    let snapshot = service.snapshot(record.id);
+    expect(snapshot.runtime).toMatchObject({ phase: "ready", currentStageId: "s1" });
+    expect(snapshot.runtime.availableActions).toEqual(expect.arrayContaining([
+      expect.objectContaining({ action: "mark-stage-started", enabled: true, targetStageId: "s1" }),
+      expect.objectContaining({ action: "force-reset-stage", enabled: true, targetStageId: "s1" }),
+      expect.objectContaining({ action: "force-next-stage", enabled: true, targetStageId: "s2" })
+    ]));
+    const staleMark = service.createConfirmation(record.id, {
+      kind: "manual-action",
+      intent: "mark-stage-started",
+      target: "s1",
+      stageId: "s1"
+    });
+
+    runtime.automation.manualReady();
+    const oldReady = runtime.automation.drainActions().find((action) => action.kind === "ready");
+    if (!oldReady) throw new Error("missing old-cycle Ready action");
+    runtime.automation.acknowledgeAction(oldReady.id, "uncertain");
+    manager.persist(runtime);
+    snapshot = service.snapshot(record.id);
+    expect(snapshot.runtime.blockers.length).toBeGreaterThan(0);
+    expect(snapshot.runtime.unconfirmedAutomationActions).toContainEqual(expect.objectContaining({
+      id: oldReady.id,
+      status: "uncertain"
+    }));
+    expect(snapshot.runtime.availableActions).toEqual(expect.arrayContaining([
+      expect.objectContaining({ action: "mark-stage-started", enabled: true, targetStageId: "s1" }),
+      expect.objectContaining({ action: "force-reset-stage", enabled: true, targetStageId: "s1" }),
+      expect.objectContaining({ action: "force-next-stage", enabled: true, targetStageId: "s2" })
+    ]));
+    await expect(service.performAction(record.id, {
+      expectedStateVersion: snapshot.competition.stateVersion,
+      idempotencyKey: "stale-mark-after-runtime-change",
+      action: {
+        type: "mark-stage-started",
+        stageId: "s1",
+        confirmationToken: staleMark.token,
+        impactHash: staleMark.impactHash
+      }
+    })).rejects.toMatchObject({ code: "CONFIRMATION_STALE", statusCode: 409 });
+
+    const markConfirmation = service.createConfirmation(record.id, {
+      kind: "manual-action",
+      intent: "mark-stage-started",
+      target: "s1",
+      stageId: "s1"
+    });
+    await service.performAction(record.id, {
+      expectedStateVersion: snapshot.competition.stateVersion,
+      idempotencyKey: "mark-stage-started-after-blocker",
+      action: {
+        type: "mark-stage-started",
+        stageId: "s1",
+        confirmationToken: markConfirmation.token,
+        impactHash: markConfirmation.impactHash
+      }
+    });
+    snapshot = service.snapshot(record.id);
+    const markedAttempt = runtime.automation.snapshot().attempts.find((attempt) => attempt.stageId === "s1" && !attempt.voided);
+    if (!markedAttempt) throw new Error("missing referee-marked attempt");
+    expect(markedAttempt.origin).toBe("referee-marked-started");
+    expect(markedAttempt.deadlineAtMs - markedAttempt.goAtMs).toBe(200_000);
+    expect(snapshot.runtime).toMatchObject({ phase: "paused", pausedFromPhase: "running" });
+    expect(snapshot.runtime.unconfirmedAutomationActions).toEqual([]);
+    expect(runtime.automation.snapshot().actions).toContainEqual(expect.objectContaining({
+      id: oldReady.id,
+      status: "uncertain",
+      isolated: true
+    }));
+    expect(snapshot.runtime.availableActions).toContainEqual(expect.objectContaining({
+      action: "mark-stage-started",
+      enabled: false,
+      targetStageId: "s1"
+    }));
+
+    const firstReceivedAtMs = runtime.automationClock.now();
+    const firstPlayer = runtime.definition.players[0];
+    if (!firstPlayer) throw new Error("missing test player");
+    expect(runtime.automation.recordResult({
+      stageId: "s1",
+      playerId: firstPlayer.id,
+      status: "finished",
+      sourceId: "first-marked-result",
+      receivedAtMs: firstReceivedAtMs
+    })).toBe("accepted");
+    runtime.engine.apply({
+      atMs: firstReceivedAtMs,
+      sourceId: "first-marked-result",
+      type: "finish",
+      stageId: "s1",
+      playerId: firstPlayer.id,
+      score: 100,
+      elapsedMs: 1_000
+    });
+    manager.settle(runtime);
+    manager.persist(runtime);
+    expect(service.snapshot(record.id).currentScoreboard.some((entry) => entry.stages.s1)).toBe(true);
+
+    snapshot = service.snapshot(record.id);
+    const resetConfirmation = service.createConfirmation(record.id, {
+      kind: "manual-action",
+      intent: "force-reset-stage",
+      target: "s1",
+      stageId: "s1"
+    });
+    await service.performAction(record.id, {
+      expectedStateVersion: snapshot.competition.stateVersion,
+      idempotencyKey: "force-reset-marked-stage",
+      action: {
+        type: "force-reset-stage",
+        stageId: "s1",
+        confirmationToken: resetConfirmation.token,
+        impactHash: resetConfirmation.impactHash
+      }
+    });
+    snapshot = service.snapshot(record.id);
+    expect(snapshot.runtime).toMatchObject({
+      currentStageId: "s1",
+      phase: "preparing",
+      plannedReadyStageId: "s1",
+      attempts: [expect.objectContaining({ id: markedAttempt.id, voided: true, intakeOpen: false })]
+    });
+    expect(snapshot.currentScoreboard.every((entry) => entry.stages.s1 === undefined)).toBe(true);
+
+    service.advanceTestAutomation(record.id, runId, 60_000);
+    snapshot = service.snapshot(record.id);
+    expect(snapshot.runtime.phase).toBe("ready");
+    const secondMark = service.createConfirmation(record.id, {
+      kind: "manual-action",
+      intent: "mark-stage-started",
+      target: "s1",
+      stageId: "s1"
+    });
+    await service.performAction(record.id, {
+      expectedStateVersion: snapshot.competition.stateVersion,
+      idempotencyKey: "mark-stage-started-for-force-next",
+      action: {
+        type: "mark-stage-started",
+        stageId: "s1",
+        confirmationToken: secondMark.token,
+        impactHash: secondMark.impactHash
+      }
+    });
+    const secondReceivedAtMs = runtime.automationClock.now();
+    expect(runtime.automation.recordResult({
+      stageId: "s1",
+      playerId: firstPlayer.id,
+      status: "finished",
+      sourceId: "retained-result-before-force-next",
+      receivedAtMs: secondReceivedAtMs
+    })).toBe("accepted");
+    runtime.engine.apply({
+      atMs: secondReceivedAtMs,
+      sourceId: "retained-result-before-force-next",
+      type: "finish",
+      stageId: "s1",
+      playerId: firstPlayer.id,
+      score: 110,
+      elapsedMs: 1_000
+    });
+    manager.settle(runtime);
+    manager.persist(runtime);
+
+    snapshot = service.snapshot(record.id);
+    const nextConfirmation = service.createConfirmation(record.id, {
+      kind: "manual-action",
+      intent: "force-next-stage",
+      target: "s2",
+      stageId: "s2"
+    });
+    await service.performAction(record.id, {
+      expectedStateVersion: snapshot.competition.stateVersion,
+      idempotencyKey: "force-next-stage-retains-score",
+      action: {
+        type: "force-next-stage",
+        stageId: "s2",
+        confirmationToken: nextConfirmation.token,
+        impactHash: nextConfirmation.impactHash
+      }
+    });
+    snapshot = service.snapshot(record.id);
+    expect(snapshot.runtime).toMatchObject({
+      currentStageId: "s2",
+      phase: "preparing",
+      plannedReadyStageId: "s2"
+    });
+    expect(snapshot.currentScoreboard).toContainEqual(expect.objectContaining({
+      playerId: firstPlayer.id,
+      stages: { s1: expect.objectContaining({ sourceId: "retained-result-before-force-next" }) }
+    }));
+    expect(snapshot.runtime.scoreEditPermissions).toContainEqual(expect.objectContaining({
+      stageId: "s1",
+      editable: true
+    }));
+
+    await service.close();
+    service = new CompetitionService(undefined, { database, dataRoot });
+    snapshot = service.snapshot(record.id);
+    expect(snapshot.runtime).toMatchObject({
+      currentStageId: "s2",
+      phase: "paused",
+      pausedFromPhase: "preparing",
+      plannedReadyStageId: "s2",
+      attempts: [
+        expect.objectContaining({ id: markedAttempt.id, origin: "referee-marked-started", voided: true }),
+        expect.objectContaining({ origin: "referee-marked-started", stageId: "s1", voided: false, intakeOpen: false })
+      ]
+    });
+    expect(snapshot.runtime.unconfirmedAutomationActions).toEqual([]);
+    expect(snapshot.currentScoreboard).toContainEqual(expect.objectContaining({
+      playerId: firstPlayer.id,
+      stages: { s1: expect.objectContaining({ sourceId: "retained-result-before-force-next" }) }
+    }));
+    await service.close();
+  });
+
+  it("rejects stage-recovery confirmations after the active test runtime changes at the same state version", async () => {
+    dataRoot = mkdtempSync(join(tmpdir(), "ballance-runtime-bound-recovery-"));
+    database = openDatabase(join(dataRoot, "console.sqlite"));
+    const service = new CompetitionService(undefined, { database, dataRoot });
+    const record = service.create({
+      name: "Runtime-bound recovery confirmation",
+      mode: "test",
+      idempotencyKey: "runtime-bound-recovery-confirmation"
+    });
+    service.updateDraft(record.id, {
+      expectedStateVersion: 0,
+      idempotencyKey: "runtime-bound-recovery-stages",
+      stages: [
+        { id: "s1", order: 1, label: "SR1", level: 1, mode: "SR", mapKind: "official", timeLimitMs: 200_000, scoring: [20, 15, 12], minimumScoringPlace: 3 },
+        { id: "s2", order: 2, label: "SR2", level: 2, mode: "SR", mapKind: "official", timeLimitMs: 200_000, scoring: [20, 15, 12], minimumScoringPlace: 3 }
+      ]
+    });
+    service.publish(record.id, 1, "publish-runtime-bound-recovery");
+    const runAId = service.createTestRunFromScenario(record.id, "normal-player-roster").runId;
+    service.startTestAutomation(record.id, runAId, 0);
+    const runA = testRuntimeManager(service).getRuntime(record.id, runAId);
+    const markA = service.createConfirmation(record.id, {
+      kind: "manual-action",
+      intent: "mark-stage-started",
+      target: "s1",
+      stageId: "s1"
+    });
+    const resetA = service.createConfirmation(record.id, {
+      kind: "manual-action",
+      intent: "force-reset-stage",
+      target: "s1",
+      stageId: "s1"
+    });
+    const nextA = service.createConfirmation(record.id, {
+      kind: "manual-action",
+      intent: "force-next-stage",
+      target: "s2",
+      stageId: "s2"
+    });
+    const restartA = service.createConfirmation(record.id, {
+      kind: "restart-stage",
+      intent: "restart-stage",
+      target: "s1",
+      stageId: "s1"
+    });
+
+    const runBId = service.createTestRunFromScenario(record.id, "normal-player-roster").runId;
+    service.startTestAutomation(record.id, runBId, 0);
+    const runB = testRuntimeManager(service).getRuntime(record.id, runBId);
+    expect(runB.automation.snapshot().stateVersion).toBe(runA.automation.snapshot().stateVersion);
+    const expectedStateVersion = service.snapshot(record.id).competition.stateVersion;
+    await expect(service.performAction(record.id, {
+      expectedStateVersion,
+      idempotencyKey: "stale-run-a-mark",
+      action: {
+        type: "mark-stage-started",
+        stageId: "s1",
+        confirmationToken: markA.token,
+        impactHash: markA.impactHash
+      }
+    })).rejects.toMatchObject({ code: "CONFIRMATION_STALE", statusCode: 409 });
+    await expect(service.performAction(record.id, {
+      expectedStateVersion,
+      idempotencyKey: "stale-run-a-reset",
+      action: {
+        type: "force-reset-stage",
+        stageId: "s1",
+        confirmationToken: resetA.token,
+        impactHash: resetA.impactHash
+      }
+    })).rejects.toMatchObject({ code: "CONFIRMATION_STALE", statusCode: 409 });
+    await expect(service.performAction(record.id, {
+      expectedStateVersion,
+      idempotencyKey: "stale-run-a-next",
+      action: {
+        type: "force-next-stage",
+        stageId: "s2",
+        confirmationToken: nextA.token,
+        impactHash: nextA.impactHash
+      }
+    })).rejects.toMatchObject({ code: "CONFIRMATION_STALE", statusCode: 409 });
+    await expect(service.performAction(record.id, {
+      expectedStateVersion,
+      idempotencyKey: "stale-run-a-restart",
+      action: {
+        type: "restart-stage",
+        stageId: "s1",
+        confirmationToken: restartA.token,
+        impactHash: restartA.impactHash
+      }
+    })).rejects.toMatchObject({ code: "CONFIRMATION_STALE", statusCode: 409 });
+    expect(runA.automation.snapshot().attempts).toEqual([]);
+    expect(runB.automation.snapshot().attempts).toEqual([]);
+
+    const markB = service.createConfirmation(record.id, {
+      kind: "manual-action",
+      intent: "mark-stage-started",
+      target: "s1",
+      stageId: "s1"
+    });
+    await expect(service.performAction(record.id, {
+      expectedStateVersion,
+      idempotencyKey: "current-run-b-mark",
+      action: {
+        type: "mark-stage-started",
+        stageId: "s1",
+        confirmationToken: markB.token,
+        impactHash: markB.impactHash
+      }
+    })).resolves.toMatchObject({ actionType: "mark-stage-started" });
+    expect(runA.automation.snapshot().attempts).toEqual([]);
+    expect(runB.automation.snapshot().attempts).toContainEqual(expect.objectContaining({
+      stageId: "s1",
+      origin: "referee-marked-started"
+    }));
+    await service.close();
+  });
+
+  it("relocates a restored work controller without shifting its wall-clock engine attempt", async () => {
+    dataRoot = mkdtempSync(join(tmpdir(), "ballance-work-attempt-time-recovery-"));
+    database = openDatabase(join(dataRoot, "console.sqlite"));
+    let service = new CompetitionService(undefined, { database, dataRoot });
+    const record = service.create({
+      name: "Work attempt time recovery",
+      mode: "work",
+      idempotencyKey: "work-attempt-time-recovery"
+    });
+    service.publish(record.id, 0, "publish-work-attempt-time-recovery");
+    const manager = workRuntimeManager(service);
+    const runtime = manager.makeRuntime(
+      record.id,
+      service.snapshot(record.id).config,
+      { write: async () => undefined }
+    );
+    manager.register(record.id, runtime);
+    runtime.client = {
+      flushLog: () => ({ streamGeneration: 0, byteOffset: 0 })
+    } as unknown as NonNullable<WorkRuntime["client"]>;
+    const stageId = runtime.controller.snapshot().currentStageId;
+    const restart = runtime.controller.issueStageRestartConfirmation(stageId);
+    runtime.controller.confirmStageRestart({
+      stageId,
+      impactHash: restart.impactHash,
+      token: restart.token,
+      reason: "prepare referee-marked attempt"
+    });
+    const marked = manager.markCurrentReadyStageStarted(runtime, stageId);
+    const storedEngineAttempt = runtime.engine.snapshot().attempts.find((attempt) => attempt.id === marked.id);
+    if (!storedEngineAttempt) throw new Error("missing stored work engine attempt");
+    const persistedGoWallMs = storedEngineAttempt.goAtMs;
+    const persistedDeadlineWallMs = storedEngineAttempt.deadlineAtMs;
+
+    delete runtime.client;
+    await service.close();
+    service = new CompetitionService(undefined, { database, dataRoot });
+    const restored = workRuntimeManager(service).makeRuntime(
+      record.id,
+      service.snapshot(record.id).config,
+      { write: async () => undefined }
+    );
+    const restoredControllerAttempt = restored.controller.snapshot().attempts.find((attempt) => attempt.id === marked.id);
+    const restoredEngineAttempt = restored.engine.snapshot().attempts.find((attempt) => attempt.id === marked.id);
+    if (!restoredControllerAttempt || !restoredEngineAttempt) throw new Error("missing restored work attempt");
+    const restoredOrigin = restored.controller.snapshot().wallClockOriginMs;
+    if (restoredOrigin === undefined) throw new Error("missing restored wall-clock origin");
+
+    expect(restoredEngineAttempt).toMatchObject({
+      origin: "referee-marked-started",
+      goAtMs: persistedGoWallMs,
+      deadlineAtMs: persistedDeadlineWallMs
+    });
+    expect(restoredOrigin + restoredControllerAttempt.goAtMs).toBe(persistedGoWallMs);
+    expect(restoredOrigin + restoredControllerAttempt.deadlineAtMs).toBe(persistedDeadlineWallMs);
+    await service.close();
+  });
+
+  it("rolls back a failed stage-recovery transaction, restores its confirmation, and replays the durable receipt after restart", async () => {
+    dataRoot = mkdtempSync(join(tmpdir(), "ballance-stage-recovery-uow-"));
+    database = openDatabase(join(dataRoot, "console.sqlite"));
+    let service = new CompetitionService(undefined, { database, dataRoot });
+    const record = service.create({ name: "Stage recovery UOW", mode: "test", idempotencyKey: "stage-recovery-uow" });
+    service.updateDraft(record.id, {
+      expectedStateVersion: 0,
+      idempotencyKey: "stage-recovery-uow-stages",
+      stages: [
+        { id: "s1", order: 1, label: "SR1", level: 1, mode: "SR", mapKind: "official", timeLimitMs: 200_000, scoring: [20, 15, 12], minimumScoringPlace: 3 },
+        { id: "s2", order: 2, label: "SR2", level: 2, mode: "SR", mapKind: "official", timeLimitMs: 200_000, scoring: [20, 15, 12], minimumScoringPlace: 3 }
+      ]
+    });
+    service.publish(record.id, 1, "publish-stage-recovery-uow");
+    const runId = service.createTestRunFromScenario(record.id, "normal-player-roster").runId;
+    service.startTestAutomation(record.id, runId, 0);
+    const runtime = testRuntimeManager(service).getRuntime(record.id, runId);
+    const beforeCompetition = service.snapshot(record.id).competition;
+    const beforeController = runtime.automation.snapshot();
+    const beforeEngine = runtime.engine.snapshot();
+    const beforePayload = (database.sqlite.prepare(
+      "SELECT state_version,payload FROM runtime_snapshots WHERE competition_id=?"
+    ).get(record.id) as { state_version: number; payload: string });
+    const beforeJournal = service.journal.after(0)?.length ?? 0;
+    const confirmation = service.createConfirmation(record.id, {
+      kind: "manual-action",
+      intent: "mark-stage-started",
+      target: "s1",
+      stageId: "s1"
+    });
+    const input = {
+      expectedStateVersion: beforeCompetition.stateVersion,
+      idempotencyKey: "stage-recovery-uow-mark",
+      action: {
+        type: "mark-stage-started" as const,
+        stageId: "s1",
+        confirmationToken: confirmation.token,
+        impactHash: confirmation.impactHash
+      }
+    };
+
+    database.sqlite.exec(`
+      CREATE TEMP TRIGGER fail_stage_recovery_receipt
+      BEFORE INSERT ON action_receipts
+      BEGIN
+        SELECT RAISE(FAIL, 'injected stage recovery receipt failure');
+      END
+    `);
+    await expect(service.performAction(record.id, input)).rejects.toThrow(/injected stage recovery receipt failure/);
+    database.sqlite.exec("DROP TRIGGER fail_stage_recovery_receipt");
+
+    expect(runtime.automation.snapshot()).toEqual(beforeController);
+    expect(runtime.engine.snapshot()).toEqual(beforeEngine);
+    expect(service.snapshot(record.id).competition).toEqual(beforeCompetition);
+    expect(database.sqlite.prepare(
+      "SELECT state_version,payload FROM runtime_snapshots WHERE competition_id=?"
+    ).get(record.id)).toEqual(beforePayload);
+    expect((database.sqlite.prepare(
+      "SELECT COUNT(*) AS count FROM command_audits WHERE competition_id=? AND idempotency_key=?"
+    ).get(record.id, input.idempotencyKey) as { count: number }).count).toBe(0);
+    expect((database.sqlite.prepare(
+      "SELECT COUNT(*) AS count FROM action_receipts WHERE competition_id=? AND idempotency_key=?"
+    ).get(record.id, input.idempotencyKey) as { count: number }).count).toBe(0);
+    expect(service.journal.after(0)?.length).toBe(beforeJournal);
+
+    const committed = await service.performAction(record.id, input);
+    expect(runtime.automation.snapshot()).toMatchObject({
+      phase: "paused",
+      pausedFromPhase: "running",
+      attempts: [expect.objectContaining({ stageId: "s1", origin: "referee-marked-started" })]
+    });
+    const committedStateVersion = service.snapshot(record.id).competition.stateVersion;
+    expect((database.sqlite.prepare(
+      "SELECT state_version FROM runtime_snapshots WHERE competition_id=?"
+    ).get(record.id) as { state_version: number }).state_version).toBe(committedStateVersion);
+    await expect(service.performAction(record.id, {
+      ...input,
+      expectedStateVersion: -123
+    })).rejects.toMatchObject({ code: "IDEMPOTENCY_CONFLICT", statusCode: 409 });
+
+    await service.close();
+    service = new CompetitionService(undefined, { database, dataRoot });
+    await expect(service.performAction(record.id, input)).resolves.toEqual(committed);
+    await expect(service.performAction(record.id, {
+      ...input,
+      expectedStateVersion: -456
+    })).rejects.toMatchObject({ code: "IDEMPOTENCY_CONFLICT", statusCode: 409 });
+    await expect(service.performAction(record.id, {
+      expectedStateVersion: input.expectedStateVersion,
+      idempotencyKey: input.idempotencyKey,
+      action: {
+        type: "force-reset-stage",
+        stageId: "s1",
+        confirmationToken: "not-consumed-because-receipt-conflicts-first",
+        impactHash: "different-action"
+      }
+    })).rejects.toMatchObject({ code: "IDEMPOTENCY_CONFLICT", statusCode: 409 });
+    await expect(service.performAction(record.id, {
+      expectedStateVersion: input.expectedStateVersion,
+      idempotencyKey: input.idempotencyKey,
+      action: {
+        ...input.action,
+        confirmationToken: "new-cycle-confirmation",
+        impactHash: "new-cycle-impact"
+      }
+    })).rejects.toMatchObject({ code: "IDEMPOTENCY_CONFLICT", statusCode: 409 });
+    await service.close();
+  });
+
+  it("restores a consumed stage-recovery confirmation when checkpoint setup fails before the unit of work starts", async () => {
+    const service = new CompetitionService();
+    const record = service.create({
+      name: "Stage recovery checkpoint failure",
+      mode: "work",
+      idempotencyKey: "stage-recovery-checkpoint-failure"
+    });
+    service.publish(record.id, 0, "publish-stage-recovery-checkpoint-failure");
+    const manager = workRuntimeManager(service);
+    const runtime = manager.makeRuntime(
+      record.id,
+      service.snapshot(record.id).config,
+      { write: async () => undefined }
+    );
+    manager.register(record.id, runtime);
+    runtime.client = {
+      flushLog: () => ({ streamGeneration: 0, byteOffset: 0 })
+    } as unknown as NonNullable<WorkRuntime["client"]>;
+    const stageId = runtime.controller.snapshot().currentStageId;
+    const confirmation = service.createConfirmation(record.id, {
+      kind: "restart-stage",
+      intent: "restart-stage",
+      target: stageId
+    });
+    const input = {
+      expectedStateVersion: service.snapshot(record.id).competition.stateVersion,
+      idempotencyKey: "retry-after-checkpoint-failure",
+      action: {
+        type: "restart-stage" as const,
+        stageId,
+        confirmationToken: confirmation.token,
+        impactHash: confirmation.impactHash
+      }
+    };
+    runtime.preparedStageRecovery = {
+      stageId,
+      supersession: { actionKeys: [], previews: [] }
+    };
+
+    await expect(service.performAction(record.id, input)).rejects.toThrow("STAGE_RECOVERY_ALREADY_PREPARED");
+    delete runtime.preparedStageRecovery;
+    await expect(service.performAction(record.id, input)).resolves.toMatchObject({
+      actionType: "restart-stage"
+    });
+    expect(runtime.controller.snapshot()).toMatchObject({
+      currentStageId: stageId,
+      phase: "ready"
+    });
+
+    delete runtime.client;
+    await service.close();
+  });
+
+  it("refuses to overwrite an older durable command audit when an idempotency key is reused after restart", async () => {
+    dataRoot = mkdtempSync(join(tmpdir(), "ballance-durable-idempotency-collision-"));
+    database = openDatabase(join(dataRoot, "console.sqlite"));
+    let service = new CompetitionService(undefined, { database, dataRoot });
+    const record = service.create({
+      name: "Durable idempotency collision",
+      mode: "test",
+      idempotencyKey: "durable-idempotency-competition"
+    });
+    service.publish(record.id, 0, "publish-durable-idempotency-collision");
+    service.createTestRunFromScenario(record.id, "normal-player-roster");
+    const idempotencyKey = "durable-notification-key";
+    const before = service.snapshot(record.id);
+    await service.performAction(record.id, {
+      expectedStateVersion: before.competition.stateVersion,
+      idempotencyKey,
+      action: { type: "notification", channel: "notice", text: "保留这条原始审计" }
+    });
+    const storedBeforeRestart = database.sqlite.prepare(
+      "SELECT id,action_type,status,payload,created_at,updated_at FROM command_audits WHERE competition_id=? AND idempotency_key=?"
+    ).get(record.id, idempotencyKey);
+
+    await service.close();
+    service = new CompetitionService(undefined, { database, dataRoot });
+    await expect(service.performAction(record.id, {
+      expectedStateVersion: service.snapshot(record.id).competition.stateVersion,
+      idempotencyKey,
+      action: { type: "notification", channel: "notice", text: "试图覆盖旧审计" }
+    })).rejects.toMatchObject({ code: "IDEMPOTENCY_CONFLICT", statusCode: 409 });
+    expect(database.sqlite.prepare(
+      "SELECT id,action_type,status,payload,created_at,updated_at FROM command_audits WHERE competition_id=? AND idempotency_key=?"
+    ).get(record.id, idempotencyKey)).toEqual(storedBeforeRestart);
+    await service.close();
+  });
+
   it("rejects generic or input-unbound confirmations for lifecycle and raw actions", async () => {
     const service = new CompetitionService();
     const record = service.create({ name: "Strict confirmation binding", mode: "work", idempotencyKey: "strict-confirmation-binding" });
@@ -2093,6 +2701,9 @@ describe("CompetitionService dynamic participants", () => {
     runtimeHolder.current = runtime;
     manager.register(record.id, runtime);
     establishAuthenticatedReferee(runtime);
+    runtime.client = {
+      flushLog: () => ({ streamGeneration: 0, byteOffset: 0 })
+    } as unknown as NonNullable<WorkRuntime["client"]>;
     runtime.runtime = { dispatch: async () => [] } as unknown as WorkRuntime["runtime"];
     const now = new Date().toISOString();
     const unresolved = {
@@ -2128,6 +2739,7 @@ describe("CompetitionService dynamic participants", () => {
     snapshot = service.snapshot(record.id);
     expect(snapshot.runtime.attempts).toEqual([]);
     expect(snapshot.runtime.attentionItems).toContainEqual(expect.objectContaining({ title: "已忽略旧发令周期的 Go 回显" }));
+    delete runtime.client;
     await service.close();
   });
 

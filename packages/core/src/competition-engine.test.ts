@@ -177,4 +177,159 @@ describe("CompetitionEngine", () => {
     engine.apply({ atMs: 0, sourceId: "bad-go", type: "go", stageId: "s1", refereeConnectionId: "someone-else" });
     expect(engine.snapshot()).toMatchObject({ attempts: [], anomalies: [{ sourceId: "bad-go", code: "unauthorized-go" }] });
   });
+
+  it("creates a referee-marked attempt with the controller identity and rejects pre-mark results", () => {
+    const definition = loadMain();
+    const stage = definition.stages[0];
+    if (!stage) throw new Error("missing stage fixture");
+    const engine = new CompetitionEngine(definition);
+    const input = {
+      id: "controller-attempt-id",
+      stageId: stage.id,
+      attemptNumber: 1,
+      goAtMs: 10_000,
+      deadlineAtMs: 10_000 + stage.timeLimitMs,
+      sourceId: "referee-marked-start"
+    };
+
+    expect(engine.startRefereeMarkedAttempt(input)).toMatchObject({
+      id: "controller-attempt-id",
+      stageId: stage.id,
+      attemptNumber: 1,
+      origin: "referee-marked-started",
+      goAtMs: 10_000,
+      deadlineAtMs: 10_000 + stage.timeLimitMs,
+      open: true,
+      voided: false
+    });
+    expect(engine.startRefereeMarkedAttempt(input)).toMatchObject({ id: "controller-attempt-id" });
+
+    engine.apply({
+      atMs: 9_999,
+      sourceId: "pre-mark-finish",
+      type: "finish",
+      stageId: stage.id,
+      playerId: "p1",
+      score: 100,
+      elapsedMs: 1
+    });
+    expect(engine.snapshot().anomalies).toContainEqual(expect.objectContaining({
+      sourceId: "pre-mark-finish",
+      code: "pre-go-result"
+    }));
+    expect(engine.snapshot().scoreboardVersions).toHaveLength(0);
+
+    engine.apply({
+      atMs: 10_000,
+      sourceId: "at-mark-finish",
+      type: "finish",
+      stageId: stage.id,
+      playerId: "p1",
+      score: 100,
+      elapsedMs: 1
+    });
+    expect(engine.snapshot().currentScoreboard.find((entry) => entry.playerId === "p1")?.stages[stage.id]).toMatchObject({
+      status: "finished",
+      sourceId: "at-mark-finish"
+    });
+  });
+
+  it("preserves marked origins and defaults legacy snapshot attempts to authoritative Go", () => {
+    const definition = loadMain();
+    const stage = definition.stages[0];
+    if (!stage) throw new Error("missing stage fixture");
+
+    const marked = new CompetitionEngine(definition);
+    marked.startRefereeMarkedAttempt({
+      id: "marked-attempt",
+      stageId: stage.id,
+      attemptNumber: 1,
+      goAtMs: 100,
+      deadlineAtMs: 100 + stage.timeLimitMs,
+      sourceId: "marked-source"
+    });
+    const restoredMarked = new CompetitionEngine(definition);
+    restoredMarked.restore(marked.snapshot());
+    expect(restoredMarked.snapshot().attempts[0]).toMatchObject({
+      id: "marked-attempt",
+      origin: "referee-marked-started"
+    });
+
+    const authoritative = new CompetitionEngine(definition);
+    authoritative.apply({
+      atMs: 200,
+      sourceId: "authoritative-source",
+      type: "go",
+      stageId: stage.id,
+      refereeConnectionId: definition.refereeConnectionId
+    });
+    authoritative.apply({
+      atMs: 199,
+      sourceId: "old-cycle-before-authoritative-go",
+      type: "finish",
+      stageId: stage.id,
+      playerId: "p1",
+      score: 100,
+      elapsedMs: 1
+    });
+    expect(authoritative.snapshot().anomalies).toContainEqual(expect.objectContaining({
+      sourceId: "old-cycle-before-authoritative-go",
+      code: "pre-go-result"
+    }));
+    expect(authoritative.snapshot().scoreboardVersions).toHaveLength(0);
+    const authoritativeSnapshot = authoritative.snapshot();
+    const legacySnapshot = {
+      ...authoritativeSnapshot,
+      attempts: authoritativeSnapshot.attempts.map((attempt) => {
+        const legacyAttempt = { ...attempt };
+        delete legacyAttempt.origin;
+        return legacyAttempt;
+      })
+    };
+    const restoredLegacy = new CompetitionEngine(definition);
+    restoredLegacy.restore(legacySnapshot);
+    expect(restoredLegacy.snapshot().attempts[0]).toMatchObject({
+      origin: "authoritative-go",
+      goSourceId: "authoritative-source"
+    });
+  });
+
+  it("voids marked scores on reset but only closes them on force-next", () => {
+    const definition = loadMain();
+    const stage = definition.stages[0];
+    if (!stage) throw new Error("missing stage fixture");
+    const makeEngine = (): CompetitionEngine => {
+      const engine = new CompetitionEngine(definition);
+      engine.startRefereeMarkedAttempt({
+        id: "marked-attempt",
+        stageId: stage.id,
+        attemptNumber: 1,
+        goAtMs: 100,
+        deadlineAtMs: 100 + stage.timeLimitMs,
+        sourceId: "marked-source"
+      });
+      engine.apply({
+        atMs: 110,
+        sourceId: "marked-score",
+        type: "finish",
+        stageId: stage.id,
+        playerId: "p1",
+        score: 100,
+        elapsedMs: 10
+      });
+      return engine;
+    };
+
+    const reset = makeEngine();
+    reset.voidAttempt(stage.id, 1, "force-reset");
+    expect(reset.snapshot().attempts[0]).toMatchObject({ origin: "referee-marked-started", open: false, voided: true });
+    expect(reset.snapshot().currentScoreboard.find((entry) => entry.playerId === "p1")?.stages[stage.id]).toBeUndefined();
+
+    const next = makeEngine();
+    next.closeAttempt(stage.id, 1);
+    expect(next.snapshot().attempts[0]).toMatchObject({ origin: "referee-marked-started", open: false, voided: false });
+    expect(next.snapshot().currentScoreboard.find((entry) => entry.playerId === "p1")?.stages[stage.id]).toMatchObject({
+      sourceId: "marked-score"
+    });
+  });
 });

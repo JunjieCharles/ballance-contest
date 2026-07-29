@@ -141,6 +141,14 @@ const profileLabel = (profile: string): string => ({
 const availabilityFor = (runtime: RuntimeSnapshot, action: RefereeActionId): ActionAvailability | undefined =>
   runtime.availableActions.find((candidate) => candidate.action === action);
 
+const hasCurrentActiveAttempt = (runtime: RuntimeSnapshot): boolean => runtime.attempts.some((candidate) => {
+  if (typeof candidate !== "object" || candidate === null) return false;
+  const attempt = candidate as { stageId?: unknown; goAtMs?: unknown; voided?: unknown };
+  return attempt.stageId === runtime.currentStageId
+    && typeof attempt.goAtMs === "number"
+    && attempt.voided !== true;
+});
+
 interface ConfirmButtonProps {
   label: string;
   kind: ConfirmationKind;
@@ -155,7 +163,7 @@ interface ConfirmButtonProps {
 }
 
 function ConfirmButton(props: ConfirmButtonProps) {
-  return <ConfirmButtonState key={`${props.versionKey}:${props.disabled ? "disabled" : "enabled"}`} {...props} />;
+  return <ConfirmButtonState {...props} />;
 }
 
 function ConfirmButtonState({
@@ -173,11 +181,36 @@ function ConfirmButtonState({
   const [confirmation, setConfirmation] = useState<ConfirmationSummary>();
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
+  const prepareGeneration = useRef(0);
+  const preparing = useRef(false);
+  const invalidationKey = `${kind}:${target}:${versionKey}:${disabled ? "disabled" : "enabled"}`;
+  const previousInvalidationKey = useRef(invalidationKey);
+  useLayoutEffect(() => {
+    if (previousInvalidationKey.current === invalidationKey) return;
+    previousInvalidationKey.current = invalidationKey;
+    const interruptedPreparation = preparing.current;
+    prepareGeneration.current += 1;
+    preparing.current = false;
+    setConfirmation(undefined);
+    setError(interruptedPreparation ? "现场状态已变化，请重新点击确认" : "");
+    if (interruptedPreparation) setBusy(false);
+  }, [invalidationKey]);
   const prepare = async () => {
+    const generation = prepareGeneration.current + 1;
+    prepareGeneration.current = generation;
+    preparing.current = true;
     setBusy(true); setError("");
-    try { setConfirmation(await requestConfirmation(kind, target, requestPayload)); }
-    catch (caught) { setError(caught instanceof Error ? caught.message : "无法创建确认"); }
-    finally { setBusy(false); }
+    try {
+      const prepared = await requestConfirmation(kind, target, requestPayload);
+      if (prepareGeneration.current === generation) setConfirmation(prepared);
+    } catch (caught) {
+      if (prepareGeneration.current === generation) setError(caught instanceof Error ? caught.message : "无法创建确认");
+    } finally {
+      if (prepareGeneration.current === generation) {
+        preparing.current = false;
+        setBusy(false);
+      }
+    }
   };
   const confirm = async () => {
     if (!confirmation || disabled) return;
@@ -187,7 +220,7 @@ function ConfirmButtonState({
     finally { setBusy(false); }
   };
   return <div className="confirm-action" data-version={versionKey}>
-    <button className={className} disabled={disabled || busy} title={disabledReason} onClick={() => void prepare()}>{busy && !confirmation ? "准备中…" : label}</button>
+    <button aria-label={busy && !confirmation ? label : undefined} className={className} disabled={disabled || busy} title={disabledReason} onClick={() => void prepare()}>{busy && !confirmation ? "准备中…" : label}</button>
     {disabled && disabledReason && <small className="disabled-reason">{disabledReason}</small>}
     {confirmation && <div className="inline-confirm" role="group" aria-label={`${label}确认`}>
       {(() => {
@@ -611,6 +644,7 @@ export function App() {
             <div><span>阶段</span><strong>{phaseLabel[runtime.phase] ?? runtime.phase}</strong></div>
             <div><span>关卡</span><strong>{stageTitle(snapshot.config, runtime.currentStageId)}</strong></div>
             <div><span>本关 Ready（UTC+8）</span><strong>{formatUtc8DateTime(runtime.currentStageReadyAt)}</strong></div>
+            <div><span>{hasCurrentActiveAttempt(runtime) ? "本关起跑（UTC+8）" : "预计起跑（UTC+8）"}</span><strong>{formatUtc8DateTime(runtime.plannedStageStartAt)}</strong></div>
             <div><span>本关最晚结束（UTC+8）</span><strong>{formatUtc8DateTime(runtime.stageDeadlineAt)}</strong></div>
             <div><span>下一关 Ready（UTC+8）</span><strong>{formatUtc8DateTime(runtime.nextStageReadyAt)}</strong></div>
             <div><span>自动化 / 倒数</span><strong>{runtime.automationEnabled ? "启用" : "暂停"}{runtime.countdownValue ? ` · ${runtime.countdownValue}` : ""}</strong></div>
@@ -672,7 +706,10 @@ function ConsolePanel({ snapshot, canWrite, versionKey, startWork, enableAutomat
     "reschedule",
     "reschedule-stage-deadline",
     "end-stage",
-    "restart-stage"
+    "restart-stage",
+    "mark-stage-started",
+    "force-reset-stage",
+    "force-next-stage"
   ]);
   const confirmedAction = (
     label: string,
@@ -696,7 +733,7 @@ function ConsolePanel({ snapshot, canWrite, versionKey, startWork, enableAutomat
       ...(actionId === "reschedule-stage-deadline" ? { deadlineAt: utc8InputToIso(scheduleAt) } : {}),
       ...(actionId === "raw-command" ? { command: rawCommand.trim() } : {})
     };
-    return <ConfirmButton key={`${label}:${confirmationTarget}:${confirmationVersionKey}`} label={label} kind={kind} target={confirmationTarget} versionKey={confirmationVersionKey} className={className}
+    return <ConfirmButton label={label} kind={kind} target={confirmationTarget} versionKey={confirmationVersionKey} className={className}
       disabled={!canWrite || !availability?.enabled || extraDisabled} disabledReason={!canWrite ? "实时连接或控制权不可用" : extraDisabled ? extraReason : availability?.disabledReason}
       requestPayload={confirmationPayload} requestConfirmation={requestConfirmation} onConfirm={(confirmation) => performAction(build(confirmation))} />;
   };
@@ -736,6 +773,15 @@ function ConsolePanel({ snapshot, canWrite, versionKey, startWork, enableAutomat
         {confirmedAction("重赛本关", "restart-stage", "restart-stage", availabilityFor(runtime, "restart-stage")?.targetStageId ?? snapshot.competition.id, (confirmation) => ({ type: "restart-stage", stageId: availabilityFor(runtime, "restart-stage")?.targetStageId ?? "", confirmationToken: confirmation.token, impactHash: confirmation.impactHash }), "danger")}
         {confirmedAction(runtime.startProtectionUsed ? "将起跑保护重置为未使用" : "将起跑保护标记为已使用", "set-start-protection", "manual-action", `${snapshot.competition.id}:start-protection:${runtime.currentStageId}:${!runtime.startProtectionUsed}`, (confirmation) => ({ type: "set-start-protection", used: !runtime.startProtectionUsed, confirmationToken: confirmation.token, impactHash: confirmation.impactHash }), runtime.startProtectionUsed ? undefined : "danger", false, undefined, `${snapshot.competition.stateVersion}:${runtime.currentStageId}:${runtime.startProtectionUsed}`)}
       </div>
+      <h3>现场关卡恢复</h3>
+      <div className="button-row action-row">
+        {confirmedAction(availabilityFor(runtime, "mark-stage-started")?.label ?? "手动标记当前关已起跑", "mark-stage-started", "manual-action", snapshot.competition.id,
+          (confirmation) => ({ type: "mark-stage-started", stageId: availabilityFor(runtime, "mark-stage-started")?.targetStageId ?? "", confirmationToken: confirmation.token, impactHash: confirmation.impactHash }), "danger")}
+        {confirmedAction(availabilityFor(runtime, "force-reset-stage")?.label ?? "强制重置本关（T-60）", "force-reset-stage", "manual-action", snapshot.competition.id,
+          (confirmation) => ({ type: "force-reset-stage", stageId: availabilityFor(runtime, "force-reset-stage")?.targetStageId ?? "", confirmationToken: confirmation.token, impactHash: confirmation.impactHash }), "danger")}
+        {confirmedAction(availabilityFor(runtime, "force-next-stage")?.label ?? "强制进入下一关", "force-next-stage", "manual-action", snapshot.competition.id,
+          (confirmation) => ({ type: "force-next-stage", stageId: availabilityFor(runtime, "force-next-stage")?.targetStageId ?? "", confirmationToken: confirmation.token, impactHash: confirmation.impactHash }), "danger")}
+      </div>
       <h3>相对延时</h3>
       <div className="button-row action-row">
         {confirmedAction("Ready 延后 1 分钟", "delay-ready", "manual-action", snapshot.competition.id, (confirmation) => ({ type: "delay-ready", milliseconds: 60_000, confirmationToken: confirmation.token, impactHash: confirmation.impactHash }))}
@@ -752,10 +798,10 @@ function ConsolePanel({ snapshot, canWrite, versionKey, startWork, enableAutomat
         <p className="muted">请逐条选择“确认已执行”或“执行重发”。原命令审计永不覆盖。</p>
         {runtime.unconfirmedAutomationActions.map((action) => <div className="unconfirmed-command-row" key={action.id}>
           <div><strong>{action.kind}</strong><small>{action.stageId} · {action.status}</small></div>
-          <ConfirmButton key={`confirm-executed:${action.id}:${versionKey}`} label="确认已执行" kind="automation-command-resolution" target={action.id} versionKey={versionKey}
+          <ConfirmButton key={`confirm-executed:${action.id}`} label="确认已执行" kind="automation-command-resolution" target={action.id} versionKey={versionKey}
             requestPayload={{ actionId: action.id, resolution: "confirm-executed" }} disabled={!canWrite} requestConfirmation={requestConfirmation}
             onConfirm={(confirmation) => performAction({ type: "resolve-automation-command", actionId: action.id, resolution: "confirm-executed", confirmationToken: confirmation.token, impactHash: confirmation.impactHash })} />
-          <ConfirmButton key={`resend:${action.id}:${lifecycleVersionKey}`} label="执行重发" kind="automation-command-resolution" target={action.id} versionKey={lifecycleVersionKey} className="danger"
+          <ConfirmButton key={`resend:${action.id}`} label="执行重发" kind="automation-command-resolution" target={action.id} versionKey={lifecycleVersionKey} className="danger"
             requestPayload={{ actionId: action.id, resolution: "resend" }} disabled={!canWrite || liveCommandUnavailable} disabledReason={!canWrite ? "实时连接或控制权不可用" : liveCommandDisabledReason} requestConfirmation={requestConfirmation}
             onConfirm={(confirmation) => performAction({ type: "resolve-automation-command", actionId: action.id, resolution: "resend", confirmationToken: confirmation.token, impactHash: confirmation.impactHash })} />
         </div>)}</section>}
@@ -763,10 +809,10 @@ function ConsolePanel({ snapshot, canWrite, versionKey, startWork, enableAutomat
         <p className="muted">这些命令可能失败或已经执行但缺少可靠结果。请逐条核对；原审计记录永久保留。</p>
         {runtime.unconfirmedCommands.map((command) => <div className="unconfirmed-command-row" key={command.id}>
           <div><strong>{command.actionType}</strong><small>{command.command} · {command.status}</small></div>
-          <ConfirmButton key={`command-confirmed:${command.id}:${versionKey}`} label={command.status === "failed" ? "确认不再执行" : "确认已执行"} kind="command-resolution" target={command.id} versionKey={versionKey}
+          <ConfirmButton key={`command-confirmed:${command.id}`} label={command.status === "failed" ? "确认不再执行" : "确认已执行"} kind="command-resolution" target={command.id} versionKey={versionKey}
             requestPayload={{ commandId: command.id, resolution: command.status === "failed" ? "dismiss-failed" : "confirm-executed" }} disabled={!canWrite} requestConfirmation={requestConfirmation}
             onConfirm={(confirmation) => performAction({ type: "resolve-command", commandId: command.id, resolution: command.status === "failed" ? "dismiss-failed" : "confirm-executed", confirmationToken: confirmation.token, impactHash: confirmation.impactHash })} />
-          <ConfirmButton key={`command-resend:${command.id}:${lifecycleVersionKey}`} label="执行重发" kind="command-resolution" target={command.id} versionKey={lifecycleVersionKey} className="danger"
+          <ConfirmButton key={`command-resend:${command.id}`} label="执行重发" kind="command-resolution" target={command.id} versionKey={lifecycleVersionKey} className="danger"
             requestPayload={{ commandId: command.id, resolution: "resend" }} disabled={!canWrite || liveCommandUnavailable} disabledReason={!canWrite ? "实时连接或控制权不可用" : liveCommandDisabledReason} requestConfirmation={requestConfirmation}
             onConfirm={(confirmation) => performAction({ type: "resolve-command", commandId: command.id, resolution: "resend", confirmationToken: confirmation.token, impactHash: confirmation.impactHash })} />
         </div>)}</section>}
@@ -774,7 +820,7 @@ function ConsolePanel({ snapshot, canWrite, versionKey, startWork, enableAutomat
         <p className="muted">这些事项无法从日志或排行榜可靠补回。核对现场后可确认带缺口继续；当前尝试不可信时请使用“重赛本关”。</p>
         {runtime.observationGaps.map((gap) => <div className="unconfirmed-command-row" key={gap.id}>
           <div><strong>{gap.code}</strong><small>{gap.detail}</small></div>
-          <ConfirmButton key={`gap-continue:${gap.id}:${versionKey}`} label="确认带缺口继续" kind="observation-gap-resolution" target={gap.id} versionKey={versionKey}
+          <ConfirmButton key={`gap-continue:${gap.id}`} label="确认带缺口继续" kind="observation-gap-resolution" target={gap.id} versionKey={versionKey}
             requestPayload={{ gapId: gap.id, resolution: "continue" }} disabled={!canWrite} requestConfirmation={requestConfirmation}
             onConfirm={(confirmation) => performAction({ type: "resolve-observation-gap", gapId: gap.id, resolution: "continue", confirmationToken: confirmation.token, impactHash: confirmation.impactHash })} />
         </div>)}</section>}
@@ -1112,8 +1158,8 @@ function EditableScoreCell({ value, display, stage, playerId, playerName, canWri
   const rankPolicy = shiftOthers ? "shift" : "tie";
   return <td className="score-cell-editor"><label>新名次<input aria-label={`${playerId} ${stage.label} 新名次`} type="number" min="1" value={place} onChange={(event) => setPlace(event.target.value)} /></label><label className="score-policy-row">其他玩家是否顺延<input aria-label="其他玩家是否顺延" type="checkbox" checked={shiftOthers} onChange={(event) => setShiftOthers(event.target.checked)} /><span>{shiftOthers ? "顺延" : "不顺延"}</span></label><small>{shiftOthers ? `会顺延其他玩家并按本关规则自动计 ${calculatedPoints} 分` : `不会顺延其他玩家，按本关规则直接计 ${calculatedPoints} 分`}</small>
     <div className="score-editor-actions">
-      <ConfirmButton key={`save:${target}:${versionKey}:${place}:${rankPolicy}`} label="保存名次" kind="scoreboard-override" target={target} versionKey={versionKey} requestPayload={{ intent: "scoreboard-set-place", playerId, stageId: stage.id, operation: "set-place", place: numericPlace, rankPolicy }} disabled={!Number.isInteger(numericPlace) || numericPlace < 1} requestConfirmation={requestConfirmation} onConfirm={async (confirmation) => { await save({ playerId, stageId: stage.id, operation: "set-place", place: numericPlace, rankPolicy }, confirmation); setEditing(false); }} />
-      <ConfirmButton key={`dnf:${target}:${versionKey}:${rankPolicy}`} label="设为 DNF" kind="scoreboard-override" target={target} versionKey={versionKey} requestPayload={{ intent: "scoreboard-set-dnf", playerId, stageId: stage.id, operation: "set-dnf", rankPolicy }} className="danger" requestConfirmation={requestConfirmation} onConfirm={async (confirmation) => { await save({ playerId, stageId: stage.id, operation: "set-dnf", rankPolicy }, confirmation); setEditing(false); }} />
+      <ConfirmButton key={`save:${target}`} label="保存名次" kind="scoreboard-override" target={target} versionKey={`${versionKey}:${place}:${rankPolicy}`} requestPayload={{ intent: "scoreboard-set-place", playerId, stageId: stage.id, operation: "set-place", place: numericPlace, rankPolicy }} disabled={!Number.isInteger(numericPlace) || numericPlace < 1} requestConfirmation={requestConfirmation} onConfirm={async (confirmation) => { await save({ playerId, stageId: stage.id, operation: "set-place", place: numericPlace, rankPolicy }, confirmation); setEditing(false); }} />
+      <ConfirmButton key={`dnf:${target}`} label="设为 DNF" kind="scoreboard-override" target={target} versionKey={`${versionKey}:${rankPolicy}`} requestPayload={{ intent: "scoreboard-set-dnf", playerId, stageId: stage.id, operation: "set-dnf", rankPolicy }} className="danger" requestConfirmation={requestConfirmation} onConfirm={async (confirmation) => { await save({ playerId, stageId: stage.id, operation: "set-dnf", rankPolicy }, confirmation); setEditing(false); }} />
       <button className="ghost" onClick={() => setEditing(false)}>取消</button>
     </div>
   </td>;
@@ -1151,10 +1197,10 @@ function ArchivePanel({ snapshot, canWrite, versionKey, requestConfirmation, arc
   const archive = availabilityFor(snapshot.runtime, "archive");
   const remove = availabilityFor(snapshot.runtime, "delete");
   return <section className="panel"><div className="panel-title-row"><h2>结束与归档</h2><div className="button-row compact action-row">
-    <ConfirmButton key={`finish:${versionKey}`} label="结束比赛" kind="high-risk" target={snapshot.competition.id} versionKey={versionKey} requestPayload={{ intent: "finish" }} disabled={!canWrite || !finish?.enabled} disabledReason={!canWrite ? "实时连接或控制权不可用" : finish?.disabledReason} requestConfirmation={requestConfirmation} onConfirm={(confirmation) => finishCompetition(confirmation, false)} />
-    <ConfirmButton key={`finish-archive:${versionKey}`} label="结束并生成归档" kind="high-risk" target={snapshot.competition.id} versionKey={versionKey} requestPayload={{ intent: "finish-and-archive" }} disabled={!canWrite || !finish?.enabled || snapshot.currentScoreboard.length === 0} disabledReason={snapshot.currentScoreboard.length === 0 ? "暂无可归档榜单" : finish?.disabledReason} requestConfirmation={requestConfirmation} onConfirm={(confirmation) => finishCompetition(confirmation, true)} />
+    <ConfirmButton key="finish" label="结束比赛" kind="high-risk" target={snapshot.competition.id} versionKey={versionKey} requestPayload={{ intent: "finish" }} disabled={!canWrite || !finish?.enabled} disabledReason={!canWrite ? "实时连接或控制权不可用" : finish?.disabledReason} requestConfirmation={requestConfirmation} onConfirm={(confirmation) => finishCompetition(confirmation, false)} />
+    <ConfirmButton key="finish-archive" label="结束并生成归档" kind="high-risk" target={snapshot.competition.id} versionKey={versionKey} requestPayload={{ intent: "finish-and-archive" }} disabled={!canWrite || !finish?.enabled || snapshot.currentScoreboard.length === 0} disabledReason={snapshot.currentScoreboard.length === 0 ? "暂无可归档榜单" : finish?.disabledReason} requestConfirmation={requestConfirmation} onConfirm={(confirmation) => finishCompetition(confirmation, true)} />
     <div className="action-control"><button disabled={!canWrite || !archive?.enabled || snapshot.currentScoreboard.length === 0} title={archive?.disabledReason} onClick={() => void archiveCompetition()}>仅生成归档</button>{!archive?.enabled && <small className="disabled-reason">{archive?.disabledReason}</small>}</div>
-    <ConfirmButton key={`delete:${versionKey}`} label="删除比赛" kind="high-risk" target={snapshot.competition.id} versionKey={versionKey} requestPayload={{ intent: "delete" }} className="danger" disabled={!canWrite || !remove?.enabled} disabledReason={!canWrite ? "实时连接或控制权不可用" : remove?.disabledReason} requestConfirmation={requestConfirmation} onConfirm={deleteCompetition} />
+    <ConfirmButton key="delete" label="删除比赛" kind="high-risk" target={snapshot.competition.id} versionKey={versionKey} requestPayload={{ intent: "delete" }} className="danger" disabled={!canWrite || !remove?.enabled} disabledReason={!canWrite ? "实时连接或控制权不可用" : remove?.disabledReason} requestConfirmation={requestConfirmation} onConfirm={deleteCompetition} />
   </div></div><p className="muted">确认面板只说明当前按钮会执行什么、会造成什么结果；无需填写操作原因。</p>
     <table><thead><tr><th>版本</th><th>目录</th><th>Manifest Hash</th><th>时间</th></tr></thead><tbody>{snapshot.archives.map((item) => <tr key={`${item.version}:${item.manifestHash}`}><td>v{item.version}</td><td>{item.directory}</td><td><code>{item.manifestHash}</code></td><td>{formatUtc8DateTime(item.createdAt)}</td></tr>)}</tbody></table>
     {snapshot.archives.length === 0 && <p className="muted">暂无归档版本。</p>}

@@ -5,6 +5,9 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { CompetitionService } from "./competition-service.js";
 import {
   ManagedMockClient,
+  type MockClientLogBoundary,
+  type MockClientLogFlushOptions,
+  type MockClientLogLinePosition,
   type ManagedMockClientProcessRef,
   type MockClientExitInfo,
   type MockClientLaunchOptions
@@ -33,16 +36,21 @@ interface ControlledBehavior {
   gracefulStopFails?: boolean;
   gracefulStopGate?: Promise<void>;
   forceStopFails?: boolean;
+  logBoundaryFailure?: "missing" | "unstable";
 }
 
 let nextPid = 45_000;
 
 class ControlledManagedClient extends ManagedMockClient {
-  private readonly controlledLineListeners = new Set<(line: string) => void>();
+  private readonly controlledLineListeners = new Set<(line: string, position: MockClientLogLinePosition) => void>();
   private readonly controlledExitListeners = new Set<(info: MockClientExitInfo) => void>();
   private running = false;
   private controlledProcessRef: ManagedMockClientProcessRef | undefined;
   private activeConnectionId: string;
+  private controlledLogStreamGeneration = 0;
+  private controlledLogOffset = 0;
+  private controlledLineStartByteOffset = 0;
+  private controlledLogPending = "";
   public readonly writes: string[] = [];
 
   public constructor(
@@ -57,6 +65,10 @@ class ControlledManagedClient extends ManagedMockClient {
   public override start(): void {
     this.running = true;
     this.controlledProcessRef = { generation: 1, pid: ++nextPid };
+    this.controlledLogStreamGeneration += 1;
+    this.controlledLogOffset = 0;
+    this.controlledLineStartByteOffset = 0;
+    this.controlledLogPending = "";
     this.lifecycle.push(`start:${this.activeConnectionId}`);
     this.emitConnectionEvidence();
   }
@@ -67,7 +79,7 @@ class ControlledManagedClient extends ManagedMockClient {
   public override captureProcess(): ManagedMockClientProcessRef | undefined { return this.controlledProcessRef; }
   public override isCurrentProcess(processRef: ManagedMockClientProcessRef): boolean { return this.controlledProcessRef === processRef; }
 
-  public override onLine(listener: (line: string) => void): () => void {
+  public override onLine(listener: (line: string, position: MockClientLogLinePosition) => void): () => void {
     this.controlledLineListeners.add(listener);
     return () => this.controlledLineListeners.delete(listener);
   }
@@ -75,6 +87,18 @@ class ControlledManagedClient extends ManagedMockClient {
   public override onExit(listener: (info: MockClientExitInfo) => void): () => void {
     this.controlledExitListeners.add(listener);
     return () => this.controlledExitListeners.delete(listener);
+  }
+
+  public override flushLog(options: MockClientLogFlushOptions = {}): MockClientLogBoundary {
+    if (options.requirePresentStable && this.behavior.logBoundaryFailure) {
+      throw new Error(
+        `STAGE_RECOVERY_LOG_BOUNDARY_UNAVAILABLE: controlled log is ${this.behavior.logBoundaryFailure}`
+      );
+    }
+    return {
+      streamGeneration: this.controlledLogStreamGeneration,
+      byteOffset: this.controlledLogOffset
+    };
   }
 
   public override async write(command: string): Promise<void> {
@@ -142,6 +166,56 @@ class ControlledManagedClient extends ManagedMockClient {
 
   public emitRawLine(line: string): void { this.emitLine(line); }
 
+  public emitRawChunk(chunk: string): void {
+    let remaining = chunk;
+    while (remaining.length > 0) {
+      const newlineIndex = remaining.indexOf("\n");
+      if (newlineIndex < 0) {
+        this.controlledLogPending += remaining;
+        this.controlledLogOffset += Buffer.byteLength(remaining, "utf8");
+        return;
+      }
+      const segment = remaining.slice(0, newlineIndex);
+      const line = `${this.controlledLogPending}${segment}`.replace(/\r$/, "");
+      const consumed = remaining.slice(0, newlineIndex + 1);
+      this.controlledLogOffset += Buffer.byteLength(consumed, "utf8");
+      const position = {
+        streamGeneration: this.controlledLogStreamGeneration,
+        byteOffset: this.controlledLogOffset,
+        startByteOffset: this.controlledLineStartByteOffset,
+        endByteOffset: this.controlledLogOffset,
+        trustedEvidence: true
+      };
+      this.controlledLogPending = "";
+      this.controlledLineStartByteOffset = this.controlledLogOffset;
+      if (line.length > 0) {
+        for (const listener of this.controlledLineListeners) listener(line, position);
+      }
+      remaining = remaining.slice(newlineIndex + 1);
+    }
+  }
+
+  public emitDiscontinuityPrefix(lines: readonly string[]): void {
+    this.controlledLogStreamGeneration += 1;
+    this.controlledLogOffset = 0;
+    this.controlledLineStartByteOffset = 0;
+    this.controlledLogPending = "";
+    for (const line of lines) {
+      const endByteOffset = Buffer.byteLength(`${line}\n`, "utf8") + this.controlledLogOffset;
+      const position: MockClientLogLinePosition = {
+        streamGeneration: this.controlledLogStreamGeneration,
+        byteOffset: endByteOffset,
+        startByteOffset: this.controlledLineStartByteOffset,
+        endByteOffset,
+        trustedEvidence: false,
+        discontinuityPrefix: true
+      };
+      this.controlledLogOffset = endByteOffset;
+      this.controlledLineStartByteOffset = endByteOffset;
+      for (const listener of this.controlledLineListeners) listener(line, position);
+    }
+  }
+
   public emitReplacementConnection(connectionId: string): void {
     this.activeConnectionId = connectionId;
     this.emitConnectionEvidence();
@@ -157,7 +231,7 @@ class ControlledManagedClient extends ManagedMockClient {
   }
 
   private emitLine(line: string): void {
-    for (const listener of this.controlledLineListeners) listener(line);
+    this.emitRawChunk(`${line}\n`);
   }
 
   private finishProcess(expected: boolean): void {
@@ -170,6 +244,21 @@ class ControlledManagedClient extends ManagedMockClient {
 
 const managerFor = (service: CompetitionService): WorkRuntimeManager =>
   (service as unknown as { workRuntimeManager: WorkRuntimeManager }).workRuntimeManager;
+
+const mockLogTimestamp = (epochMs: number, timeZone: string): string => {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone,
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hourCycle: "h23"
+  }).formatToParts(new Date(epochMs));
+  const value = (type: Intl.DateTimeFormatPartTypes): string =>
+    parts.find((part) => part.type === type)?.value ?? "00";
+  return `[${value("month")}-${value("day")} ${value("hour")}:${value("minute")}:${value("second")}]`;
+};
 
 const configureSingleStage = (service: CompetitionService, competitionId: string): void => {
   service.updateDraft(competitionId, {
@@ -489,6 +578,316 @@ describe("WorkRuntimeManager connection lifecycle", () => {
       expect.objectContaining({ id: "Cheater", currentStageStatus: "waiting", online: true, connectionIds: ["42"] }),
       expect.objectContaining({ id: "Finisher", currentStageStatus: "waiting", online: true, connectionIds: ["43"] })
     ]));
+  });
+
+  it("isolates a planned next-stage action when force-reset starts a new current-stage cycle", async () => {
+    const context = setup([{ connectionId: "101" }], {}, configureTwoStages);
+    context.service.startWorkMode(context.competitionId);
+    await vi.waitFor(() => expect(context.service.snapshot(context.competitionId).runtime.workConnection?.status).toBe("healthy"), { timeout: 3_000 });
+    const manager = managerFor(context.service);
+    const runtime = manager.get(context.competitionId);
+    if (!runtime) throw new Error("missing work runtime");
+
+    const restartConfirmation = runtime.controller.issueStageRestartConfirmation("sr-1");
+    manager.restartCurrentStage(runtime, {
+      stageId: "sr-1",
+      impactHash: restartConfirmation.impactHash,
+      token: restartConfirmation.token,
+      reason: "prepare manager recovery test",
+      sourceId: "prepare-manager-recovery-test"
+    });
+    const marked = manager.markCurrentReadyStageStarted(runtime, "sr-1");
+    runtime.controller.registerParticipant("ThresholdRunner");
+    expect(runtime.controller.recordResult({
+      stageId: "sr-1",
+      playerId: "ThresholdRunner",
+      status: "finished",
+      sourceId: "threshold-result",
+      receivedAtMs: marked.goAtMs
+    })).toBe("accepted");
+    const plannedNextAction = runtime.controller.snapshot().actions.findLast((action) =>
+      action.stageId === "sr-2" && action.kind === "bulletin" && action.status === "pending");
+    if (!plannedNextAction) throw new Error("missing planned next-stage bulletin");
+
+    manager.forceResetCurrentStage(runtime, "force-reset-cross-stage", "sr-1");
+
+    expect(runtime.controller.snapshot()).toMatchObject({
+      currentStageId: "sr-1",
+      phase: "preparing",
+      plannedReadyStageId: "sr-1"
+    });
+    expect(runtime.controller.snapshot().actions).toContainEqual(expect.objectContaining({
+      id: plannedNextAction.id,
+      stageId: "sr-2",
+      status: "cancelled",
+      isolated: true
+    }));
+  });
+
+  it("keeps delayed pre-attempt result evidence raw-only and accepts a post-mark line from the same second", async () => {
+    const context = setup([{ connectionId: "101" }]);
+    context.service.startWorkMode(context.competitionId);
+    await vi.waitFor(() => expect(context.service.snapshot(context.competitionId).runtime.workConnection?.status).toBe("healthy"), { timeout: 3_000 });
+    const manager = managerFor(context.service);
+    const runtime = manager.get(context.competitionId);
+    const client = context.clients[0];
+    if (!runtime || !client) throw new Error("missing work runtime");
+
+    const restartConfirmation = runtime.controller.issueStageRestartConfirmation("sr-1");
+    manager.restartCurrentStage(runtime, {
+      stageId: "sr-1",
+      impactHash: restartConfirmation.impactHash,
+      token: restartConfirmation.token,
+      reason: "prepare evidence boundary",
+      sourceId: "prepare-evidence-boundary"
+    });
+    const marked = manager.markCurrentReadyStageStarted(runtime, "sr-1");
+    const engineAttempt = runtime.engine.snapshot().attempts.find((attempt) => attempt.id === marked.id);
+    if (!engineAttempt) throw new Error("missing marked engine attempt");
+    const timeZone = context.service.snapshot(context.competitionId).config.timezone;
+    const oldTimestamp = mockLogTimestamp(engineAttempt.goAtMs - 2_000, timeZone);
+    const sameSecondTimestamp = mockLogTimestamp(engineAttempt.goAtMs, timeZone);
+
+    client.emitRawLine(`${oldTimestamp} OldWarning (#41) logged in with cheat mode off.`);
+    client.emitRawLine(`${oldTimestamp} OldCheat (#42) logged in with cheat mode off.`);
+    client.emitRawLine(`${oldTimestamp} (#43, OldFinish) finished Level 01 in 1st place (score: 999; real time: 00:00:01.000).`);
+    client.emitRawLine(`${oldTimestamp} (#44, OldDnf) did not finish Level 01 (furthest reach: sector 2).`);
+    client.emitRawLine(`${oldTimestamp} [Warning] OldWarning just pressed the Reset hotkey at Level 01!`);
+    client.emitRawLine(`${oldTimestamp} (42, OldCheat) turned cheat on.`);
+    client.emitRawLine(`${oldTimestamp} [CHEAT] (#45, OldCheatFinish) finished Level 01 in 2nd place (score: 998; real time: 00:00:01.500).`);
+    client.emitRawLine(`${sameSecondTimestamp} (#46, FreshFinish) finished Level 01 in 3rd place (score: 100; real time: 00:00:00.100).`);
+
+    const controlledAttempt = runtime.controller.snapshot().attempts.find((attempt) => attempt.id === marked.id);
+    expect(controlledAttempt?.results).toEqual([
+      expect.objectContaining({ playerId: "FreshFinish", status: "finished" })
+    ]);
+    expect(runtime.engine.snapshot().currentScoreboard).toContainEqual(expect.objectContaining({
+      playerId: "FreshFinish",
+      stages: { "sr-1": expect.objectContaining({ sourceId: expect.any(String) }) }
+    }));
+    expect(runtime.engine.snapshot().currentScoreboard.some((entry) =>
+      ["OldFinish", "OldDnf", "OldWarning", "OldCheat", "OldCheatFinish"].includes(entry.playerId)
+      && entry.stages["sr-1"] !== undefined)).toBe(false);
+    expect(context.service.journal.after(0)?.filter((event) => event.type === "work.pre-attempt-evidence-ignored").length)
+      .toBeGreaterThanOrEqual(5);
+  });
+
+  it("keeps half-written old results raw-only across mark, reset, restart and force-next boundaries", async () => {
+    const context = setup([{ connectionId: "101" }], {}, configureTwoStages);
+    context.service.startWorkMode(context.competitionId);
+    await vi.waitFor(() => expect(context.service.snapshot(context.competitionId).runtime.workConnection?.status).toBe("healthy"), { timeout: 3_000 });
+    const manager = managerFor(context.service);
+    const runtime = manager.get(context.competitionId);
+    const client = context.clients[0];
+    if (!runtime || !client) throw new Error("missing work runtime");
+
+    const enterReady = (stageId: string, sourceId: string): void => {
+      const confirmation = runtime.controller.issueStageRestartConfirmation(stageId);
+      manager.restartCurrentStage(runtime, {
+        stageId,
+        impactHash: confirmation.impactHash,
+        token: confirmation.token,
+        reason: sourceId,
+        sourceId
+      });
+    };
+    const splitAcrossBoundary = (line: string, action: () => void): void => {
+      const splitAt = Math.max(1, Math.floor(line.length / 2));
+      client.emitRawChunk(line.slice(0, splitAt));
+      action();
+      client.emitRawChunk(`${line.slice(splitAt)}\n`);
+    };
+    const timeZone = context.service.snapshot(context.competitionId).config.timezone;
+
+    enterReady("sr-1", "prepare-first-half-line-boundary");
+    const oldAcrossMark = `${mockLogTimestamp(Date.now() + 10_000, timeZone)} (#51, OldAcrossMark) finished Level 01 in 1st place (score: 999; real time: 00:00:00.001).`;
+    let firstAttemptId = "";
+    splitAcrossBoundary(oldAcrossMark, () => {
+      firstAttemptId = manager.markCurrentReadyStageStarted(runtime, "sr-1").id;
+    });
+    const firstAttemptGoAt = runtime.engine.snapshot().attempts.find((attempt) => attempt.id === firstAttemptId)?.goAtMs;
+    client.emitRawLine(`${mockLogTimestamp(firstAttemptGoAt ?? Date.now(), timeZone)} (#52, FreshAfterMark) finished Level 01 in 1st place (score: 100; real time: 00:00:00.002).`);
+
+    const firstAttempt = runtime.controller.snapshot().attempts.find((attempt) => attempt.id === firstAttemptId);
+    expect(firstAttempt?.results).toEqual([
+      expect.objectContaining({ playerId: "FreshAfterMark", status: "finished" })
+    ]);
+
+    const oldAcrossReset = `${mockLogTimestamp(Date.now() + 10_000, timeZone)} (#53, OldAcrossReset) finished Level 01 in 1st place (score: 998; real time: 00:00:00.003).`;
+    splitAcrossBoundary(oldAcrossReset, () => {
+      manager.forceResetCurrentStage(runtime, "force-reset-half-line-boundary", "sr-1");
+    });
+    const oldAcrossRestart = `${mockLogTimestamp(Date.now() + 10_000, timeZone)} (#54, OldAcrossRestart) finished Level 01 in 1st place (score: 997; real time: 00:00:00.004).`;
+    splitAcrossBoundary(oldAcrossRestart, () => {
+      enterReady("sr-1", "prepare-second-half-line-boundary");
+    });
+    const secondAttempt = manager.markCurrentReadyStageStarted(runtime, "sr-1");
+    const secondTimestamp = mockLogTimestamp(
+      runtime.engine.snapshot().attempts.find((attempt) => attempt.id === secondAttempt.id)?.goAtMs ?? Date.now(),
+      timeZone
+    );
+    client.emitRawLine(`${secondTimestamp} (#55, FreshAfterReset) finished Level 01 in 1st place (score: 97; real time: 00:00:00.005).`);
+
+    expect(runtime.controller.snapshot().attempts.find((attempt) => attempt.id === secondAttempt.id)?.results).toEqual([
+      expect.objectContaining({ playerId: "FreshAfterReset", status: "finished" })
+    ]);
+
+    const oldAcrossForceNext = `${mockLogTimestamp(Date.now() + 10_000, timeZone)} (#56, OldAcrossForceNext) finished Level 01 in 1st place (score: 996; real time: 00:00:00.006).`;
+    splitAcrossBoundary(oldAcrossForceNext, () => {
+      manager.forceAdvanceToNextStage(runtime, "sr-1", "sr-2");
+    });
+    expect(runtime.controller.snapshot()).toMatchObject({
+      currentStageId: "sr-2",
+      phase: "preparing"
+    });
+    enterReady("sr-2", "prepare-force-next-stage-attempt");
+    const thirdAttempt = manager.markCurrentReadyStageStarted(runtime, "sr-2");
+    const thirdTimestamp = mockLogTimestamp(
+      runtime.engine.snapshot().attempts.find((attempt) => attempt.id === thirdAttempt.id)?.goAtMs ?? Date.now(),
+      timeZone
+    );
+    client.emitRawLine(`${thirdTimestamp} (#57, FreshAfterForceNext) finished Level 02 in 1st place (score: 95; real time: 00:00:00.007).`);
+    expect(runtime.controller.snapshot().attempts.find((attempt) => attempt.id === thirdAttempt.id)?.results).toEqual([
+      expect.objectContaining({ playerId: "FreshAfterForceNext", status: "finished" })
+    ]);
+
+    expect(runtime.engine.snapshot().currentScoreboard.some((entry) =>
+      ["OldAcrossMark", "OldAcrossReset", "OldAcrossRestart", "OldAcrossForceNext"].includes(entry.playerId)
+      && Object.keys(entry.stages).length > 0)).toBe(false);
+    expect(context.service.journal.after(0)?.filter((event) =>
+      event.type === "work.pre-stage-cycle-log-line-ignored")).toHaveLength(4);
+
+    const persistedWork = (context.service as unknown as {
+      getPayload(competitionId: string): {
+        work?: {
+          stageCycleEvidenceLogBoundary?: { byteOffset: number };
+          attemptEvidenceLogBoundaries?: Record<string, { byteOffset: number }>;
+        };
+      };
+    }).getPayload(context.competitionId).work;
+    expect(persistedWork?.stageCycleEvidenceLogBoundary).toEqual(
+      persistedWork?.attemptEvidenceLogBoundaries?.[thirdAttempt.id]
+    );
+    expect(persistedWork?.stageCycleEvidenceLogBoundary?.byteOffset).toBeGreaterThan(0);
+  });
+
+  it("fails a stage recovery closed when no stable log boundary exists and leaves restart confirmation reusable", async () => {
+    const behavior: ControlledBehavior = {
+      connectionId: "101",
+      logBoundaryFailure: "missing"
+    };
+    const context = setup([behavior]);
+    context.service.startWorkMode(context.competitionId);
+    await vi.waitFor(() =>
+      expect(context.service.snapshot(context.competitionId).runtime.workConnection?.status).toBe("healthy"),
+    { timeout: 3_000 });
+    const manager = managerFor(context.service);
+    const runtime = manager.get(context.competitionId);
+    if (!runtime) throw new Error("missing work runtime");
+    const confirmation = runtime.controller.issueStageRestartConfirmation("sr-1");
+    const input = {
+      stageId: "sr-1",
+      impactHash: confirmation.impactHash,
+      token: confirmation.token,
+      reason: "strict log boundary",
+      sourceId: "strict-log-boundary"
+    };
+
+    expect(() => manager.restartCurrentStage(runtime, input))
+      .toThrow(/STAGE_RECOVERY_LOG_BOUNDARY_UNAVAILABLE.*missing/);
+    expect(runtime.controller.snapshot().phase).toBe("lobby");
+
+    delete behavior.logBoundaryFailure;
+    expect(() => manager.restartCurrentStage(runtime, input)).not.toThrow();
+    expect(runtime.controller.snapshot()).toMatchObject({
+      phase: "ready",
+      currentStageId: "sr-1"
+    });
+  });
+
+  it("keeps a replaced-file Ready and Go prefix raw-only before observing a genuinely appended Go", async () => {
+    const context = setup([{ connectionId: "101" }]);
+    context.service.startWorkMode(context.competitionId);
+    await vi.waitFor(() =>
+      expect(context.service.snapshot(context.competitionId).runtime.workConnection?.status).toBe("healthy"),
+    { timeout: 3_000 });
+    const manager = managerFor(context.service);
+    const runtime = manager.get(context.competitionId);
+    const client = context.clients[0];
+    if (!runtime || !client) throw new Error("missing work runtime");
+
+    const restartConfirmation = runtime.controller.issueStageRestartConfirmation("sr-1");
+    manager.restartCurrentStage(runtime, {
+      stageId: "sr-1",
+      impactHash: restartConfirmation.impactHash,
+      token: restartConfirmation.token,
+      reason: "prepare discontinuity evidence",
+      sourceId: "prepare-discontinuity-evidence"
+    });
+    const go = runtime.commands.enqueue(
+      { type: "go", map: "level 1", mode: "sr" },
+      "go-after-log-replacement"
+    );
+    let goSettled = false;
+    void go.then(() => { goSettled = true; });
+    await vi.waitFor(() => expect(client.writes).toContain("countdown level 1 sr"));
+
+    const oldReady = "[07-22 12:01:00] [101, *ContestConsole]: Level 01 - Get ready";
+    const oldGo = "[07-22 12:01:01] [101, *ContestConsole]: Level 01 - Go!";
+    client.emitDiscontinuityPrefix([oldReady, oldGo]);
+
+    await Promise.resolve();
+    expect(goSettled).toBe(false);
+    expect(runtime.controller.snapshot().attempts).toEqual([]);
+    expect(context.service.getRawClientLogs(context.competitionId).map((entry) => entry.rawLine))
+      .toEqual(expect.arrayContaining([oldReady, oldGo]));
+    expect(context.service.journal.after(0)?.filter((event) =>
+      event.type === "work.log-discontinuity-prefix-ignored")).toHaveLength(2);
+
+    client.emitRawLine("[07-22 12:01:02] [101, *ContestConsole]: Level 01 - Get ready");
+    client.emitRawLine("[07-22 12:01:03] [101, *ContestConsole]: Level 01 - Go!");
+    await expect(go).resolves.toMatchObject({ status: "acknowledged" });
+    client.emitRawLine("[07-22 12:01:04] FreshAfterReplace (#202) logged in with cheat mode off.");
+    expect(context.service.snapshot(context.competitionId).config.participants)
+      .toContainEqual(expect.objectContaining({
+        id: "FreshAfterReplace",
+        online: true,
+        connectionIds: ["202"]
+      }));
+  });
+
+  it("does not let a late old-cycle cheat-off echo clear current-cycle cheat state", async () => {
+    const context = setup([{ connectionId: "101" }]);
+    context.service.startWorkMode(context.competitionId);
+    await vi.waitFor(() =>
+      expect(context.service.snapshot(context.competitionId).runtime.workConnection?.status).toBe("healthy"),
+    { timeout: 3_000 });
+    const manager = managerFor(context.service);
+    const runtime = manager.get(context.competitionId);
+    const client = context.clients[0];
+    if (!runtime || !client) throw new Error("missing work runtime");
+    const restartConfirmation = runtime.controller.issueStageRestartConfirmation("sr-1");
+    manager.restartCurrentStage(runtime, {
+      stageId: "sr-1",
+      impactHash: restartConfirmation.impactHash,
+      token: restartConfirmation.token,
+      reason: "prepare cheat-off evidence cycle",
+      sourceId: "prepare-cheat-off-evidence-cycle"
+    });
+    runtime.controller.registerParticipant("Cheater");
+    runtime.controller.observeCheat("Cheater", true, "current-cycle-cheat");
+    const echo = "[07-22 12:02:00] (#101, *ContestConsole) toggled cheat off globally!";
+
+    client.emitRawLine(echo);
+    expect(runtime.controller.snapshot().participantStates)
+      .toContainEqual(expect.objectContaining({ participantId: "Cheater", cheatEnabled: true }));
+
+    const currentCheatOff = runtime.commands.enqueue({ type: "cheat-off" }, "current-cycle-cheat-off");
+    await vi.waitFor(() => expect(client.writes).toContain("cheat off"));
+    client.emitRawLine(echo);
+    await expect(currentCheatOff).resolves.toMatchObject({ status: "acknowledged" });
+    expect(runtime.controller.snapshot().participantStates)
+      .toContainEqual(expect.objectContaining({ participantId: "Cheater", cheatEnabled: false }));
   });
 
   it("cuts over queued and sent commands and accepts only the new soft-reconnect identity", async () => {

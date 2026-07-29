@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import type { ScenarioDefinition, ScenarioEvent, ScenarioStage } from "@ballance/contracts";
+import type { AttemptOrigin, ScenarioDefinition, ScenarioEvent, ScenarioStage } from "@ballance/contracts";
 
 export type ResultStatus = "finished" | "dnf" | "excluded";
 
@@ -38,6 +38,7 @@ export interface AttemptState {
   id: string;
   stageId: string;
   attemptNumber: number;
+  origin?: AttemptOrigin;
   goSourceId: string;
   goAtMs: number;
   deadlineAtMs: number;
@@ -47,8 +48,17 @@ export interface AttemptState {
 
 export interface EngineAnomaly {
   sourceId: string;
-  code: "practice-result" | "unauthorized-go" | "post-completion-result" | "late-result" | "duplicate-event" | "unknown-stage";
+  code: "practice-result" | "pre-go-result" | "unauthorized-go" | "post-completion-result" | "late-result" | "duplicate-event" | "unknown-stage";
   detail: string;
+}
+
+export interface RefereeMarkedAttemptInput {
+  id: string;
+  stageId: string;
+  attemptNumber: number;
+  goAtMs: number;
+  deadlineAtMs: number;
+  sourceId: string;
 }
 
 export interface EngineSnapshot {
@@ -113,7 +123,10 @@ export class CompetitionEngine {
     this.finishSequence = 0;
     this.nextScoreboardVersion = 1;
 
-    this.attempts.push(...snapshot.attempts.map((attempt) => ({ ...attempt })));
+    this.attempts.push(...snapshot.attempts.map((attempt) => ({
+      ...attempt,
+      origin: attempt.origin ?? "authoritative-go"
+    })));
     this.versions.push(...snapshot.scoreboardVersions.map((version) => ({ ...version, entries: version.entries.map((entry) => ({ ...entry, placeCounts: [...entry.placeCounts], stages: { ...entry.stages } })) })));
     this.anomalies.push(...snapshot.anomalies.map((anomaly) => ({ ...anomaly })));
     for (const attempt of this.attempts) this.seenSources.add(attempt.goSourceId);
@@ -174,17 +187,15 @@ export class CompetitionEngine {
       this.anomalies.push({ sourceId: event.sourceId, code: "unauthorized-go", detail: event.refereeConnectionId });
       return;
     }
-    for (const attempt of this.attempts) attempt.open = false;
     const attemptNumber = this.attempts.filter((attempt) => attempt.stageId === event.stageId).length + 1;
-    this.attempts.push({
+    this.openAttempt({
       id: randomUUID(),
       stageId: event.stageId,
       attemptNumber,
+      origin: "authoritative-go",
       goSourceId: event.sourceId,
       goAtMs: event.atMs,
       deadlineAtMs: event.atMs + stage.timeLimitMs,
-      open: true,
-      voided: false
     });
   }
 
@@ -197,6 +208,10 @@ export class CompetitionEngine {
     const attempt = [...this.attempts].reverse().find((candidate) => candidate.stageId === event.stageId && candidate.open && !candidate.voided);
     if (!attempt) {
       this.anomalies.push({ sourceId: event.sourceId, code: "practice-result", detail: event.stageId });
+      return;
+    }
+    if (event.atMs < attempt.goAtMs) {
+      this.anomalies.push({ sourceId: event.sourceId, code: "pre-go-result", detail: event.stageId });
       return;
     }
     if (event.atMs > attempt.deadlineAtMs) {
@@ -279,6 +294,44 @@ export class CompetitionEngine {
     if (attempt) attempt.open = false;
   }
 
+  public startRefereeMarkedAttempt(input: RefereeMarkedAttemptInput): AttemptState {
+    const stage = this.stages.get(input.stageId);
+    if (!stage) throw new Error("UNKNOWN_STAGE");
+    if (!input.id.trim() || !input.sourceId.trim()) throw new Error("ATTEMPT_ID_REQUIRED");
+    if (!Number.isInteger(input.attemptNumber) || input.attemptNumber < 1) throw new Error("INVALID_ATTEMPT_NUMBER");
+    if (!Number.isFinite(input.goAtMs)
+      || !Number.isFinite(input.deadlineAtMs)
+      || input.deadlineAtMs !== input.goAtMs + stage.timeLimitMs) {
+      throw new Error("INVALID_ATTEMPT_TIMING");
+    }
+    const existing = this.attempts.find((attempt) =>
+      attempt.stageId === input.stageId && attempt.attemptNumber === input.attemptNumber);
+    if (existing) {
+      if (existing.id !== input.id
+        || existing.origin !== "referee-marked-started"
+        || existing.goSourceId !== input.sourceId
+        || existing.goAtMs !== input.goAtMs
+        || existing.deadlineAtMs !== input.deadlineAtMs) {
+        throw new Error("ATTEMPT_CONFLICT");
+      }
+      return { ...existing };
+    }
+    const expectedAttemptNumber = this.attempts.filter((attempt) => attempt.stageId === input.stageId).length + 1;
+    if (input.attemptNumber !== expectedAttemptNumber) throw new Error("ATTEMPT_NUMBER_MISMATCH");
+    if (this.seenSources.has(input.sourceId)) throw new Error("ATTEMPT_SOURCE_CONFLICT");
+    this.seenSources.add(input.sourceId);
+    const attempt = this.openAttempt({
+      id: input.id,
+      stageId: input.stageId,
+      attemptNumber: input.attemptNumber,
+      origin: "referee-marked-started",
+      goSourceId: input.sourceId,
+      goAtMs: input.goAtMs,
+      deadlineAtMs: input.deadlineAtMs
+    });
+    return { ...attempt };
+  }
+
   private buildScoreboard(excludeStageId?: string): readonly ScoreboardEntry[] {
     const aggregate = [...this.playerNames].map(([playerId, displayName]) => ({
       playerId,
@@ -308,6 +361,13 @@ export class CompetitionEngine {
     };
     const ranked = rankSorted(aggregate, compare);
     return ranked.map(({ item, rank }) => ({ ...item, rank, change: null }));
+  }
+
+  private openAttempt(input: Omit<AttemptState, "open" | "voided">): AttemptState {
+    for (const attempt of this.attempts) attempt.open = false;
+    const attempt: AttemptState = { ...input, open: true, voided: false };
+    this.attempts.push(attempt);
+    return attempt;
   }
 
   private rankBeforeStage(stage: ScenarioStage): Map<string, number> {

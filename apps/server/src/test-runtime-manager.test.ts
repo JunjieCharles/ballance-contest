@@ -54,6 +54,8 @@ const harness = (): {
   manager: TestRuntimeManager;
   rawLogs: RawClientLogLine[];
   restoreManager: () => TestRuntimeManager;
+  getConfig: () => CompetitionConfig;
+  setParticipantStageStatus: (status: "waiting" | "running" | "finished" | "dnf") => void;
 } => {
   let payload: ServiceSnapshotPayload = {};
   let config: CompetitionConfig = {
@@ -105,7 +107,17 @@ const harness = (): {
   return {
     manager: new TestRuntimeManager(host),
     rawLogs,
-    restoreManager: () => new TestRuntimeManager(host)
+    restoreManager: () => new TestRuntimeManager(host),
+    getConfig: () => config,
+    setParticipantStageStatus: (status) => {
+      config = {
+        ...config,
+        participants: config.participants.map((participant) => ({
+          ...participant,
+          currentStageStatus: status
+        }))
+      };
+    }
   };
 };
 
@@ -262,5 +274,202 @@ describe("TestRuntimeManager generation safety", () => {
       stageId: "s1",
       open: false
     }));
+  });
+
+  it("does not attribute a delayed old-cycle finish to a restarted authoritative attempt", () => {
+    const { manager, rawLogs } = harness();
+    const runtime = reachPendingGo(manager, scenario([
+      { atMs: 34_000, sourceId: "old-cycle-late-finish", type: "finish", stageId: "s1", playerId: "p1", score: 999, elapsedMs: 1_000 }
+    ]));
+    manager.advanceAutomation(competitionId, runtime.id, 3_000);
+    const firstAttempt = runtime.automation.snapshot().attempts.findLast((attempt) => !attempt.voided);
+    if (!firstAttempt) throw new Error("missing first attempt");
+    const confirmation = runtime.automation.issueStageRestartConfirmation("s1");
+    manager.restartCurrentStage(runtime, {
+      stageId: "s1",
+      impactHash: confirmation.impactHash,
+      token: confirmation.token,
+      reason: "test delayed evidence",
+      sourceId: "restart-for-delayed-evidence"
+    });
+    manager.advanceAutomation(competitionId, runtime.id, 33_000);
+    const secondAttempt = runtime.automation.snapshot().attempts.findLast((attempt) => !attempt.voided);
+    if (!secondAttempt) throw new Error("missing second attempt");
+    expect(secondAttempt.goAtMs).toBeGreaterThan(34_000);
+    const rawLogBoundary = rawLogs.length;
+
+    manager.advance(competitionId, runtime.id, true);
+
+    expect(runtime.automation.snapshot().attempts.find((attempt) => attempt.id === firstAttempt.id)?.voided).toBe(true);
+    expect(runtime.automation.snapshot().attempts.find((attempt) => attempt.id === secondAttempt.id)?.results).toEqual([]);
+    expect(runtime.engine.snapshot().currentScoreboard.every((entry) => entry.stages.s1 === undefined)).toBe(true);
+    expect(rawLogs.slice(rawLogBoundary)).toContainEqual(expect.objectContaining({
+      rawLine: expect.stringContaining("finished Level 01")
+    }));
+  });
+
+  it("persists referee-marked attempts, filters pre-mark evidence, resets scoring, and advances the T-60 boundary", () => {
+    const { manager, rawLogs, restoreManager, getConfig, setParticipantStageStatus } = harness();
+    const definition = scenario([
+      { atMs: 1_000, sourceId: "pre-mark-warning", type: "warning", playerId: "p1", message: "old warning" },
+      { atMs: 2_000, sourceId: "pre-mark-cheat", type: "cheat", playerId: "p1", enabled: true },
+      { atMs: 3_000, sourceId: "pre-mark-finish", type: "finish", stageId: "s1", playerId: "p1", score: 100, elapsedMs: 3_000 },
+      { atMs: 4_000, sourceId: "pre-mark-dnf", type: "dnf", stageId: "s1", playerId: "p1", reason: "old dnf" }
+    ]);
+    const { runId } = manager.create(competitionId, definition);
+    manager.startAutomation(competitionId, runId, 10_000);
+    manager.advanceAutomation(competitionId, runId, 10_000);
+    const runtime = manager.getRuntime(competitionId, runId);
+    expect(runtime.automation.snapshot().phase).toBe("ready");
+
+    const marked = manager.markCurrentReadyStageStarted(runtime, "s1");
+    expect(marked).toMatchObject({
+      stageId: "s1",
+      attemptNumber: 1,
+      origin: "referee-marked-started",
+      goAtMs: 10_000,
+      deadlineAtMs: 210_000,
+      intakeOpen: true,
+      voided: false
+    });
+    expect(runtime.automation.snapshot()).toMatchObject({
+      phase: "paused",
+      pausedFromPhase: "running",
+      automationEnabled: false
+    });
+    expect(runtime.engine.snapshot().attempts).toContainEqual(expect.objectContaining({
+      id: marked.id,
+      stageId: "s1",
+      attemptNumber: 1,
+      origin: "referee-marked-started",
+      goAtMs: 10_000,
+      deadlineAtMs: 210_000,
+      open: true,
+      voided: false
+    }));
+
+    const rawLogBoundary = rawLogs.length;
+    manager.advance(competitionId, runId, true);
+    expect(runtime.automation.snapshot().attempts[0]?.results).toEqual([]);
+    expect(runtime.engine.snapshot().currentScoreboard.every((entry) => Object.keys(entry.stages).length === 0)).toBe(true);
+    expect(runtime.engine.snapshot().anomalies).toEqual([]);
+    expect(rawLogs.slice(rawLogBoundary)).toHaveLength(4);
+
+    const receivedAtMs = runtime.automationClock.now();
+    expect(runtime.automation.recordResult({
+      stageId: "s1",
+      playerId: "p1",
+      status: "finished",
+      sourceId: "post-mark-finish",
+      receivedAtMs
+    })).toBe("accepted");
+    runtime.engine.apply({
+      atMs: receivedAtMs,
+      sourceId: "post-mark-finish",
+      type: "finish",
+      stageId: "s1",
+      playerId: "p1",
+      score: 120,
+      elapsedMs: 1_000
+    });
+    manager.settle(runtime);
+    setParticipantStageStatus("finished");
+
+    const reset = manager.forceResetCurrentStage(runtime, "force-reset-test", "s1");
+    expect(reset).toMatchObject({
+      stageId: "s1",
+      voidedAttempts: [expect.objectContaining({ id: marked.id, voided: true })]
+    });
+    expect(runtime.automation.snapshot()).toMatchObject({
+      currentStageId: "s1",
+      phase: "preparing",
+      plannedReadyStageId: "s1",
+      plannedReadyAtMs: 70_000,
+      attempts: [expect.objectContaining({ id: marked.id, voided: true, intakeOpen: false })]
+    });
+    expect(runtime.engine.snapshot().attempts).toContainEqual(expect.objectContaining({
+      id: marked.id,
+      voided: true,
+      open: false
+    }));
+    expect(runtime.engine.snapshot().currentScoreboard.every((entry) => entry.stages.s1 === undefined)).toBe(true);
+    expect(getConfig().participants.every((participant) => participant.currentStageStatus === "waiting")).toBe(true);
+
+    manager.advanceAutomation(competitionId, runId, 60_000);
+    const secondMarked = manager.markCurrentReadyStageStarted(runtime, "s1");
+    expect(secondMarked).toMatchObject({
+      stageId: "s1",
+      attemptNumber: 2,
+      origin: "referee-marked-started",
+      goAtMs: 70_000,
+      deadlineAtMs: 270_000
+    });
+    const secondReceivedAtMs = runtime.automationClock.now();
+    expect(runtime.automation.recordResult({
+      stageId: "s1",
+      playerId: "p1",
+      status: "finished",
+      sourceId: "retained-finish",
+      receivedAtMs: secondReceivedAtMs
+    })).toBe("accepted");
+    runtime.engine.apply({
+      atMs: secondReceivedAtMs,
+      sourceId: "retained-finish",
+      type: "finish",
+      stageId: "s1",
+      playerId: "p1",
+      score: 130,
+      elapsedMs: 1_000
+    });
+    manager.settle(runtime);
+    setParticipantStageStatus("finished");
+
+    const advanced = manager.forceAdvanceToNextStage(runtime, "s1", "s2");
+    expect(advanced).toMatchObject({
+      fromStageId: "s1",
+      toStageId: "s2",
+      closedAttempt: expect.objectContaining({ id: secondMarked.id, voided: false })
+    });
+    expect(runtime.automation.snapshot()).toMatchObject({
+      currentStageId: "s2",
+      phase: "preparing",
+      plannedReadyStageId: "s2",
+      plannedReadyAtMs: 130_000,
+      attempts: [
+        expect.objectContaining({ id: marked.id, voided: true }),
+        expect.objectContaining({ id: secondMarked.id, voided: false, intakeOpen: false })
+      ]
+    });
+    expect(runtime.engine.snapshot().currentScoreboard).toContainEqual(expect.objectContaining({
+      playerId: "p1",
+      stages: { s1: expect.objectContaining({ sourceId: "retained-finish" }) }
+    }));
+    expect(getConfig().participants.every((participant) => participant.currentStageStatus === "waiting")).toBe(true);
+
+    manager.persist(runtime);
+    const restored = restoreManager().getRuntime(competitionId, runId);
+    expect(restored.automation.snapshot()).toMatchObject({
+      currentStageId: "s2",
+      phase: "paused",
+      pausedFromPhase: "preparing",
+      plannedReadyStageId: "s2",
+      plannedReadyAtMs: 130_000,
+      attempts: [
+        expect.objectContaining({ id: marked.id, origin: "referee-marked-started", voided: true }),
+        expect.objectContaining({ id: secondMarked.id, origin: "referee-marked-started", voided: false, intakeOpen: false })
+      ]
+    });
+    expect(restored.engine.snapshot()).toMatchObject({
+      attempts: [
+        expect.objectContaining({ id: marked.id, origin: "referee-marked-started", voided: true }),
+        expect.objectContaining({ id: secondMarked.id, origin: "referee-marked-started", voided: false, open: false })
+      ],
+      currentScoreboard: [
+        expect.objectContaining({
+          playerId: "p1",
+          stages: { s1: expect.objectContaining({ sourceId: "retained-finish" }) }
+        })
+      ]
+    });
   });
 });

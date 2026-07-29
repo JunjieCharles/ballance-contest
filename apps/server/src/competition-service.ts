@@ -56,9 +56,15 @@ import {
   simulatedCommand,
   stageDeadlineAt
 } from "./runtime-shared.js";
-import type { ServiceSnapshotPayload } from "./runtime-types.js";
+import type {
+  ServiceSnapshotPayload,
+  WorkLogEvidenceBoundary
+} from "./runtime-types.js";
 import { ScoreboardService } from "./scoreboard-service.js";
-import { RefereeActionService } from "./referee-action-service.js";
+import {
+  RefereeActionService,
+  type StageRecoveryAction
+} from "./referee-action-service.js";
 import { ServiceError } from "./service-error.js";
 import type { OpenedDatabase } from "./storage/database.js";
 import { TestRuntimeManager } from "./test-runtime-manager.js";
@@ -87,6 +93,7 @@ interface ConfirmationRecord {
   target: string;
   stateVersion: number;
   runtimeStateVersion?: number;
+  runtimeIdentity?: string;
   impactHash: string;
   expiresAtMs: number;
   intent?: ConfirmationIntent;
@@ -104,6 +111,9 @@ const stageBoundActionForIntent = (intent: ConfirmationIntent | undefined): Refe
     case "reschedule-stage-deadline":
     case "end-stage":
     case "restart-stage":
+    case "mark-stage-started":
+    case "force-reset-stage":
+    case "force-next-stage":
       return intent;
     default:
       return undefined;
@@ -158,14 +168,13 @@ const canonicalJson = (value: unknown): string => {
   return JSON.stringify(normalize(value));
 };
 
-const actionIdempotencyIdentity = (action: CompetitionAction): string => {
+const actionIdempotencyIdentity = (action: CompetitionAction, expectedStateVersion: number): string => {
   const semanticAction = { ...action } as Record<string, unknown>;
   delete semanticAction.confirmationToken;
-  delete semanticAction.impactHash;
   if (action.type === "raw-command") semanticAction.command = action.command.trim();
   if (action.type === "notification") semanticAction.text = action.text.trim();
   if (action.type === "kick") semanticAction.playerName = action.playerName.trim();
-  return canonicalJson(semanticAction);
+  return canonicalJson({ expectedStateVersion, action: semanticAction });
 };
 
 const READY_PREPARATION_LEAD_MS = 60_000;
@@ -213,6 +222,7 @@ export class CompetitionService {
   private readonly actionIdempotencyIdentities = new Map<string, string>();
   private readonly inFlightActions = new Map<string, Promise<CommandRecordView | ScoreboardVersionView>>();
   private readonly confirmations = new Map<string, ConfirmationRecord>();
+  private readonly workRuntimeConfirmationIds = new WeakMap<object, string>();
   private closePromise: Promise<void> | undefined;
 
   public constructor(
@@ -663,9 +673,12 @@ export class CompetitionService {
     }
     const stageBoundAction = stageBoundActionForIntent(intent);
     let runtimeStateVersion: number | undefined;
+    let runtimeIdentity: string | undefined;
     let runtimeStageImpact: unknown;
     if (stageBoundAction) {
       if (!runtimeSnapshot) throw new ServiceError("CONFIRMATION_UNAVAILABLE", "当前没有可绑定的比赛运行", 409);
+      runtimeIdentity = this.runtimeIdentityForConfirmation(competitionId);
+      if (!runtimeIdentity) throw new ServiceError("CONFIRMATION_UNAVAILABLE", "当前没有可绑定的比赛运行实例", 409);
       const availability = this.availableActionsFor(competitionId, runtimeSnapshot)
         .find((candidate) => candidate.action === stageBoundAction);
       if (!availability?.targetStageId) {
@@ -679,7 +692,19 @@ export class CompetitionService {
       const targetAttempt = runtimeSnapshot.attempts
         .filter((attempt) => attempt.stageId === target)
         .at(-1);
+      const currentAttempt = runtimeSnapshot.attempts
+        .filter((attempt) => attempt.stageId === runtimeSnapshot.currentStageId)
+        .at(-1);
+      const attemptImpact = (attempt: typeof targetAttempt) => attempt === undefined ? null : {
+        id: attempt.id,
+        attemptNumber: attempt.attemptNumber,
+        intakeOpen: attempt.intakeOpen,
+        voided: attempt.voided,
+        deadlineAtMs: attempt.deadlineAtMs,
+        resultSourceIds: attempt.results.map((result) => result.sourceId)
+      };
       runtimeStageImpact = {
+        runtimeIdentity,
         runtimeStateVersion,
         targetStageId: target,
         phase: runtimeSnapshot.phase,
@@ -689,16 +714,12 @@ export class CompetitionService {
         plannedReadyStageId: runtimeSnapshot.plannedReadyStageId,
         nextStagePending: runtimeSnapshot.nextStagePending,
         restartPending: runtimeSnapshot.restartPending,
-        attempt: targetAttempt === undefined ? null : {
-          id: targetAttempt.id,
-          attemptNumber: targetAttempt.attemptNumber,
-          intakeOpen: targetAttempt.intakeOpen,
-          voided: targetAttempt.voided,
-          deadlineAtMs: targetAttempt.deadlineAtMs,
-          resultSourceIds: targetAttempt.results.map((result) => result.sourceId)
-        },
+        attempt: attemptImpact(targetAttempt),
+        // force-next binds not only the next-stage target but also the stage and
+        // attempt it is about to close.
+        currentStageAttempt: attemptImpact(currentAttempt),
         unresolvedTargetActions: runtimeSnapshot.actions
-          .filter((action) => action.stageId === target && ["pending", "failed", "uncertain"].includes(action.status))
+          .filter((action) => action.stageId === target && action.isolated !== true && ["pending", "failed", "uncertain"].includes(action.status))
           .map((action) => ({ id: action.id, kind: action.kind, status: action.status }))
       };
     }
@@ -841,6 +862,7 @@ export class CompetitionService {
       target,
       stateVersion: competition.stateVersion,
       ...(runtimeStateVersion === undefined ? {} : { runtimeStateVersion }),
+      ...(runtimeIdentity === undefined ? {} : { runtimeIdentity }),
       impactHash,
       expiresAtMs,
       ...(intent === undefined ? {} : { intent }),
@@ -911,6 +933,36 @@ export class CompetitionService {
               "立即把当前关重置到 Ready；已有尝试和本次成绩将作废，尚未 Go 时不会补造尝试。",
               "当前流程命令、事故、权限提示、未决真实命令和观察缺口将不再阻断新周期，原始证据与审计永久保留。",
               "系统会立即发送新的第一条 Ready；真实连接或权限仍不可用时，新命令可能再次失败。"
+            ],
+            irreversible: true
+          };
+        case "mark-stage-started":
+          return {
+            title: `把 ${displayStageName} 标记为已起跑？`,
+            consequences: [
+              "以确认成功时刻作为本关 goAt，并从该时刻开始计算关卡时限。",
+              "不会向比赛服务器发送命令，也不会回补标记前发生的完赛、DNF、Warning 或 [CHEAT] 证据。",
+              "自动化保持暂停；本关成绩接收窗口和关卡时限继续运行。"
+            ],
+            irreversible: true
+          };
+        case "force-reset-stage":
+          return {
+            title: `强制重置 ${displayStageName} 并从 T-60 重新准备？`,
+            consequences: [
+              "本关当前有效尝试和成绩将作废并退出有效榜单，原始证据与旧榜单版本永久保留。",
+              "取消下一关计划和旧发令周期，从现在开始重新安排本关 Bulletin、Notice 与 1 分钟后的第一条 Ready。",
+              "旧周期阻断不再阻止新周期；真实连接或权限仍不可用时，新命令可能再次失败。"
+            ],
+            irreversible: true
+          };
+        case "force-next-stage":
+          return {
+            title: `强制进入 ${displayStageName} 的 T-60 准备阶段？`,
+            consequences: [
+              "立即关闭上一关成绩窗口但保留已有尝试和成绩；上一关随即开放人工修订。",
+              `当前关卡立即切换为 ${displayStageName}，并从现在开始安排 Bulletin、Notice 与 1 分钟后的第一条 Ready。`,
+              "上一关迟到的 Ready、Go、完赛和违规证据只保留日志，不再改变新关状态。"
             ],
             irreversible: true
           };
@@ -1060,7 +1112,21 @@ export class CompetitionService {
     input: { expectedStateVersion: number; idempotencyKey: string; action: CompetitionAction }
   ): Promise<CommandRecordView | ScoreboardVersionView> {
     const key = `${competitionId}:action:${input.idempotencyKey}`;
-    const requestIdentity = actionIdempotencyIdentity(input.action);
+    const requestIdentity = actionIdempotencyIdentity(input.action, input.expectedStateVersion);
+    const receipt = this.actionReceipt(competitionId, input.idempotencyKey);
+    if (receipt) {
+      if (receipt.actionIdentity !== requestIdentity) {
+        throw new ServiceError(
+          "IDEMPOTENCY_CONFLICT",
+          "该幂等键已经绑定到另一个裁判动作或不同的动作输入；请刷新现场状态并使用新的幂等键。",
+          409
+        );
+      }
+      const result = JSON.parse(receipt.resultPayload) as CommandRecordView | ScoreboardVersionView;
+      this.actionIdempotencyIdentities.set(key, requestIdentity);
+      this.idempotency.set(key, result);
+      return result;
+    }
     const claimedIdentity = this.actionIdempotencyIdentities.get(key);
     if (claimedIdentity !== undefined && claimedIdentity !== requestIdentity) {
       throw new ServiceError(
@@ -1074,6 +1140,13 @@ export class CompetitionService {
     if (old) return old as CommandRecordView;
     const running = this.inFlightActions.get(key);
     if (running) return await running;
+    if (this.hasDurableCommandAudit(competitionId, input.idempotencyKey)) {
+      throw new ServiceError(
+        "IDEMPOTENCY_CONFLICT",
+        "该幂等键已由此前完成的裁判动作使用，但没有可安全重放的持久回执；为避免覆盖原命令审计，请刷新现场状态并使用新的幂等键。",
+        409
+      );
+    }
     const operation = this.performActionOnce(competitionId, input);
     this.inFlightActions.set(key, operation);
     try {
@@ -1247,6 +1320,25 @@ export class CompetitionService {
         idempotencyKey: input.idempotencyKey
       });
     }
+    const stageRecoveryAction: StageRecoveryAction | undefined =
+      input.action.type === "restart-stage"
+      || input.action.type === "mark-stage-started"
+      || input.action.type === "force-reset-stage"
+      || input.action.type === "force-next-stage"
+        ? input.action
+        : undefined;
+    const workStageRecoveryRuntime = stageRecoveryAction && competition.mode === "work"
+      ? this.workRuntimeManager.get(competitionId)
+      : undefined;
+    if (stageRecoveryAction && competition.mode === "work" && !workStageRecoveryRuntime) {
+      throw new ServiceError("NOT_FOUND", "比赛连接尚未建立", 404);
+    }
+    // Drain all complete log lines and capture the byte boundary before checking
+    // the confirmation's runtime version. Evidence observed here can therefore
+    // make an old confirmation stale instead of leaking into the new cycle.
+    const workLogEvidenceBoundary = workStageRecoveryRuntime
+      ? this.workRuntimeManager.flushStageRecoveryEvidence(workStageRecoveryRuntime)
+      : undefined;
     const stageBoundConfirmation = stageBoundActionForIntent(input.action.type as ConfirmationIntent) !== undefined;
     const confirmationToken = "confirmationToken" in input.action
       ? input.action.confirmationToken
@@ -1263,14 +1355,27 @@ export class CompetitionService {
       this.workRuntimeManager.requireHealthy(competitionId);
     }
     confirmation ??= this.consumeActionConfirmation(competitionId, input.action);
-    const restartUnconfirmedCommands = input.action.type === "restart-stage"
-      ? this.unconfirmedCommandsFor(competitionId, this.runtimeAutomationSnapshot(competitionId))
-      : [];
-    const handledLocally = await this.refereeActionService.applyLocal(competitionId, input.action, confirmation);
-    if (input.action.type === "restart-stage") {
-      this.resolveObservationGapsByRestart(competitionId, input.action.stageId);
-      this.supersedeUnconfirmedCommandsByRestart(competitionId, input.action.stageId, restartUnconfirmedCommands);
+    if (stageRecoveryAction) {
+      try {
+        return this.performStageRecoveryUnitOfWork(
+          competitionId,
+          input.idempotencyKey,
+          actionIdempotencyIdentity(stageRecoveryAction, input.expectedStateVersion),
+          stageRecoveryAction,
+          confirmation,
+          workLogEvidenceBoundary
+        );
+      } catch (error) {
+        // Checkpoint creation itself can fail before the unit-of-work's inner
+        // rollback handler is installed. A durable receipt proves the action
+        // committed; otherwise the consumed confirmation remains retryable.
+        if (confirmation && !this.actionReceipt(competitionId, input.idempotencyKey)) {
+          this.confirmations.set(confirmation.token, confirmation);
+        }
+        throw error;
+      }
     }
+    const handledLocally = await this.refereeActionService.applyLocal(competitionId, input.action, confirmation);
     let view: CommandRecordView;
     if (handledLocally) {
       view = this.refereeActionService.localActionRecord(input.action.type, this.refereeActionService.describe(input.action), competition.mode === "test");
@@ -1292,6 +1397,184 @@ export class CompetitionService {
       data: view
     });
     return view;
+  }
+
+  private performStageRecoveryUnitOfWork(
+    competitionId: string,
+    idempotencyKey: string,
+    actionIdentity: string,
+    action: StageRecoveryAction,
+    confirmation: ConfirmationRecord | undefined,
+    workLogEvidenceBoundary: WorkLogEvidenceBoundary | undefined
+  ): CommandRecordView {
+    const competitionBefore = { ...this.get(competitionId) };
+    const controller = this.controllerFor(competitionId);
+    const automationBefore = controller.snapshot();
+    const commandsBefore = action.type === "mark-stage-started"
+      ? []
+      : this.unconfirmedCommandsFor(competitionId, automationBefore);
+    const auditMemoryBefore = this.auditService.checkpointCommandMemory(competitionId);
+    const testRunId = competitionBefore.mode === "test"
+      ? this.getPayload(competitionId).activeRunId ?? competitionBefore.activeRunId
+      : undefined;
+    const testRuntime = testRunId
+      ? this.testRuntimeManager.getRuntime(competitionId, testRunId)
+      : undefined;
+    const testCheckpoint = testRuntime
+      ? this.testRuntimeManager.checkpointStageRecovery(testRuntime)
+      : undefined;
+    const workRuntime = competitionBefore.mode === "work"
+      ? this.workRuntimeManager.get(competitionId)
+      : undefined;
+    const workCheckpoint = workRuntime
+      ? this.workRuntimeManager.checkpointStageRecovery(workRuntime)
+      : undefined;
+    const journalBuffer = this.journal.beginBuffer();
+    let durableCommitted = false;
+    let view: CommandRecordView | undefined;
+
+    const execute = (): void => {
+      this.refereeActionService.applyStageRecoveryLocal(
+        competitionId,
+        action,
+        confirmation,
+        {
+          deferCommandIsolation: Boolean(this.options.database),
+          logAlreadyFlushed: true,
+          ...(workLogEvidenceBoundary === undefined ? {} : { logEvidenceBoundary: workLogEvidenceBoundary })
+        }
+      );
+      if (action.type !== "mark-stage-started") {
+        const fromStageId = automationBefore.currentStageId;
+        const toStageId = action.type === "force-next-stage" ? action.stageId : fromStageId;
+        const commandsAfterIsolation = this.unconfirmedCommandsFor(
+          competitionId,
+          controller.snapshot()
+        );
+        const commands = [
+          ...new Map(
+            [...commandsBefore, ...commandsAfterIsolation]
+              .map((command) => [command.id, command] as const)
+          ).values()
+        ];
+        this.resolveObservationGapsByForcedStageAction(
+          competitionId,
+          fromStageId,
+          toStageId,
+          action.type
+        );
+        this.supersedeUnconfirmedCommandsByForcedStageAction(
+          competitionId,
+          fromStageId,
+          toStageId,
+          commands,
+          action.type
+        );
+      }
+      view = this.refereeActionService.localActionRecord(
+        action.type,
+        this.refereeActionService.describe(action),
+        competitionBefore.mode === "test"
+      );
+      this.recordCommandView(competitionId, idempotencyKey, view);
+      this.bumpCompetitionVersion(competitionId);
+      this.journal.append({
+        type: competitionBefore.mode === "test" ? "command.simulated" : "command.updated",
+        competitionId,
+        stateVersion: this.get(competitionId).stateVersion,
+        data: view
+      });
+      // Re-stamp the already persisted runtime payload with the competition
+      // version allocated by this same transaction.
+      this.savePayload(competitionId, this.getPayload(competitionId));
+      // The receipt is intentionally the final durable business write. A
+      // process crash after commit can replay the exact response without
+      // re-consuming confirmation or re-running the state transition.
+      this.saveActionReceipt(competitionId, idempotencyKey, actionIdentity, view);
+    };
+
+    try {
+      if (this.options.database) this.options.database.sqlite.transaction(execute).immediate();
+      else execute();
+      durableCommitted = true;
+    } catch (error) {
+      if (testRuntime && testCheckpoint) {
+        this.testRuntimeManager.restoreStageRecovery(testRuntime, testCheckpoint);
+      }
+      if (workRuntime && workCheckpoint) {
+        this.workRuntimeManager.restoreStageRecovery(workRuntime, workCheckpoint);
+      }
+      this.competitions.set(competitionId, competitionBefore);
+      this.auditService.restoreCommandMemory(competitionId, auditMemoryBefore);
+      if (confirmation) this.confirmations.set(confirmation.token, confirmation);
+      journalBuffer.rollback();
+      throw error;
+    }
+
+    try {
+      if (workRuntime && this.options.database) {
+        // No await or callback boundary is allowed between SQLite commit and
+        // preview revalidation/application.
+        this.workRuntimeManager.commitPreparedStageRecovery(workRuntime);
+      }
+    } catch (error) {
+      journalBuffer.commit();
+      this.blockAfterCommittedStageRecoveryIsolationFailure(competitionId, action, error);
+      throw new ServiceError(
+        "STAGE_RECOVERY_COMMITTED_BUT_COMMAND_ISOLATION_BLOCKED",
+        "关卡恢复状态已提交，但旧命令队列隔离复核失败；自动化已阻断，请刷新并人工核对现场。",
+        500,
+        { durableCommitted, cause: error instanceof Error ? error.message : String(error) }
+      );
+    }
+
+    journalBuffer.commit();
+    if (!view) throw new Error("STAGE_RECOVERY_RESULT_MISSING");
+    this.idempotency.set(`${competitionId}:action:${idempotencyKey}`, view);
+    return view;
+  }
+
+  private blockAfterCommittedStageRecoveryIsolationFailure(
+    competitionId: string,
+    action: StageRecoveryAction,
+    error: unknown
+  ): void {
+    const message = error instanceof Error ? error.message : String(error);
+    const runtime = this.workRuntimeManager.get(competitionId);
+    if (runtime) {
+      try {
+        runtime.controller.observeTimingDiscontinuity(
+          `关卡恢复已提交，但旧命令队列隔离复核失败：${message}`
+        );
+        this.workRuntimeManager.saveSnapshot(runtime);
+      } catch (persistenceError) {
+        this.journal.append({
+          type: "work.stage-recovery-post-commit-block-persist-failed",
+          competitionId,
+          data: {
+            action: action.type,
+            message,
+            persistenceError: persistenceError instanceof Error
+              ? persistenceError.message
+              : String(persistenceError)
+          }
+        });
+      }
+    }
+    this.appendAttention(competitionId, {
+      id: `stage-recovery-command-isolation-failed:${action.type}:${randomUUID()}`,
+      category: "incident",
+      severity: "critical",
+      title: "关卡恢复已提交，但旧命令隔离失败",
+      message: `${message}。不得把事务内预测伪装为已应用；自动化保持阻断，请刷新状态并人工核对未决命令。`,
+      occurredAt: new Date().toISOString(),
+      stageId: action.stageId
+    });
+    this.journal.append({
+      type: "work.stage-recovery-command-isolation-blocked",
+      competitionId,
+      data: { action: action.type, stageId: action.stageId, message }
+    });
   }
 
   public applyScoreboardOverride(
@@ -1439,7 +1722,7 @@ export class CompetitionService {
         database.sqlite.prepare("DELETE FROM domain_events WHERE competition_id=?").run(competitionId);
         database.sqlite.prepare("DELETE FROM raw_log_events WHERE competition_id=?").run(competitionId);
         database.sqlite.prepare("DELETE FROM result_intake_windows WHERE attempt_id IN (SELECT id FROM attempts WHERE competition_id=?)").run(competitionId);
-        for (const table of ["connection_identities", "participants", "attempts", "scoreboard_versions", "command_audits", "incidents", "overrides", "recovery_audits", "observation_gaps", "archive_versions", "attention_items", "config_versions", "runtime_snapshots"]) {
+        for (const table of ["connection_identities", "participants", "attempts", "scoreboard_versions", "command_audits", "incidents", "overrides", "recovery_audits", "observation_gaps", "archive_versions", "attention_items", "action_receipts", "config_versions", "runtime_snapshots"]) {
           database.sqlite.prepare(`DELETE FROM ${table} WHERE competition_id=?`).run(competitionId);
         }
         database.sqlite.prepare("DELETE FROM competitions WHERE id=?").run(competitionId);
@@ -1529,7 +1812,12 @@ export class CompetitionService {
     ).map((gap) => ({ id: gap.id, code: gap.code, detail: gap.detail, createdAt: gap.created_at }));
   }
 
-  private resolveObservationGapsByRestart(competitionId: string, stageId: string): void {
+  private resolveObservationGapsByForcedStageAction(
+    competitionId: string,
+    fromStageId: string,
+    toStageId: string,
+    action: "restart-stage" | "force-reset-stage" | "force-next-stage"
+  ): void {
     if (!this.options.database) return;
     const gaps = this.observationGapsFor(competitionId);
     if (gaps.length === 0) return;
@@ -1537,20 +1825,30 @@ export class CompetitionService {
     this.options.database.sqlite.prepare("UPDATE observation_gaps SET status='resolved',resolved_at=? WHERE competition_id=? AND status='open'")
       .run(resolvedAt, competitionId);
     this.appendAttention(competitionId, {
-      id: `observation-gaps-restart:${stageId}:${randomUUID()}`,
+      id: `observation-gaps-${action}:${fromStageId}:${randomUUID()}`,
       category: "incident",
       severity: "info",
-      title: "观察缺口已由重赛处置",
-      message: `${gaps.length} 项观察缺口已从新 Ready 周期的阻断中隔离；新权威 Go 将创建新尝试，原缺口证据永久保留。`,
+      title: action === "restart-stage"
+        ? "观察缺口已由重赛处置"
+        : action === "force-reset-stage"
+          ? "观察缺口已由强制重置隔离"
+          : "观察缺口已由强制下一关隔离",
+      message: `${gaps.length} 项观察缺口已从后续周期的阻断中隔离；未补造任何事件，原缺口证据永久保留。`,
       occurredAt: resolvedAt
     });
-    this.journal.append({ type: "observation-gap.resolved-by-restart", competitionId, data: { stageId, gapIds: gaps.map((gap) => gap.id) } });
+    this.journal.append({
+      type: "observation-gap.resolved-by-stage-recovery",
+      competitionId,
+      data: { action, fromStageId, toStageId, gapIds: gaps.map((gap) => gap.id) }
+    });
   }
 
-  private supersedeUnconfirmedCommandsByRestart(
+  private supersedeUnconfirmedCommandsByForcedStageAction(
     competitionId: string,
-    stageId: string,
-    commands: RuntimeSnapshot["unconfirmedCommands"]
+    fromStageId: string,
+    toStageId: string,
+    commands: RuntimeSnapshot["unconfirmedCommands"],
+    action: "restart-stage" | "force-reset-stage" | "force-next-stage"
   ): void {
     if (commands.length === 0) return;
     const payload = this.getPayload(competitionId);
@@ -1560,18 +1858,22 @@ export class CompetitionService {
     });
     const occurredAt = new Date().toISOString();
     this.appendAttention(competitionId, {
-      id: `commands-superseded-by-restart:${stageId}:${randomUUID()}`,
+      id: `commands-superseded-by-${action}:${fromStageId}:${randomUUID()}`,
       category: "command",
       severity: "warning",
-      title: "未决真实命令已由强制重赛隔离",
-      message: `${commands.length} 条失败或结果不确定的真实命令不再阻断新 Ready 周期；未判定其已执行，原命令状态与审计永久保留。`,
+      title: action === "restart-stage"
+        ? "未决真实命令已由强制重赛隔离"
+        : action === "force-reset-stage"
+          ? "未决真实命令已由强制重置隔离"
+          : "未决真实命令已由强制下一关隔离",
+      message: `${commands.length} 条失败或结果不确定的真实命令不再阻断后续周期；未判定其已执行，原命令状态与审计永久保留。`,
       occurredAt,
-      stageId
+      stageId: fromStageId
     });
     this.journal.append({
-      type: "command.superseded-by-restart",
+      type: "command.superseded-by-stage-recovery",
       competitionId,
-      data: { stageId, commandIds: commands.map((command) => command.id) }
+      data: { action, fromStageId, toStageId, commandIds: commands.map((command) => command.id) }
     });
   }
 
@@ -1759,14 +2061,14 @@ export class CompetitionService {
     const persistedVersions = this.storedScoreboardVersions(competitionId)
       .map((version) => this.scoreboardService.toVersion(version, Math.max(1, version.entries.length)));
     if (storedEngine) {
-      const storedAutomation = payload.work?.automation;
-      const sourceOrigin = storedAutomation
-        ? this.inferSnapshotWallClockOrigin(competitionId, storedAutomation, automation.wallClockOriginMs ?? 0)
-        : automation.wallClockOriginMs ?? 0;
-      const delta = sourceOrigin - (automation.wallClockOriginMs ?? sourceOrigin);
       return {
         ...storedEngine,
-        attempts: storedEngine.attempts.map((attempt) => ({ ...attempt, goAtMs: attempt.goAtMs + delta, deadlineAtMs: attempt.deadlineAtMs + delta })),
+        // Work-engine event times are parsed MockClient wall-clock timestamps.
+        // Referee-marked attempts use wallClockOrigin + controller monotonic time
+        // for the same reason. Only the controller snapshot is relocated to a
+        // new process monotonic origin; shifting the engine again would move its
+        // result window away from the persisted real-world Go/deadline.
+        attempts: storedEngine.attempts.map((attempt) => ({ ...attempt })),
         scoreboardVersions: persistedVersions.length > 0 ? persistedVersions : storedEngine.scoreboardVersions.map((version) => ({ ...version })),
         anomalies: storedEngine.anomalies.map((anomaly) => ({ ...anomaly })),
         currentScoreboard: persistedVersions.at(-1)?.entries ?? storedEngine.currentScoreboard.map((entry) => ({ ...entry }))
@@ -1777,6 +2079,7 @@ export class CompetitionService {
         id: attempt.id,
         stageId: attempt.stageId,
         attemptNumber: attempt.attemptNumber,
+        origin: attempt.origin ?? "authoritative-go",
         goSourceId: [...automation.actions].reverse().find((action) => action.kind === "go" && action.stageId === attempt.stageId && action.createdAtMs <= attempt.goAtMs)?.idempotencyKey ?? `restored-go:${attempt.id}`,
         goAtMs: attempt.goAtMs,
         deadlineAtMs: attempt.deadlineAtMs,
@@ -1817,6 +2120,58 @@ export class CompetitionService {
       const current = this.competitions.get(competitionId)?.stateVersion ?? 0;
       database.sqlite.prepare("INSERT INTO runtime_snapshots(competition_id,state_version,payload,updated_at) VALUES (?,?,?,?) ON CONFLICT(competition_id) DO UPDATE SET state_version=excluded.state_version,payload=excluded.payload,updated_at=excluded.updated_at")
         .run(competitionId, current, JSON.stringify(payload), new Date().toISOString());
+    });
+  }
+
+  private actionReceipt(
+    competitionId: string,
+    idempotencyKey: string
+  ): { actionIdentity: string; resultPayload: string; committedStateVersion: number } | undefined {
+    const stored = row<{
+      action_identity: string;
+      result_payload: string;
+      committed_state_version: number;
+    }>(
+      this.options.database,
+      "SELECT action_identity,result_payload,committed_state_version FROM action_receipts WHERE competition_id=? AND idempotency_key=?",
+      competitionId,
+      idempotencyKey
+    );
+    return stored === undefined
+      ? undefined
+      : {
+          actionIdentity: stored.action_identity,
+          resultPayload: stored.result_payload,
+          committedStateVersion: stored.committed_state_version
+        };
+  }
+
+  private hasDurableCommandAudit(competitionId: string, idempotencyKey: string): boolean {
+    return row<{ present: number }>(
+      this.options.database,
+      "SELECT 1 AS present FROM command_audits WHERE competition_id=? AND idempotency_key=?",
+      competitionId,
+      idempotencyKey
+    ) !== undefined;
+  }
+
+  private saveActionReceipt(
+    competitionId: string,
+    idempotencyKey: string,
+    actionIdentity: string,
+    result: CommandRecordView | ScoreboardVersionView
+  ): void {
+    this.withDatabase((database) => {
+      database.sqlite.prepare(
+        "INSERT INTO action_receipts(competition_id,idempotency_key,action_identity,result_payload,committed_state_version,created_at) VALUES (?,?,?,?,?,?)"
+      ).run(
+        competitionId,
+        idempotencyKey,
+        actionIdentity,
+        JSON.stringify(result),
+        this.get(competitionId).stateVersion,
+        new Date().toISOString()
+      );
     });
   }
 
@@ -2055,6 +2410,22 @@ export class CompetitionService {
     return runId ? this.testRuntimeManager.getRuntime(competitionId, runId).automation.snapshot() : undefined;
   }
 
+  private runtimeIdentityForConfirmation(competitionId: string): string | undefined {
+    const competition = this.get(competitionId);
+    if (competition.mode === "test") {
+      const runId = this.getPayload(competitionId).activeRunId ?? competition.activeRunId;
+      return runId === undefined ? undefined : `test:${runId}`;
+    }
+    const runtime = this.workRuntimeManager.get(competitionId);
+    if (!runtime) return undefined;
+    let runtimeId = this.workRuntimeConfirmationIds.get(runtime);
+    if (!runtimeId) {
+      runtimeId = randomUUID();
+      this.workRuntimeConfirmationIds.set(runtime, runtimeId);
+    }
+    return `work:${runtimeId}`;
+  }
+
   private workLifecycleConfirmationTarget(
     competitionId: string,
     intent: "reconnect-work" | "restart-work"
@@ -2159,6 +2530,24 @@ export class CompetitionService {
           context.runtimeStateVersion
         );
       }
+      case "mark-stage-started":
+      case "force-reset-stage":
+      case "force-next-stage": {
+        const context = stageContext(action.type);
+        if (action.stageId !== context.targetStageId) {
+          throw new ServiceError("CONFIRMATION_STALE", "现场恢复动作的目标关卡已变化，请重新确认", 409);
+        }
+        return this.consumeConfirmation(
+          competitionId,
+          "manual-action",
+          action.confirmationToken,
+          action.impactHash,
+          context.targetStageId,
+          action.type,
+          undefined,
+          context.runtimeStateVersion
+        );
+      }
       case "scoreboard-override":
         return this.consumeConfirmation(
           competitionId,
@@ -2210,6 +2599,12 @@ export class CompetitionService {
         latestRuntimeStateVersion: runtimeStateVersion
       });
     }
+    if (record.runtimeIdentity !== undefined) {
+      const latestRuntimeIdentity = this.runtimeIdentityForConfirmation(competitionId);
+      if (record.runtimeIdentity !== latestRuntimeIdentity) {
+        throw new ServiceError("CONFIRMATION_STALE", "比赛运行实例已变化，请基于当前运行重新确认", 409);
+      }
+    }
     this.confirmations.delete(token);
     return record;
   }
@@ -2256,6 +2651,15 @@ export class CompetitionService {
     const hasPersistedWorkRuntime = competition.mode === "work" && Boolean(this.getPayload(competitionId).work?.started);
     const startProtectionEnabled = (this.getPublishedConfig(competitionId) ?? this.getDraftConfig(competitionId)).flow.startProtectionEnabled !== false;
     const startProtectionUsed = snapshot?.startProtectionUsedStageIds?.includes(snapshot.currentStageId) ?? false;
+    const configuredStages = [...(this.getPublishedConfig(competitionId) ?? this.getDraftConfig(competitionId)).stages]
+      .sort((left, right) => left.order - right.order);
+    const currentStageIndex = snapshot?.currentStageId === undefined
+      ? -1
+      : configuredStages.findIndex((stage) => stage.id === snapshot.currentStageId);
+    const nextStageId = currentStageIndex >= 0 ? configuredStages[currentStageIndex + 1]?.id : undefined;
+    const hasCurrentNonVoidedAttempt = snapshot?.attempts.some((attempt) =>
+      attempt.stageId === snapshot.currentStageId && !attempt.voided) ?? false;
+    const markStartedReady = effectivePhase === "ready";
     const descriptor = (
       action: RefereeActionId,
       label: string,
@@ -2333,6 +2737,32 @@ export class CompetitionService {
         competition.status === "published" && hasRuntime && Boolean(snapshot?.currentStageId),
         competition.status !== "published" ? "只有已发布且未结束的比赛可以重赛" : !hasRuntime ? "请先建立比赛连接或创建测试运行" : "当前运行没有可重置的关卡",
         snapshot?.currentStageId),
+      descriptor("mark-stage-started", "手动标记当前关已起跑", "不发送服务器命令；以确认成功时刻创建本关尝试并开始关卡时限，自动化保持暂停。",
+        competition.status === "published" && hasRuntime && Boolean(snapshot?.currentStageId) && markStartedReady && !hasCurrentNonVoidedAttempt,
+        competition.status !== "published"
+          ? "只有已发布且未结束的比赛可以标记起跑"
+          : !hasRuntime
+            ? "请先建立比赛连接或创建测试运行"
+            : !markStartedReady
+              ? "只有当前逻辑阶段为 Ready 时才能标记已起跑"
+              : hasCurrentNonVoidedAttempt
+                ? "当前关已存在非作废尝试，不能重复标记起跑"
+                : "当前运行没有可标记的关卡",
+        snapshot?.currentStageId),
+      descriptor("force-reset-stage", "强制重置本关（T-60）", "作废本关有效尝试与成绩，隔离旧周期阻断，并从现在起重新规划本关 1 分钟准备流程。",
+        competition.status === "published" && hasRuntime && Boolean(snapshot?.currentStageId),
+        competition.status !== "published" ? "只有已发布且未结束的比赛可以强制重置" : !hasRuntime ? "请先建立比赛连接或创建测试运行" : "当前运行没有可重置的关卡",
+        snapshot?.currentStageId),
+      descriptor("force-next-stage", "强制进入下一关", "保留本关尝试与成绩但立即关闭窗口，原子切换到下一关并从现在起规划 1 分钟准备流程。",
+        competition.status === "published" && hasRuntime && nextStageId !== undefined,
+        competition.status !== "published"
+          ? "只有已发布且未结束的比赛可以强制进入下一关"
+          : !hasRuntime
+            ? "请先建立比赛连接或创建测试运行"
+            : nextStageId === undefined
+              ? "当前已是末关，没有下一关"
+              : "当前运行没有可切换的下一关",
+        nextStageId),
       descriptor("set-start-protection", startProtectionUsed ? "将起跑保护重置为未使用" : "将起跑保护标记为已使用",
         startProtectionUsed ? "允许本关后续首次有效敏感期掉线再次触发起跑保护。" : "本关后续敏感期掉线不再自动延时或作废尝试。",
         refereeActionsUnlocked && hasRuntime && startProtectionEnabled && Boolean(snapshot?.currentStageId) && phase !== "review",
@@ -2370,7 +2800,7 @@ export class CompetitionService {
   private actionIdFor(action: CompetitionAction): RefereeActionId | undefined {
     switch (action.type) {
       case "reconnect-work": case "restart-work": case "notification": case "start-ready-flow": case "ready": case "cheat-off": case "manual-go": case "reschedule": case "reschedule-stage-deadline": case "delay-ready":
-      case "extend-stage-deadline": case "end-stage": case "restart-stage": case "set-start-protection": case "kick": case "raw-command":
+      case "extend-stage-deadline": case "end-stage": case "restart-stage": case "mark-stage-started": case "force-reset-stage": case "force-next-stage": case "set-start-protection": case "kick": case "raw-command":
         return action.type;
       default: return undefined;
     }

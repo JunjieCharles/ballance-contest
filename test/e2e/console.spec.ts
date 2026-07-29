@@ -92,6 +92,18 @@ const withWorkActionMatrix = (
   });
 };
 
+const withForcedStageRecoveryAvailable = (actions: readonly ActionAvailability[]): ActionAvailability[] =>
+  actions.map((action) => {
+    if (action.action !== "force-reset-stage" && action.action !== "force-next-stage") return action;
+    const enabled = {
+      ...action,
+      enabled: true,
+      targetStageId: action.action === "force-reset-stage" ? "sr-1" : "sr-2"
+    };
+    delete enabled.disabledReason;
+    return enabled;
+  });
+
 const workConnectionFixture = (
   status: WorkConnectionStatus,
   processGeneration: number,
@@ -168,6 +180,19 @@ const accelerateActiveTestRun = async (page: Page, competitionName: string, mill
     const advanced = await response.json() as { data: { phase: string } };
     return advanced.data.phase;
   }, { name: competitionName, duration: milliseconds });
+
+const advanceUntilStageScore = async (
+  page: Page,
+  competitionName: string,
+  stageId: string
+): Promise<CompetitionSnapshot> => {
+  for (let index = 0; index < 40; index += 1) {
+    await accelerateActiveTestRun(page, competitionName, 15_000);
+    const { snapshot } = await selectedCompetitionSnapshot(page, competitionName);
+    if (snapshot.currentScoreboard.some((entry) => entry.stages[stageId] !== undefined)) return snapshot;
+  }
+  throw new Error(`no score observed for ${stageId}`);
+};
 
 test("opens the authenticated local console without external requests", async ({ page }) => {
   const externalRequests: string[] = [];
@@ -344,7 +369,7 @@ test("renders every work connection state and invalidates lifecycle confirmation
   await page.getByRole("button", { name: "控制台", exact: true }).click();
   const operatorPanel = page.locator(".grid.two > .panel").first();
   const playerActionPanel = page.getByRole("heading", { name: "玩家处置" }).locator("..");
-  await playerActionPanel.getByLabel("原始命令").fill("scores");
+  await playerActionPanel.getByRole("textbox", { name: "原始命令" }).fill("scores");
   const statusCases: ReadonlyArray<{ status: WorkConnectionStatus; label: string; lifecycleEnabled: boolean }> = [
     { status: "connecting", label: "正在连接", lifecycleEnabled: false },
     { status: "authenticating", label: "正在认证", lifecycleEnabled: false },
@@ -405,9 +430,11 @@ test("binds stage confirmations and submitted actions to the backend SR3 target"
   await expect(page.locator(".competition-list button.selected")).toContainText("published");
   const fixture = await selectedCompetitionSnapshot(page, name);
   const targetedActions = withWorkActionMatrix(fixture.snapshot.runtime.availableActions, "healthy")
-    .map((action): ActionAvailability => ["start-ready-flow", "ready", "manual-go"].includes(action.action)
+    .map((action): ActionAvailability => ["start-ready-flow", "ready", "manual-go", "force-next-stage"].includes(action.action)
       ? { ...action, enabled: true, targetStageId: "sr-3" }
-      : action);
+      : ["mark-stage-started", "force-reset-stage"].includes(action.action)
+        ? { ...action, enabled: true, targetStageId: "sr-2" }
+        : action);
   const mockedSnapshot: CompetitionSnapshot = {
     ...structuredClone(fixture.snapshot),
     runtime: {
@@ -423,6 +450,15 @@ test("binds stage confirmations and submitted actions to the backend SR3 target"
   };
   const confirmationRequests: Array<{ intent?: string; target?: string; stageId?: string }> = [];
   const submittedActions: Array<{ action: { type: string; confirmationToken?: string; impactHash?: string } }> = [];
+  let delayForceResetConfirmation = false;
+  let signalForceResetConfirmationStarted: (() => void) | undefined;
+  let releaseForceResetConfirmation: (() => void) | undefined;
+  const forceResetConfirmationStarted = new Promise<void>((resolve) => {
+    signalForceResetConfirmationStarted = resolve;
+  });
+  const forceResetConfirmationRelease = new Promise<void>((resolve) => {
+    releaseForceResetConfirmation = resolve;
+  });
 
   await page.route(`**/api/v1/competitions/${fixture.competitionId}/snapshot`, async (route) => {
     await route.fulfill({
@@ -435,22 +471,35 @@ test("binds stage confirmations and submitted actions to the backend SR3 target"
     const input = route.request().postDataJSON() as { kind: ConfirmationSummary["kind"]; intent?: string; target?: string; stageId?: string };
     confirmationRequests.push(input);
     const intent = input.intent ?? "unknown";
+    const confirmationStateVersion = mockedSnapshot.competition.stateVersion;
+    const confirmationRuntimeStateVersion = mockedSnapshot.runtime.stateVersion;
+    const confirmationPhase = mockedSnapshot.runtime.phase;
+    if (intent === "force-reset-stage" && delayForceResetConfirmation) {
+      signalForceResetConfirmationStarted?.();
+      await forceResetConfirmationRelease;
+    }
     const title = intent === "start-ready-flow"
       ? "进入 SR3 的 Ready+发令流程？"
-      : "发送一次 SR3 Ready？";
+      : intent === "ready"
+        ? "发送一次 SR3 Ready？"
+        : intent === "mark-stage-started"
+          ? "把 SR2 标记为已起跑？"
+          : intent === "force-reset-stage"
+            ? "强制重置 SR2 并从 T-60 重新准备？"
+            : "强制进入 SR3 的 T-60 准备阶段？";
     await route.fulfill({
       status: 200,
       contentType: "application/json",
       body: JSON.stringify({
         data: {
-          ...confirmationFixture(input, mockedSnapshot.competition.stateVersion),
+          ...confirmationFixture(input, confirmationStateVersion),
           token: `fixture-${intent}-${input.stageId}`,
-          runtimeStateVersion: mockedSnapshot.runtime.stateVersion,
+          runtimeStateVersion: confirmationRuntimeStateVersion,
           impactHash: `fixture-hash-${intent}-${input.stageId}`,
           effect: {
             title,
             target: "SR3",
-            currentPhase: mockedSnapshot.runtime.phase,
+            currentPhase: confirmationPhase,
             consequences: ["动作只对后端锁定的 SR3 生效。"],
             irreversible: false
           }
@@ -461,7 +510,7 @@ test("binds stage confirmations and submitted actions to the backend SR3 target"
   await page.route(`**/api/v1/competitions/${fixture.competitionId}/actions`, async (route) => {
     const input = route.request().postDataJSON() as { action: { type: string; confirmationToken?: string; impactHash?: string } };
     submittedActions.push(input);
-    if (input.action.type === "ready") {
+    if (input.action.type === "ready" || input.action.type === "force-next-stage") {
       await route.fulfill({
         status: 409,
         contentType: "application/json",
@@ -514,6 +563,84 @@ test("binds stage confirmations and submitted actions to the backend SR3 target"
     impactHash: "fixture-hash-ready-sr-3"
   });
   await expect(page.locator("header")).toContainText("确认已失效：目标关已从 SR3 变更");
+
+  const markStartedAction = page.locator(".confirm-action").filter({
+    has: page.getByRole("button", { name: "手动标记当前关已起跑" })
+  });
+  await markStartedAction.getByRole("button", { name: "手动标记当前关已起跑" }).click();
+  await expect(markStartedAction).toContainText("把 SR2 标记为已起跑？");
+  expect(confirmationRequests.at(-1)).toMatchObject({
+    intent: "mark-stage-started",
+    target: "sr-2",
+    stageId: "sr-2"
+  });
+  await markStartedAction.getByRole("button", { name: "确认" }).click();
+  await expect.poll(() => submittedActions.length).toBe(3);
+  expect(submittedActions[2]?.action).toMatchObject({
+    type: "mark-stage-started",
+    stageId: "sr-2",
+    confirmationToken: "fixture-mark-stage-started-sr-2",
+    impactHash: "fixture-hash-mark-stage-started-sr-2"
+  });
+
+  const forceResetAction = page.locator(".confirm-action").filter({
+    has: page.getByRole("button", { name: "强制重置本关（T-60）" })
+  });
+  delayForceResetConfirmation = true;
+  await forceResetAction.getByRole("button", { name: "强制重置本关（T-60）" }).click();
+  await forceResetConfirmationStarted;
+  mockedSnapshot.runtime = {
+    ...mockedSnapshot.runtime,
+    stateVersion: mockedSnapshot.runtime.stateVersion + 1
+  };
+  await page.locator(".competition-list button.selected").click();
+  await expect(forceResetAction).toHaveAttribute(
+    "data-version",
+    `${mockedSnapshot.competition.stateVersion}:${mockedSnapshot.runtime.stateVersion}`
+  );
+  const staleConfirmationResponse = page.waitForResponse((response) =>
+    response.url().endsWith(`/api/v1/competitions/${fixture.competitionId}/confirmations`)
+      && response.request().method() === "POST");
+  releaseForceResetConfirmation?.();
+  await staleConfirmationResponse;
+  await expect(forceResetAction).toContainText("现场状态已变化，请重新点击确认");
+  await expect(forceResetAction.getByRole("group", { name: "强制重置本关（T-60）确认" })).toHaveCount(0);
+  delayForceResetConfirmation = false;
+  await forceResetAction.getByRole("button", { name: "强制重置本关（T-60）" }).click();
+  await expect(forceResetAction).toContainText("强制重置 SR2 并从 T-60 重新准备？");
+  expect(confirmationRequests.at(-1)).toMatchObject({
+    intent: "force-reset-stage",
+    target: "sr-2",
+    stageId: "sr-2"
+  });
+  await forceResetAction.getByRole("button", { name: "确认" }).click();
+  await expect.poll(() => submittedActions.length).toBe(4);
+  expect(submittedActions[3]?.action).toMatchObject({
+    type: "force-reset-stage",
+    stageId: "sr-2",
+    confirmationToken: "fixture-force-reset-stage-sr-2",
+    impactHash: "fixture-hash-force-reset-stage-sr-2"
+  });
+
+  const forceNextAction = page.locator(".confirm-action").filter({
+    has: page.getByRole("button", { name: "强制进入下一关" })
+  });
+  await forceNextAction.getByRole("button", { name: "强制进入下一关" }).click();
+  await expect(forceNextAction).toContainText("强制进入 SR3 的 T-60 准备阶段？");
+  expect(confirmationRequests.at(-1)).toMatchObject({
+    intent: "force-next-stage",
+    target: "sr-3",
+    stageId: "sr-3"
+  });
+  await forceNextAction.getByRole("button", { name: "确认" }).click();
+  await expect.poll(() => submittedActions.length).toBe(5);
+  expect(submittedActions[4]?.action).toMatchObject({
+    type: "force-next-stage",
+    stageId: "sr-3",
+    confirmationToken: "fixture-force-next-stage-sr-3",
+    impactHash: "fixture-hash-force-next-stage-sr-3"
+  });
+  await expect(forceNextAction).toContainText("确认已失效：目标关已从 SR3 变更");
 });
 
 test("disables connection-bound resends while keeping local command disposition available", async ({ page }, testInfo) => {
@@ -530,7 +657,7 @@ test("disables connection-bound resends while keeping local command disposition 
     runtime: {
       ...structuredClone(fixture.snapshot.runtime),
       workConnection: workConnectionFixture("blocked", 7, 41),
-      availableActions: withWorkActionMatrix(fixture.snapshot.runtime.availableActions, "blocked"),
+      availableActions: withForcedStageRecoveryAvailable(withWorkActionMatrix(fixture.snapshot.runtime.availableActions, "blocked")),
       unconfirmedAutomationActions: [{ id: "flow-uncertain", kind: "ready", stageId: "sr-1", status: "uncertain" }],
       unconfirmedCommands: [{
         id: "raw-failed",
@@ -571,10 +698,12 @@ test("disables connection-bound resends while keeping local command disposition 
 
   const operatorPanel = page.locator(".grid.two > .panel").first();
   const playerActionPanel = page.getByRole("heading", { name: "玩家处置" }).locator("..");
-  await playerActionPanel.getByLabel("原始命令").fill("scores");
+  await playerActionPanel.getByRole("textbox", { name: "原始命令" }).fill("scores");
   await expect(operatorPanel.getByRole("button", { name: "发送", exact: true })).toBeDisabled();
   await expect(operatorPanel.getByRole("button", { name: "手动 Ready", exact: true })).toBeDisabled();
   await expect(operatorPanel.getByRole("button", { name: "关闭 cheat", exact: true })).toBeDisabled();
+  await expect(operatorPanel.getByRole("button", { name: "强制重置本关（T-60）", exact: true })).toBeEnabled();
+  await expect(operatorPanel.getByRole("button", { name: "强制进入下一关", exact: true })).toBeEnabled();
   await expect(playerActionPanel.getByRole("button", { name: "发送原始命令", exact: true })).toBeDisabled();
   await expect(operatorPanel).toContainText(connectionReason("blocked"));
 
@@ -586,7 +715,7 @@ test("disables connection-bound resends while keeping local command disposition 
         ...workConnectionFixture("healthy", 7, 42),
         recoveryStep: "register-maps"
       },
-      availableActions: withWorkActionMatrix(fixture.snapshot.runtime.availableActions, "healthy", { mapsRegistering: true })
+      availableActions: withForcedStageRecoveryAvailable(withWorkActionMatrix(fixture.snapshot.runtime.availableActions, "healthy", { mapsRegistering: true }))
     }
   };
   await page.locator(".competition-list button.selected").click();
@@ -594,6 +723,8 @@ test("disables connection-bound resends while keeping local command disposition 
   await expect(commandPanel.getByRole("button", { name: "执行重发", exact: true })).toBeDisabled();
   await expect(flowPanel).toContainText("当前 MockClient 正在完成地图注册；完成前不能重发真实命令");
   await expect(operatorPanel.getByRole("button", { name: "发送", exact: true })).toBeDisabled();
+  await expect(operatorPanel.getByRole("button", { name: "强制重置本关（T-60）", exact: true })).toBeEnabled();
+  await expect(operatorPanel.getByRole("button", { name: "强制进入下一关", exact: true })).toBeEnabled();
   await expect(operatorPanel).toContainText("当前 MockClient 正在注册比赛地图；完成前不能发送现场命令");
 
   mockedSnapshot = {
@@ -601,7 +732,7 @@ test("disables connection-bound resends while keeping local command disposition 
     runtime: {
       ...mockedSnapshot.runtime,
       workConnection: workConnectionFixture("healthy", 7, 42),
-      availableActions: withWorkActionMatrix(fixture.snapshot.runtime.availableActions, "healthy")
+      availableActions: withForcedStageRecoveryAvailable(withWorkActionMatrix(fixture.snapshot.runtime.availableActions, "healthy"))
     }
   };
   await page.locator(".competition-list button.selected").click();
@@ -823,6 +954,141 @@ test("restarts the current stage and unlocks its score review after the next T-6
   await accelerateActiveTestRun(page, name, 240_000);
   const previousStageCell = page.locator(".scoreboard tbody tr").first().locator("td").nth(4).getByRole("button");
   await expect(previousStageCell).toBeEnabled();
+});
+
+test("recovers a live stage by marking start, clearing a reset, and preserving a forced next stage", async ({ page }, testInfo) => {
+  await page.goto("/#token=e2e-bootstrap-token");
+  await expect(page.getByText(/已取得控制权|只读标签页/)).toBeVisible();
+  await acquireControl(page);
+  const name = `E2E 显式关卡恢复 ${testInfo.project.name}`;
+  await createCompetition(page, name, "test");
+  await page.getByRole("button", { name: "发布比赛" }).click();
+  await expect(page.locator(".competition-list button.selected")).toContainText("published");
+  await page.getByRole("button", { name: "测试", exact: true }).click();
+  await page.getByRole("button", { name: /普通玩家场景/ }).click();
+  await page.getByRole("button", { name: "创建测试运行" }).click();
+  await page.getByRole("button", { name: "控制台", exact: true }).click();
+
+  await expect(page.getByRole("button", { name: "手动标记当前关已起跑" })).toBeDisabled();
+  await expect(page.getByRole("button", { name: "强制重置本关（T-60）" })).toBeEnabled();
+  await expect(page.getByRole("button", { name: "强制进入下一关" })).toBeEnabled();
+
+  const readyFlow = page.locator(".confirm-action").filter({
+    has: page.getByRole("button", { name: "进入 Ready+发令流程" })
+  });
+  await readyFlow.getByRole("button", { name: "进入 Ready+发令流程" }).click();
+  await readyFlow.getByRole("button", { name: "确认" }).click();
+  await accelerateActiveTestRun(page, name, 60_000);
+  await expect(page.getByText("阶段", { exact: true }).locator("..")).toContainText("Ready");
+  await expect(page.getByRole("button", { name: "手动标记当前关已起跑" })).toBeEnabled();
+
+  const beforeMark = (await selectedCompetitionSnapshot(page, name)).snapshot;
+  const markAction = page.locator(".confirm-action").filter({
+    has: page.getByRole("button", { name: "手动标记当前关已起跑" })
+  });
+  await markAction.getByRole("button", { name: "手动标记当前关已起跑" }).click();
+  await expect(markAction).toContainText("以确认成功时刻作为本关 goAt");
+  await expect(markAction).toContainText("不会向比赛服务器发送命令");
+  await expect(markAction).toContainText("自动化保持暂停");
+  await markAction.getByRole("button", { name: "确认" }).click();
+
+  const marked = (await selectedCompetitionSnapshot(page, name)).snapshot;
+  const markedAttempt = [...marked.runtime.attempts].reverse().find((candidate): candidate is {
+    stageId: string;
+    goAtMs: number;
+    deadlineAtMs: number;
+    origin: string;
+    voided: boolean;
+  } => typeof candidate === "object" && candidate !== null
+    && (candidate as { stageId?: unknown }).stageId === "sr-1"
+    && (candidate as { voided?: unknown }).voided !== true);
+  expect(markedAttempt).toBeDefined();
+  expect(marked.runtime.virtualNowMs).toBe(beforeMark.runtime.virtualNowMs);
+  expect(markedAttempt?.goAtMs).toBe(marked.runtime.virtualNowMs);
+  expect(markedAttempt?.deadlineAtMs).toBe((marked.runtime.virtualNowMs ?? 0) + (marked.config.stages[0]?.timeLimitMs ?? 0));
+  expect(markedAttempt?.origin).toBe("referee-marked-started");
+  const commandsAddedByMark = marked.runtime.commands.filter(
+    (command) => !beforeMark.runtime.commands.some((existing) => existing.id === command.id)
+  );
+  expect(commandsAddedByMark).toEqual([
+    expect.objectContaining({
+      actionType: "mark-stage-started",
+      command: "mark-stage-started",
+      simulated: true,
+      status: "simulated"
+    })
+  ]);
+  expect(marked.runtime).toMatchObject({ phase: "paused", automationEnabled: false, pausedFromPhase: "running" });
+  await expect(page.getByText("本关起跑（UTC+8）").locator("..")).not.toContainText("未设置");
+  await expect(page.getByText("本关最晚结束（UTC+8）").locator("..")).not.toContainText("未设置");
+  await expect(page.getByText("自动化 / 倒数").locator("..")).toContainText("暂停");
+
+  const scoredBeforeReset = await advanceUntilStageScore(page, name, "sr-1");
+  expect(scoredBeforeReset.currentScoreboard.some((entry) => entry.stages["sr-1"] !== undefined)).toBe(true);
+  const resetAction = page.locator(".confirm-action").filter({
+    has: page.getByRole("button", { name: "强制重置本关（T-60）" })
+  });
+  await expect(resetAction).toHaveAttribute(
+    "data-version",
+    `${scoredBeforeReset.competition.stateVersion}:${scoredBeforeReset.runtime.stateVersion}`
+  );
+  await resetAction.getByRole("button", { name: "强制重置本关（T-60）" }).click();
+  await expect(resetAction).toContainText("本关当前有效尝试和成绩将作废");
+  await expect(resetAction).toContainText("1 分钟后的第一条 Ready");
+  await resetAction.getByRole("button", { name: "确认" }).click();
+
+  const reset = (await selectedCompetitionSnapshot(page, name)).snapshot;
+  expect(reset.runtime.currentStageId).toBe("sr-1");
+  expect(reset.runtime.automationEnabled).toBe(true);
+  expect(reset.runtime.plannedReadyStageId).toBe("sr-1");
+  expect((reset.runtime.plannedReadyAtMs ?? 0) - (reset.runtime.virtualNowMs ?? 0)).toBe(60_000);
+  expect(reset.currentScoreboard.every((entry) => entry.stages["sr-1"] === undefined)).toBe(true);
+  expect(reset.runtime.attempts).toContainEqual(expect.objectContaining({
+    stageId: "sr-1",
+    origin: "referee-marked-started",
+    voided: true
+  }));
+  await expect(page.getByText("本关 Ready（UTC+8）").locator("..")).not.toContainText("未设置");
+
+  const scoredBeforeNext = await advanceUntilStageScore(page, name, "sr-1");
+  const preservedStageResults = scoredBeforeNext.currentScoreboard
+    .filter((entry) => entry.stages["sr-1"] !== undefined)
+    .map((entry) => ({ playerId: entry.playerId, result: entry.stages["sr-1"] }));
+  expect(preservedStageResults.length).toBeGreaterThan(0);
+  const beforeNextVirtualNow = scoredBeforeNext.runtime.virtualNowMs ?? 0;
+  const forceNextAction = page.locator(".confirm-action").filter({
+    has: page.getByRole("button", { name: "强制进入下一关" })
+  });
+  await expect(forceNextAction).toHaveAttribute(
+    "data-version",
+    `${scoredBeforeNext.competition.stateVersion}:${scoredBeforeNext.runtime.stateVersion}`
+  );
+  await forceNextAction.getByRole("button", { name: "强制进入下一关" }).click();
+  await expect(forceNextAction).toContainText("立即关闭上一关成绩窗口但保留已有尝试和成绩");
+  await expect(forceNextAction).toContainText("当前关卡立即切换为 SR2");
+  await forceNextAction.getByRole("button", { name: "确认" }).click();
+
+  const forcedNext = (await selectedCompetitionSnapshot(page, name)).snapshot;
+  expect(forcedNext.runtime.virtualNowMs).toBe(beforeNextVirtualNow);
+  expect(forcedNext.runtime.currentStageId).toBe("sr-2");
+  expect(forcedNext.runtime.plannedReadyStageId).toBe("sr-2");
+  expect((forcedNext.runtime.plannedReadyAtMs ?? 0) - (forcedNext.runtime.virtualNowMs ?? 0)).toBe(60_000);
+  expect(forcedNext.runtime.nextStageReadyAt).toBeUndefined();
+  expect(forcedNext.runtime.scoreEditPermissions).toContainEqual(expect.objectContaining({ stageId: "sr-1", editable: true }));
+  expect(forcedNext.currentScoreboard
+    .filter((entry) => entry.stages["sr-1"] !== undefined)
+    .map((entry) => ({ playerId: entry.playerId, result: entry.stages["sr-1"] }))).toEqual(preservedStageResults);
+  await expect(page.getByText("关卡", { exact: true }).locator("..")).toContainText("SR2");
+  await expect(page.getByText("本关 Ready（UTC+8）").locator("..")).not.toContainText("未设置");
+
+  await page.reload();
+  await page.locator(".competition-list button").filter({ hasText: name }).click();
+  await expect(page.getByLabel("比赛名称")).toHaveValue(name);
+  await page.getByRole("button", { name: "控制台", exact: true }).click();
+  await expect(page.getByText("关卡", { exact: true }).locator("..")).toContainText("SR2");
+  await page.getByRole("button", { name: "成绩", exact: true }).click();
+  const previousStageResult = page.locator(".scoreboard tbody tr td:nth-child(5) .cell-button").filter({ hasText: /^#/ }).first();
+  await expect(previousStageResult).toBeEnabled();
 });
 
 test("shows disabled reasons, shared scheduling controls and automatic review completion", async ({ page }, testInfo) => {

@@ -20,6 +20,12 @@ export interface ScheduledTestRecovery {
   dueAtMs: number;
 }
 
+export interface WorkLogEvidenceBoundary {
+  processGeneration: number;
+  streamGeneration: number;
+  byteOffset: number;
+}
+
 export interface PersistedTestRun {
   id: string;
   definition: ScenarioDefinition;
@@ -49,6 +55,10 @@ export interface ServiceSnapshotPayload {
     automation?: AutomationSnapshot;
     engine?: EngineSnapshot;
     mapEchoPrefixes?: Record<string, string>;
+    logReceiveSequence?: number;
+    attemptEvidenceSequenceBoundaries?: Record<string, number>;
+    stageCycleEvidenceLogBoundary?: WorkLogEvidenceBoundary;
+    attemptEvidenceLogBoundaries?: Record<string, WorkLogEvidenceBoundary>;
     connection?: WorkConnectionView;
   };
 }

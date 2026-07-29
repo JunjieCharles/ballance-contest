@@ -39,7 +39,8 @@ export const isFlowCriticalAutomationAction = (action: AutomationAction): boolea
   action.kind === "ready" || action.kind === "cheat-off" || action.kind === "go";
 
 export const isUnresolvedAutomationAction = (action: AutomationAction): action is AutomationAction & { status: "failed" | "uncertain" } =>
-  action.status === "failed" || action.status === "uncertain" && isFlowCriticalAutomationAction(action);
+  action.isolated !== true
+  && (action.status === "failed" || action.status === "uncertain" && isFlowCriticalAutomationAction(action));
 
 export const scoreEntries = (entries: readonly ScoreboardEntry[]): CompetitionSnapshot["currentScoreboard"] =>
   entries.map((entry) => ({

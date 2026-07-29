@@ -18,6 +18,7 @@ import {
   CompetitionEngine,
   type AutomationAction,
   type AutomationSnapshot,
+  type CompetitionControllerCheckpoint,
   type EngineSnapshot,
   type ScoreboardVersion
 } from "@ballance/core";
@@ -64,6 +65,18 @@ export interface TestRuntime {
   phaseStartedAt: Map<string, number>;
   recoveries: ScheduledTestRecovery[];
   createdAt: string;
+  updatedAt: string;
+}
+
+export interface TestStageRecoveryCheckpoint {
+  controller: CompetitionControllerCheckpoint;
+  engine: EngineSnapshot;
+  clockAdvanceCanCoalesce: boolean;
+  pendingCountdown?: PendingTestCountdown;
+  appliedFaultIds: ReadonlySet<string>;
+  stageFinishOrdinals: ReadonlyMap<string, number>;
+  phaseStartedAt: ReadonlyMap<string, number>;
+  recoveries: readonly ScheduledTestRecovery[];
   updatedAt: string;
 }
 
@@ -308,6 +321,188 @@ export class TestRuntimeManager {
   public settle(runtime: TestRuntime): void { this.settleAutomation(runtime); }
 
   public persist(runtime: TestRuntime): void { this.persistRuntime(runtime); }
+
+  public checkpointStageRecovery(runtime: TestRuntime): TestStageRecoveryCheckpoint {
+    return {
+      controller: runtime.automation.checkpoint(),
+      engine: runtime.engine.snapshot(),
+      clockAdvanceCanCoalesce: runtime.clockAdvanceCanCoalesce,
+      ...(runtime.pendingCountdown === undefined
+        ? {}
+        : { pendingCountdown: {
+            action: { ...runtime.pendingCountdown.action },
+            emitted: runtime.pendingCountdown.emitted
+          } }),
+      appliedFaultIds: new Set(runtime.appliedFaultIds),
+      stageFinishOrdinals: new Map(runtime.stageFinishOrdinals),
+      phaseStartedAt: new Map(runtime.phaseStartedAt),
+      recoveries: runtime.recoveries.map((recovery) => ({ ...recovery })),
+      updatedAt: runtime.updatedAt
+    };
+  }
+
+  public restoreStageRecovery(runtime: TestRuntime, checkpoint: TestStageRecoveryCheckpoint): void {
+    runtime.automation.restore(checkpoint.controller);
+    runtime.engine.restore(checkpoint.engine);
+    runtime.clockAdvanceCanCoalesce = checkpoint.clockAdvanceCanCoalesce;
+    if (checkpoint.pendingCountdown === undefined) delete runtime.pendingCountdown;
+    else {
+      runtime.pendingCountdown = {
+        action: { ...checkpoint.pendingCountdown.action },
+        emitted: checkpoint.pendingCountdown.emitted
+      };
+    }
+    runtime.appliedFaultIds = new Set(checkpoint.appliedFaultIds);
+    runtime.stageFinishOrdinals = new Map(checkpoint.stageFinishOrdinals);
+    runtime.phaseStartedAt = new Map(checkpoint.phaseStartedAt);
+    runtime.recoveries = checkpoint.recoveries.map((recovery) => ({ ...recovery }));
+    runtime.updatedAt = checkpoint.updatedAt;
+  }
+
+  public markCurrentReadyStageStarted(runtime: TestRuntime, expectedStageId: string): AutomationSnapshot["attempts"][number] {
+    const before = runtime.automation.snapshot();
+    const attempt = this.runExpectedStageAction(() => runtime.automation.markCurrentReadyStageStarted({
+      expectedCurrentStageId: expectedStageId
+    }));
+    this.resetStageCycleAuxiliary(runtime, before.currentStageId);
+    runtime.engine.startRefereeMarkedAttempt({
+      id: attempt.id,
+      stageId: attempt.stageId,
+      attemptNumber: attempt.attemptNumber,
+      goAtMs: attempt.goAtMs,
+      deadlineAtMs: attempt.deadlineAtMs,
+      sourceId: `referee-marked-started:${attempt.id}`
+    });
+    this.settleAutomation(runtime);
+    this.host.saveScoreboards(runtime.competitionId, runtime.engine.snapshot().scoreboardVersions);
+    this.persistRuntime(runtime);
+    this.host.journal.append({
+      type: "test-run.stage-marked-started",
+      competitionId: runtime.competitionId,
+      data: {
+        runId: runtime.id,
+        stageId: attempt.stageId,
+        attemptId: attempt.id,
+        attemptNumber: attempt.attemptNumber,
+        goAtMs: attempt.goAtMs,
+        deadlineAtMs: attempt.deadlineAtMs
+      }
+    });
+    return attempt;
+  }
+
+  public forceResetCurrentStage(runtime: TestRuntime, sourceId: string, expectedStageId: string): {
+    stageId: string;
+    voidedAttempts: readonly AutomationSnapshot["attempts"][number][];
+  } {
+    const before = runtime.automation.snapshot();
+    const stageId = before.currentStageId;
+    const result = this.runExpectedStageAction(() => runtime.automation.forceResetCurrentStage({
+      expectedCurrentStageId: expectedStageId
+    }));
+    this.resetStageCycleAuxiliary(runtime, stageId);
+    this.resetParticipantStageStatuses(runtime, stageId);
+    for (const controlledAttempt of result.voidedAttempts) {
+      const engineAttempt = runtime.engine.snapshot().attempts.find((attempt) =>
+        attempt.stageId === controlledAttempt.stageId
+        && attempt.attemptNumber === controlledAttempt.attemptNumber
+        && !attempt.voided);
+      if (engineAttempt) runtime.engine.voidAttempt(controlledAttempt.stageId, controlledAttempt.attemptNumber, sourceId);
+    }
+    this.settleAutomation(runtime);
+    this.host.saveScoreboards(runtime.competitionId, runtime.engine.snapshot().scoreboardVersions);
+    this.persistRuntime(runtime);
+    this.host.journal.append({
+      type: "test-run.stage-force-reset",
+      competitionId: runtime.competitionId,
+      data: {
+        runId: runtime.id,
+        stageId,
+        attemptIds: result.voidedAttempts.map((attempt) => attempt.id),
+        attemptNumbers: result.voidedAttempts.map((attempt) => attempt.attemptNumber)
+      }
+    });
+    return {
+      stageId,
+      voidedAttempts: result.voidedAttempts
+    };
+  }
+
+  public forceAdvanceToNextStage(
+    runtime: TestRuntime,
+    expectedCurrentStageId: string,
+    expectedTargetStageId: string
+  ): {
+    fromStageId: string;
+    toStageId: string;
+    closedAttempt?: AutomationSnapshot["attempts"][number];
+  } {
+    const before = runtime.automation.snapshot();
+    const fromStageId = before.currentStageId;
+    const controlledAttempt = before.attempts.findLast((attempt) =>
+      attempt.stageId === fromStageId && !attempt.voided);
+    const result = this.runExpectedStageAction(() => runtime.automation.forceAdvanceToNextStage({
+      expectedCurrentStageId,
+      expectedTargetStageId
+    }));
+    delete runtime.pendingCountdown;
+    const after = runtime.automation.snapshot();
+    if (result.previousStageId !== fromStageId || result.targetStageId !== after.currentStageId) {
+      throw new ServiceError("STATE_CONFLICT", "强制进入下一关后关卡边界未推进", 409);
+    }
+    this.resetStageCycleAuxiliary(runtime, after.currentStageId);
+    this.resetParticipantStageStatuses(runtime, after.currentStageId);
+    this.mirrorClosedAttempts(runtime);
+    this.settleAutomation(runtime);
+    this.host.saveScoreboards(runtime.competitionId, runtime.engine.snapshot().scoreboardVersions);
+    this.persistRuntime(runtime);
+    this.host.journal.append({
+      type: "test-run.stage-force-next",
+      competitionId: runtime.competitionId,
+      data: {
+        runId: runtime.id,
+        fromStageId,
+        toStageId: after.currentStageId,
+        ...(controlledAttempt === undefined ? {} : {
+          attemptId: controlledAttempt.id,
+          attemptNumber: controlledAttempt.attemptNumber
+        })
+      }
+    });
+    return {
+      fromStageId,
+      toStageId: after.currentStageId,
+      ...(controlledAttempt === undefined ? {} : { closedAttempt: controlledAttempt })
+    };
+  }
+
+  public restartCurrentStage(
+    runtime: TestRuntime,
+    input: { stageId: string; impactHash: string; token: string; reason: string; sourceId: string }
+  ): AutomationSnapshot["attempts"][number] | undefined {
+    const before = runtime.automation.snapshot();
+    const controlledAttempt = before.attempts.findLast((attempt) =>
+      attempt.stageId === input.stageId && !attempt.voided);
+    runtime.automation.confirmStageRestart({
+      stageId: input.stageId,
+      impactHash: input.impactHash,
+      token: input.token,
+      reason: input.reason
+    });
+    this.resetStageCycleAuxiliary(runtime, input.stageId);
+    this.resetParticipantStageStatuses(runtime, input.stageId);
+    if (controlledAttempt) {
+      const engineAttempt = runtime.engine.snapshot().attempts.find((attempt) =>
+        attempt.stageId === controlledAttempt.stageId
+        && attempt.attemptNumber === controlledAttempt.attemptNumber
+        && !attempt.voided);
+      if (engineAttempt) runtime.engine.voidAttempt(controlledAttempt.stageId, controlledAttempt.attemptNumber, input.sourceId);
+    }
+    this.settleAutomation(runtime);
+    this.host.saveScoreboards(runtime.competitionId, runtime.engine.snapshot().scoreboardVersions);
+    this.persistRuntime(runtime);
+    return controlledAttempt;
+  }
 
   public recordManualNotification(competitionId: string, channel: "bulletin" | "notice" | "announce", text: string): void {
     const runtime = this.activeRuntime(competitionId);
@@ -566,7 +761,10 @@ export class TestRuntimeManager {
     runtime.automation.synchronizeStageBoundary();
     this.mirrorClosedAttempts(runtime);
     const snapshot = runtime.automation.snapshot();
-    if (snapshot.phase !== "running" && snapshot.phase !== "tail-intake") return;
+    const effectivePhase = (snapshot.phase === "paused" || snapshot.phase === "incident") && snapshot.pausedFromPhase
+      ? snapshot.pausedFromPhase
+      : snapshot.phase;
+    if (effectivePhase !== "running" && effectivePhase !== "tail-intake") return;
     const stageId = snapshot.currentStageId;
     const attempt = [...snapshot.attempts].reverse().find((candidate) => candidate.stageId === stageId && candidate.intakeOpen);
     if (!attempt) return;
@@ -686,6 +884,10 @@ export class TestRuntimeManager {
     // to the exact attempt captured before the batch; a later standalone finish must
     // still pass the normal intake and deadline gates.
     for (const event of events) {
+      if (this.isPreAttemptEvidence(runtime, event)) {
+        this.recordTestEvent(runtime, event, false, true);
+        continue;
+      }
       if (event.type === "finish" && atomicAttempt) {
         const excluded = runtime.automation.snapshot().attempts
           .find((attempt) => attempt.id === atomicAttempt.id)?.results
@@ -714,6 +916,7 @@ export class TestRuntimeManager {
   }
 
   private applyTestEventEffects(runtime: TestRuntime, event: ScenarioEvent, settleAutomation: boolean): void {
+    if (this.isPreAttemptEvidence(runtime, event)) return;
     const controlledAttempt = event.type === "finish" || event.type === "dnf"
       ? runtime.automation.snapshot().attempts.findLast((attempt) =>
         attempt.stageId === event.stageId && !attempt.voided)
@@ -878,7 +1081,10 @@ export class TestRuntimeManager {
   }
 
   private observeScenarioPhase(runtime: TestRuntime, snapshot: AutomationSnapshot): void {
-    const trigger = snapshot.phase === "ready" ? "ready" : snapshot.phase === "running" || snapshot.phase === "tail-intake" ? "running" : undefined;
+    const effectivePhase = (snapshot.phase === "paused" || snapshot.phase === "incident") && snapshot.pausedFromPhase
+      ? snapshot.pausedFromPhase
+      : snapshot.phase;
+    const trigger = effectivePhase === "ready" ? "ready" : effectivePhase === "running" || effectivePhase === "tail-intake" ? "running" : undefined;
     if (!trigger) return;
     const key = `${snapshot.currentStageId}:${trigger}`;
     if (!runtime.phaseStartedAt.has(key)) runtime.phaseStartedAt.set(key, runtime.automationClock.now());
@@ -1066,6 +1272,55 @@ export class TestRuntimeManager {
     }
     if (settleAutomation) this.settleAutomation(runtime);
     return accepted;
+  }
+
+  private isPreAttemptEvidence(runtime: TestRuntime, event: ScenarioEvent): boolean {
+    if (!["finish", "dnf", "warning", "cheat"].includes(event.type)) return false;
+    const snapshot = runtime.automation.snapshot();
+    const attempt = snapshot.attempts.findLast((candidate) =>
+      candidate.stageId === snapshot.currentStageId
+      && candidate.intakeOpen
+      && !candidate.voided);
+    if (!attempt || event.atMs >= attempt.goAtMs) return false;
+    if ((event.type === "finish" || event.type === "dnf") && event.stageId !== attempt.stageId) return false;
+    return true;
+  }
+
+  private resetStageCycleAuxiliary(runtime: TestRuntime, stageId: string): void {
+    delete runtime.pendingCountdown;
+    runtime.clockAdvanceCanCoalesce = false;
+    runtime.stageFinishOrdinals.delete(stageId);
+    runtime.phaseStartedAt.delete(`${stageId}:ready`);
+    runtime.phaseStartedAt.delete(`${stageId}:running`);
+  }
+
+  private resetParticipantStageStatuses(runtime: TestRuntime, stageId: string): void {
+    const config = this.host.getDraftConfig(runtime.competitionId);
+    let resetCount = 0;
+    const participants = config.participants.map((participant) => {
+      if (participant.role !== "participant" || participant.currentStageStatus === "waiting") return participant;
+      resetCount += 1;
+      return { ...participant, currentStageStatus: "waiting" as const };
+    });
+    if (resetCount > 0) {
+      this.host.upsertConfig(runtime.competitionId, 0, false, { ...config, participants });
+    }
+    this.host.journal.append({
+      type: "test-run.participants-stage-reset",
+      competitionId: runtime.competitionId,
+      data: { runId: runtime.id, stageId, resetCount }
+    });
+  }
+
+  private runExpectedStageAction<T>(operation: () => T): T {
+    try {
+      return operation();
+    } catch (error) {
+      if (error instanceof Error && error.message === "ACTION_TARGET_CHANGED") {
+        throw new ServiceError("CONFIRMATION_STALE", "关卡边界已变化，请刷新现场状态后重新确认", 409);
+      }
+      throw error;
+    }
   }
 
   private applyFault(runtime: TestRuntime, input: { fault: string; playerId?: string; milliseconds?: number; recoverAfterMs?: number; message?: string }): void {

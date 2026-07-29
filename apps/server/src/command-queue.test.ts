@@ -187,6 +187,89 @@ describe("CommandQueue", () => {
     expect(oldWrites).toHaveLength(1);
   });
 
+  it("isolates selected old-cycle commands without replacing the healthy connection generation", async () => {
+    const writes: string[] = [];
+    const queue = new CommandQueue({
+      write: (command) => {
+        writes.push(command);
+        if (command === "countdown level 2 sr") {
+          queueMicrotask(() => queue.observeLine("[77, *ContestConsole]: Level 02 - Go!"));
+          return Promise.resolve();
+        }
+        return new Promise<void>(() => undefined);
+      }
+    }, 1_000);
+    queue.setRefereeConnectionId("77");
+    const generation = queue.generation;
+    const writingReady = queue.enqueue({ type: "ready", map: "level 1", mode: "sr" }, "old-cycle-ready");
+    const queuedGo = queue.enqueue({ type: "go", map: "level 1", mode: "sr" }, "old-cycle-go");
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const isolated = queue.cancelWhere((record) => record.idempotencyKey.startsWith("old-cycle-"));
+
+    expect(isolated.map((record) => [record.idempotencyKey, record.status])).toEqual([
+      ["old-cycle-ready", "uncertain"],
+      ["old-cycle-go", "cancelled"]
+    ]);
+    await expect(writingReady).resolves.toMatchObject({ status: "uncertain" });
+    await expect(queuedGo).resolves.toMatchObject({ status: "cancelled" });
+    expect(queue.generation).toBe(generation);
+    expect((await queue.enqueue({ type: "go", map: "level 2", mode: "sr" }, "new-cycle-go")).status).toBe("acknowledged");
+    expect(writes).toEqual(["countdown level 1 sr 4", "countdown level 2 sr"]);
+  });
+
+  it("previews command isolation without mutating tasks and applies the exact durable projection", async () => {
+    const writes: string[] = [];
+    const terminalNotifications: string[] = [];
+    const queue = new CommandQueue({
+      write: (command) => {
+        writes.push(command);
+        return new Promise<void>(() => undefined);
+      }
+    }, 1_000, (record) => {
+      if (["uncertain", "cancelled"].includes(record.status)) {
+        terminalNotifications.push(`${record.idempotencyKey}:${record.status}`);
+      }
+    });
+    const writing = queue.enqueue({ type: "ready", map: "level 1", mode: "sr" }, "preview-ready");
+    const queued = queue.enqueue({ type: "go", map: "level 1", mode: "sr" }, "preview-go");
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const preview = queue.previewCancelWhere((record) => record.idempotencyKey.startsWith("preview-"));
+    expect(preview.map((item) => [item.record.idempotencyKey, item.record.status])).toEqual([
+      ["preview-ready", "uncertain"],
+      ["preview-go", "cancelled"]
+    ]);
+    expect(terminalNotifications).toEqual([]);
+    expect(writes).toEqual(["countdown level 1 sr 4"]);
+
+    const applied = queue.applyCancellationPreview(preview);
+    expect(applied.map((record) => [record.idempotencyKey, record.status])).toEqual([
+      ["preview-ready", "uncertain"],
+      ["preview-go", "cancelled"]
+    ]);
+    await expect(writing).resolves.toMatchObject({ status: "uncertain" });
+    await expect(queued).resolves.toMatchObject({ status: "cancelled" });
+    expect(terminalNotifications).toEqual([]);
+  });
+
+  it("fails a stale cancellation preview before mutating another selected task", async () => {
+    const queue = new CommandQueue({
+      write: () => new Promise<void>(() => undefined)
+    }, 1_000);
+    queue.setRefereeConnectionId("7");
+    const writing = queue.enqueue({ type: "ready", map: "level 1", mode: "sr" }, "stale-ready");
+    const queued = queue.enqueue({ type: "go", map: "level 1", mode: "sr" }, "still-queued-go");
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const preview = queue.previewCancelWhere(() => true);
+
+    queue.observeLine("[7, *ContestConsole]: Level 01 - Get ready");
+    expect(() => queue.applyCancellationPreview(preview)).toThrow("COMMAND_CANCELLATION_PREVIEW_STALE");
+    expect(await writing).toMatchObject({ status: "acknowledged" });
+    queue.advanceGeneration();
+    await expect(queued).resolves.toMatchObject({ status: "cancelled" });
+  });
+
   it("times out a low-risk write when advancing the connection generation", async () => {
     const transport: CommandTransport = { write: () => new Promise<void>(() => undefined) };
     const queue = new CommandQueue(transport, 1_000);

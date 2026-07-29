@@ -41,6 +41,25 @@ export class CompetitionAuditService {
     this.memoryAttentionItems.delete(competitionId);
   }
 
+  public checkpointCommandMemory(competitionId: string): readonly CommandRecord[] {
+    return [...(this.memoryCommands.get(competitionId)?.values() ?? [])]
+      .map((record) => ({ ...record, action: { ...record.action } }));
+  }
+
+  public restoreCommandMemory(competitionId: string, records: readonly CommandRecord[]): void {
+    if (records.length === 0) {
+      this.memoryCommands.delete(competitionId);
+      return;
+    }
+    this.memoryCommands.set(
+      competitionId,
+      new Map(records.map((record) => [
+        record.id,
+        { ...record, action: { ...record.action } }
+      ]))
+    );
+  }
+
   public appendRawLog(competitionId: string, source: RawClientLogLine["source"], rawLine: string, occurredAt = new Date().toISOString()): void {
     const line: RawClientLogLine = { id: randomUUID(), source, occurredAt, rawLine };
     if (this.database) {

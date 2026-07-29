@@ -12,7 +12,11 @@ import type { CommandAction } from "./command-queue.js";
 import type { ServiceSnapshotPayload } from "./runtime-types.js";
 import { ServiceError } from "./service-error.js";
 import type { TestRuntimeManager } from "./test-runtime-manager.js";
-import type { WorkRuntime, WorkRuntimeManager } from "./work-runtime-manager.js";
+import type {
+  WorkRuntime,
+  WorkRuntimeManager,
+  WorkStageRecoveryOptions
+} from "./work-runtime-manager.js";
 import { stageCommandTarget, stageDisplayName } from "@ballance/contracts";
 
 interface RefereeActionHost {
@@ -29,6 +33,11 @@ interface RefereeActionHost {
   workRuntimeManager: WorkRuntimeManager;
 }
 
+export type StageRecoveryAction = Extract<
+  CompetitionAction,
+  { type: "restart-stage" | "mark-stage-started" | "force-reset-stage" | "force-next-stage" }
+>;
+
 export const assertRawCommandAllowed = (command: string): void => {
   if (/^forcenextrestart$/i.test(command.trim())) {
     throw new ServiceError("CAPABILITY_UNSUPPORTED", "forcenextrestart 会让下一次 Go 作用于服务器所有地图，比赛控制台禁止发送", 409);
@@ -37,6 +46,183 @@ export const assertRawCommandAllowed = (command: string): void => {
 
 export class RefereeActionService {
   public constructor(private readonly host: RefereeActionHost) {}
+
+  /**
+   * Synchronous stage-recovery path used by the service-level SQLite unit of
+   * work. It must not dispatch server commands or cross an async boundary.
+   */
+  public applyStageRecoveryLocal(
+    competitionId: string,
+    action: StageRecoveryAction,
+    confirmation?: { runtimeToken?: string },
+    workOptions: WorkStageRecoveryOptions = {}
+  ): void {
+    const competition = this.host.getCompetition(competitionId);
+    const controller = this.host.controllerFor(competitionId);
+    switch (action.type) {
+      case "restart-stage": {
+        if (!confirmation?.runtimeToken) {
+          throw new ServiceError("CONFIRMATION_INVALID", "重赛确认缺少运行时凭据", 409);
+        }
+        const before = controller.snapshot();
+        if (before.currentStageId !== action.stageId) {
+          throw new ServiceError("ACTION_UNAVAILABLE", "当前关卡已变化，不能使用旧确认重赛", 409);
+        }
+        const controlledAttempt = before.attempts.findLast((attempt) =>
+          attempt.stageId === action.stageId && !attempt.voided);
+        const sourceId = `restart-stage:${action.stageId}:${controlledAttempt?.id ?? "before-go"}:${randomUUID()}`;
+        if (competition.mode === "test") {
+          const runId = this.host.getPayload(competitionId).activeRunId as string;
+          this.host.testRuntimeManager.restartCurrentStage(
+            this.host.testRuntimeManager.getRuntime(competitionId, runId),
+            {
+              stageId: action.stageId,
+              impactHash: action.impactHash,
+              token: confirmation.runtimeToken,
+              reason: "裁判重赛本关",
+              sourceId
+            }
+          );
+        } else {
+          const runtime = this.host.workRuntimeManager.get(competitionId);
+          if (!runtime) throw new ServiceError("NOT_FOUND", "比赛连接尚未建立", 404);
+          this.host.workRuntimeManager.restartCurrentStage(runtime, {
+            stageId: action.stageId,
+            impactHash: action.impactHash,
+            token: confirmation.runtimeToken,
+            reason: "裁判重赛本关",
+            sourceId
+          }, workOptions);
+        }
+        this.host.appendAttention(competitionId, {
+          id: sourceId,
+          category: "flow",
+          severity: "critical",
+          title: "裁判已强制重赛本关",
+          message: controlledAttempt
+            ? `第 ${controlledAttempt.attemptNumber} 次尝试已作废并退出榜单；旧流程阻断已隔离，原始证据保留，当前关已重新进入 Ready。`
+            : "本关尚未 Go；旧流程阻断已隔离，原始证据保留，当前关已重新进入 Ready。",
+          occurredAt: new Date().toISOString(),
+          stageId: action.stageId
+        });
+        return;
+      }
+      case "mark-stage-started": {
+        const before = controller.snapshot();
+        if (before.currentStageId !== action.stageId) {
+          throw new ServiceError("ACTION_UNAVAILABLE", "当前 Ready 关卡已变化，不能使用旧确认标记起跑", 409);
+        }
+        const attempt = competition.mode === "test"
+          ? (() => {
+              const runId = this.host.getPayload(competitionId).activeRunId as string;
+              return this.host.testRuntimeManager.markCurrentReadyStageStarted(
+                this.host.testRuntimeManager.getRuntime(competitionId, runId),
+                action.stageId
+              );
+            })()
+          : (() => {
+              const runtime = this.host.workRuntimeManager.get(competitionId);
+              if (!runtime) throw new ServiceError("NOT_FOUND", "比赛连接尚未建立", 404);
+              return this.host.workRuntimeManager.markCurrentReadyStageStarted(
+                runtime,
+                action.stageId,
+                workOptions
+              );
+            })();
+        this.host.appendAttention(competitionId, {
+          id: `mark-stage-started:${attempt.id}:${randomUUID()}`,
+          category: "flow",
+          severity: "critical",
+          title: "裁判已将当前关标记为已起跑",
+          message: `本关尝试 #${attempt.attemptNumber} 以裁判确认时刻作为 goAt 并开始关卡时限；未发送服务器命令，标记前的比赛事件不会回补。自动化保持暂停。`,
+          occurredAt: new Date().toISOString(),
+          stageId: attempt.stageId
+        });
+        return;
+      }
+      case "force-reset-stage": {
+        const before = controller.snapshot();
+        if (before.currentStageId !== action.stageId) {
+          throw new ServiceError("ACTION_UNAVAILABLE", "当前关卡已变化，不能使用旧确认强制重置", 409);
+        }
+        const sourceId = `force-reset-stage:${action.stageId}:${randomUUID()}`;
+        const result = competition.mode === "test"
+          ? (() => {
+              const runId = this.host.getPayload(competitionId).activeRunId as string;
+              return this.host.testRuntimeManager.forceResetCurrentStage(
+                this.host.testRuntimeManager.getRuntime(competitionId, runId),
+                sourceId,
+                action.stageId
+              );
+            })()
+          : (() => {
+              const runtime = this.host.workRuntimeManager.get(competitionId);
+              if (!runtime) throw new ServiceError("NOT_FOUND", "比赛连接尚未建立", 404);
+              return this.host.workRuntimeManager.forceResetCurrentStage(
+                runtime,
+                sourceId,
+                action.stageId,
+                workOptions
+              );
+            })();
+        this.host.appendAttention(competitionId, {
+          id: sourceId,
+          category: "flow",
+          severity: "critical",
+          title: "裁判已强制重置本关",
+          message: result.voidedAttempts.length > 0
+            ? `${result.voidedAttempts.length} 个有效尝试和本关有效成绩已作废；本关已从当前时刻重新进入 T-60 准备，旧证据与榜单版本永久保留。`
+            : "本关尚无有效尝试；已取消旧计划并从当前时刻重新进入 T-60 准备，旧证据永久保留。",
+          occurredAt: new Date().toISOString(),
+          stageId: result.stageId
+        });
+        return;
+      }
+      case "force-next-stage": {
+        const before = controller.snapshot();
+        const stages = [...(this.host.getPublishedConfig(competitionId) ?? this.host.getDraftConfig(competitionId)).stages]
+          .sort((left, right) => left.order - right.order);
+        const currentIndex = stages.findIndex((stage) => stage.id === before.currentStageId);
+        const expectedNextStageId = currentIndex >= 0 ? stages[currentIndex + 1]?.id : undefined;
+        if (!expectedNextStageId || action.stageId !== expectedNextStageId) {
+          throw new ServiceError("ACTION_UNAVAILABLE", "下一关目标已变化，不能使用旧确认强制切关", 409);
+        }
+        const result = competition.mode === "test"
+          ? (() => {
+              const runId = this.host.getPayload(competitionId).activeRunId as string;
+              return this.host.testRuntimeManager.forceAdvanceToNextStage(
+                this.host.testRuntimeManager.getRuntime(competitionId, runId),
+                before.currentStageId,
+                action.stageId
+              );
+            })()
+          : (() => {
+              const runtime = this.host.workRuntimeManager.get(competitionId);
+              if (!runtime) throw new ServiceError("NOT_FOUND", "比赛连接尚未建立", 404);
+              return this.host.workRuntimeManager.forceAdvanceToNextStage(
+                runtime,
+                before.currentStageId,
+                action.stageId,
+                workOptions
+              );
+            })();
+        if (before.currentStageId !== result.fromStageId || expectedNextStageId !== result.toStageId) {
+          throw new Error("FORCE_NEXT_STAGE_RESULT_MISMATCH");
+        }
+        const sourceId = `force-next-stage:${result.fromStageId}:${result.toStageId}:${randomUUID()}`;
+        this.host.appendAttention(competitionId, {
+          id: sourceId,
+          category: "flow",
+          severity: "critical",
+          title: "裁判已强制进入下一关",
+          message: `${result.fromStageId} 的成绩窗口已关闭且已有成绩保留；当前关已原子切换为 ${result.toStageId}，并从当前时刻进入 T-60 准备。`,
+          occurredAt: new Date().toISOString(),
+          stageId: result.toStageId
+        });
+        return;
+      }
+    }
+  }
 
   public async applyLocal(
     competitionId: string,
@@ -145,25 +331,27 @@ export class RefereeActionService {
         const before = controller().snapshot();
         if (before.currentStageId !== action.stageId) throw new ServiceError("ACTION_UNAVAILABLE", "当前关卡已变化，不能使用旧确认重赛", 409);
         const controlledAttempt = before.attempts.findLast((attempt) => attempt.stageId === action.stageId && !attempt.voided);
-        controller().confirmStageRestart({
-          stageId: action.stageId,
-          impactHash: action.impactHash,
-          token: confirmation.runtimeToken,
-          reason: "裁判重赛本关"
-        });
         const sourceId = `restart-stage:${action.stageId}:${controlledAttempt?.id ?? "before-go"}:${randomUUID()}`;
-        if (controlledAttempt) {
-          if (competition.mode === "test") {
-            const runId = this.host.getPayload(competitionId).activeRunId as string;
-            const runtime = this.host.testRuntimeManager.getRuntime(competitionId, runId);
-            runtime.engine.voidAttempt(controlledAttempt.stageId, controlledAttempt.attemptNumber, sourceId);
-            this.host.saveScoreboards(competitionId, runtime.engine.snapshot().scoreboardVersions);
-          } else {
-            const runtime = this.host.workRuntimeManager.get(competitionId);
-            if (!runtime) throw new ServiceError("NOT_FOUND", "比赛连接尚未建立", 404);
-            runtime.engine.voidAttempt(controlledAttempt.stageId, controlledAttempt.attemptNumber, sourceId);
-            this.host.saveScoreboards(competitionId, runtime.engine.snapshot().scoreboardVersions);
-          }
+        if (competition.mode === "test") {
+          const runId = this.host.getPayload(competitionId).activeRunId as string;
+          const runtime = this.host.testRuntimeManager.getRuntime(competitionId, runId);
+          this.host.testRuntimeManager.restartCurrentStage(runtime, {
+            stageId: action.stageId,
+            impactHash: action.impactHash,
+            token: confirmation.runtimeToken,
+            reason: "裁判重赛本关",
+            sourceId
+          });
+        } else {
+          const runtime = this.host.workRuntimeManager.get(competitionId);
+          if (!runtime) throw new ServiceError("NOT_FOUND", "比赛连接尚未建立", 404);
+          this.host.workRuntimeManager.restartCurrentStage(runtime, {
+            stageId: action.stageId,
+            impactHash: action.impactHash,
+            token: confirmation.runtimeToken,
+            reason: "裁判重赛本关",
+            sourceId
+          });
         }
         this.host.appendAttention(competitionId, {
           id: sourceId,
@@ -175,6 +363,106 @@ export class RefereeActionService {
             : "本关尚未 Go；旧流程阻断已隔离，原始证据保留，当前关已重新进入 Ready。",
           occurredAt: new Date().toISOString(),
           stageId: action.stageId
+        });
+        break;
+      }
+      case "mark-stage-started": {
+        const before = controller().snapshot();
+        if (before.currentStageId !== action.stageId) {
+          throw new ServiceError("ACTION_UNAVAILABLE", "当前 Ready 关卡已变化，不能使用旧确认标记起跑", 409);
+        }
+        const attempt = competition.mode === "test"
+          ? (() => {
+              const runId = this.host.getPayload(competitionId).activeRunId as string;
+              return this.host.testRuntimeManager.markCurrentReadyStageStarted(
+                this.host.testRuntimeManager.getRuntime(competitionId, runId),
+                action.stageId
+              );
+            })()
+          : (() => {
+              const runtime = this.host.workRuntimeManager.get(competitionId);
+              if (!runtime) throw new ServiceError("NOT_FOUND", "比赛连接尚未建立", 404);
+              return this.host.workRuntimeManager.markCurrentReadyStageStarted(runtime, action.stageId);
+            })();
+        this.host.appendAttention(competitionId, {
+          id: `mark-stage-started:${attempt.id}:${randomUUID()}`,
+          category: "flow",
+          severity: "critical",
+          title: "裁判已将当前关标记为已起跑",
+          message: `本关尝试 #${attempt.attemptNumber} 以裁判确认时刻作为 goAt，关卡时限从该时刻开始；未发送服务器命令，标记前的比赛事件不会回补。自动化保持暂停。`,
+          occurredAt: new Date().toISOString(),
+          stageId: attempt.stageId
+        });
+        break;
+      }
+      case "force-reset-stage": {
+        const before = controller().snapshot();
+        if (before.currentStageId !== action.stageId) {
+          throw new ServiceError("ACTION_UNAVAILABLE", "当前关卡已变化，不能使用旧确认强制重置", 409);
+        }
+        const sourceId = `force-reset-stage:${action.stageId}:${randomUUID()}`;
+        const result = competition.mode === "test"
+          ? (() => {
+              const runId = this.host.getPayload(competitionId).activeRunId as string;
+              return this.host.testRuntimeManager.forceResetCurrentStage(
+                this.host.testRuntimeManager.getRuntime(competitionId, runId),
+                sourceId,
+                action.stageId
+              );
+            })()
+          : (() => {
+              const runtime = this.host.workRuntimeManager.get(competitionId);
+              if (!runtime) throw new ServiceError("NOT_FOUND", "比赛连接尚未建立", 404);
+              return this.host.workRuntimeManager.forceResetCurrentStage(runtime, sourceId, action.stageId);
+            })();
+        this.host.appendAttention(competitionId, {
+          id: sourceId,
+          category: "flow",
+          severity: "critical",
+          title: "裁判已强制重置本关",
+          message: result.voidedAttempts.length > 0
+            ? `${result.voidedAttempts.length} 个有效尝试和本关有效成绩已作废；本关已从当前时刻重新进入 T-60 准备，旧证据与榜单版本永久保留。`
+            : "本关尚无有效尝试；已取消旧计划并从当前时刻重新进入 T-60 准备，旧证据永久保留。",
+          occurredAt: new Date().toISOString(),
+          stageId: result.stageId
+        });
+        break;
+      }
+      case "force-next-stage": {
+        const before = controller().snapshot();
+        const stages = [...(this.host.getPublishedConfig(competitionId) ?? this.host.getDraftConfig(competitionId)).stages]
+          .sort((left, right) => left.order - right.order);
+        const currentIndex = stages.findIndex((stage) => stage.id === before.currentStageId);
+        const expectedNextStageId = currentIndex >= 0 ? stages[currentIndex + 1]?.id : undefined;
+        if (!expectedNextStageId || action.stageId !== expectedNextStageId) {
+          throw new ServiceError("ACTION_UNAVAILABLE", "下一关目标已变化，不能使用旧确认强制切关", 409);
+        }
+        const result = competition.mode === "test"
+          ? (() => {
+              const runId = this.host.getPayload(competitionId).activeRunId as string;
+              return this.host.testRuntimeManager.forceAdvanceToNextStage(
+                this.host.testRuntimeManager.getRuntime(competitionId, runId),
+                before.currentStageId,
+                action.stageId
+              );
+            })()
+          : (() => {
+              const runtime = this.host.workRuntimeManager.get(competitionId);
+              if (!runtime) throw new ServiceError("NOT_FOUND", "比赛连接尚未建立", 404);
+              return this.host.workRuntimeManager.forceAdvanceToNextStage(runtime, before.currentStageId, action.stageId);
+            })();
+        if (before.currentStageId !== result.fromStageId || expectedNextStageId !== result.toStageId) {
+          throw new Error("FORCE_NEXT_STAGE_RESULT_MISMATCH");
+        }
+        const sourceId = `force-next-stage:${result.fromStageId}:${result.toStageId}:${randomUUID()}`;
+        this.host.appendAttention(competitionId, {
+          id: sourceId,
+          category: "flow",
+          severity: "critical",
+          title: "裁判已强制进入下一关",
+          message: `${result.fromStageId} 的成绩窗口已关闭且已有成绩保留；当前关已原子切换为 ${result.toStageId}，并从当前时刻进入 T-60 准备。`,
+          occurredAt: new Date().toISOString(),
+          stageId: result.toStageId
         });
         break;
       }

@@ -26,14 +26,24 @@ import {
   parseLogLine,
   type AutomationAction,
   type AutomationSnapshot,
+  type CompetitionControllerCheckpoint,
   type DomainEvent,
   type EngineSnapshot,
   type ScoreboardVersion
 } from "@ballance/core";
-import { WorkAutomationRuntime } from "./automation-runtime.js";
+import {
+  WorkAutomationRuntime,
+  type PreparedCommandSupersession
+} from "./automation-runtime.js";
 import { CommandQueue, type CommandAction, type CommandRecord } from "./command-queue.js";
 import type { EventJournal } from "./event-journal.js";
-import { ManagedMockClient, readMockClientVersion, resolveMockClientUuid, type CommandTransport } from "./mock-client.js";
+import {
+  ManagedMockClient,
+  readMockClientVersion,
+  resolveMockClientUuid,
+  type CommandTransport,
+  type MockClientLogLinePosition
+} from "./mock-client.js";
 import {
   automationPolicyFor,
   automationView,
@@ -44,7 +54,7 @@ import {
   SystemMonotonicClock,
   utcOffsetMinutes
 } from "./runtime-shared.js";
-import type { ServiceSnapshotPayload } from "./runtime-types.js";
+import type { ServiceSnapshotPayload, WorkLogEvidenceBoundary } from "./runtime-types.js";
 import { ServiceError } from "./service-error.js";
 
 export interface WorkRuntime {
@@ -69,12 +79,36 @@ export interface WorkRuntime {
   mapRegistrationAttemptedProcessGeneration?: number;
   registeredMapsProcessGeneration?: number;
   participantStageId: string;
+  logReceiveSequence: number;
+  attemptEvidenceSequenceBoundaries: Map<string, number>;
+  stageCycleEvidenceLogBoundary?: WorkLogEvidenceBoundary;
+  attemptEvidenceLogBoundaries: Map<string, WorkLogEvidenceBoundary>;
   connection: WorkConnectionView;
   connectionAttempt?: ConnectionAttempt;
   authenticationDelayTimer?: ReturnType<typeof setTimeout>;
   recovery?: { id: string; kind: "automatic" | "soft" | "hard"; promise: Promise<void> };
   listNoEchoRecovery?: { attempted: boolean };
+  preparedStageRecovery?: {
+    stageId: string;
+    supersession: PreparedCommandSupersession;
+  };
   disposed?: boolean;
+}
+
+export interface WorkStageRecoveryCheckpoint {
+  controller: CompetitionControllerCheckpoint;
+  engine: EngineSnapshot;
+  participantStageId: string;
+  logReceiveSequence: number;
+  attemptEvidenceSequenceBoundaries: ReadonlyMap<string, number>;
+  stageCycleEvidenceLogBoundary?: WorkLogEvidenceBoundary;
+  attemptEvidenceLogBoundaries: ReadonlyMap<string, WorkLogEvidenceBoundary>;
+}
+
+export interface WorkStageRecoveryOptions {
+  deferCommandIsolation?: boolean;
+  logAlreadyFlushed?: boolean;
+  logEvidenceBoundary?: WorkLogEvidenceBoundary;
 }
 
 interface ListResult {
@@ -91,6 +125,10 @@ interface ListedPlayer {
   connectionId: string;
   cheat: boolean;
   sourceId: string;
+}
+
+interface WorkLogLinePosition extends MockClientLogLinePosition {
+  processGeneration: number;
 }
 
 interface ListReconciliation {
@@ -333,6 +371,8 @@ export class WorkRuntimeManager {
     const restoredEngine = initialSnapshot ? this.host.restoredEngineSnapshot(competitionId, initialSnapshot) : undefined;
     if (restoredEngine) engine.restore(restoredEngine);
     const persistedConnection = this.host.getPayload(competitionId).work?.connection;
+    const persistedStageCycleEvidenceLogBoundary =
+      this.host.getPayload(competitionId).work?.stageCycleEvidenceLogBoundary;
     const runtime: WorkRuntime = {
       competitionId,
       server: config.server,
@@ -355,6 +395,16 @@ export class WorkRuntimeManager {
           },
       mapEchoPrefixes: new Map(Object.entries(this.host.getPayload(competitionId).work?.mapEchoPrefixes ?? {})),
       participantStageId: this.host.getPayload(competitionId).work?.participantStageId ?? controller.snapshot().currentStageId,
+      logReceiveSequence: this.host.getPayload(competitionId).work?.logReceiveSequence ?? 0,
+      attemptEvidenceSequenceBoundaries: new Map(Object.entries(
+        this.host.getPayload(competitionId).work?.attemptEvidenceSequenceBoundaries ?? {}
+      )),
+      attemptEvidenceLogBoundaries: new Map(Object.entries(
+        this.host.getPayload(competitionId).work?.attemptEvidenceLogBoundaries ?? {}
+      )),
+      ...(persistedStageCycleEvidenceLogBoundary === undefined
+        ? {}
+        : { stageCycleEvidenceLogBoundary: persistedStageCycleEvidenceLogBoundary }),
       ...(persistedConnection?.refereeConnectionId === undefined ? {} : { lastRefereeConnectionId: persistedConnection.refereeConnectionId }),
       ...(mockClientVersion === undefined ? {} : { mockClientVersion }),
       ...(transport instanceof ManagedMockClient ? { client: transport } : {})
@@ -458,11 +508,15 @@ export class WorkRuntimeManager {
   }
 
   private bindManagedClient(runtime: WorkRuntime, client: ManagedMockClient, processGeneration: number): void {
-    client.onLine((line) => {
+    client.onLine((line, position) => {
       if (this.runtimes.get(runtime.competitionId) !== runtime || runtime.client !== client
         || runtime.connection.processGeneration !== processGeneration) return;
-      const observedCommand = runtime.commands.observeLine(line, runtime.commandObservationGeneration);
-      this.ingestLine(runtime, line, observedCommand);
+      const workPosition = { ...position, processGeneration };
+      const observedCommand = !position.trustedEvidence
+        || this.isBeforeCurrentLogEvidenceBoundary(runtime, workPosition)
+        ? undefined
+        : runtime.commands.observeLine(line, runtime.commandObservationGeneration);
+      this.ingestLine(runtime, line, observedCommand, workPosition);
     });
     client.onExit((info) => {
       if (this.runtimes.get(runtime.competitionId) !== runtime || runtime.client !== client
@@ -868,6 +922,12 @@ export class WorkRuntimeManager {
         automation,
         engine: runtime.engine.snapshot(),
         mapEchoPrefixes: Object.fromEntries(runtime.mapEchoPrefixes),
+        logReceiveSequence: runtime.logReceiveSequence ?? 0,
+        attemptEvidenceSequenceBoundaries: Object.fromEntries(runtime.attemptEvidenceSequenceBoundaries ?? []),
+        ...(runtime.stageCycleEvidenceLogBoundary === undefined
+          ? {}
+          : { stageCycleEvidenceLogBoundary: runtime.stageCycleEvidenceLogBoundary }),
+        attemptEvidenceLogBoundaries: Object.fromEntries(runtime.attemptEvidenceLogBoundaries ?? []),
         connection: runtime.connection
       }
     });
@@ -880,6 +940,343 @@ export class WorkRuntimeManager {
     }
     if (settled.controllerChanged) this.recordStageBoundary(runtime, settled.before, settled.after);
     return settled.after;
+  }
+
+  public flushStageRecoveryEvidence(runtime: WorkRuntime): WorkLogEvidenceBoundary | undefined {
+    return this.flushAndCaptureLogEvidenceBoundary(runtime);
+  }
+
+  public checkpointStageRecovery(runtime: WorkRuntime): WorkStageRecoveryCheckpoint {
+    if (runtime.preparedStageRecovery) throw new Error("STAGE_RECOVERY_ALREADY_PREPARED");
+    return {
+      controller: runtime.controller.checkpoint(),
+      engine: runtime.engine.snapshot(),
+      participantStageId: runtime.participantStageId,
+      logReceiveSequence: runtime.logReceiveSequence,
+      attemptEvidenceSequenceBoundaries: new Map(runtime.attemptEvidenceSequenceBoundaries),
+      ...(runtime.stageCycleEvidenceLogBoundary === undefined
+        ? {}
+        : { stageCycleEvidenceLogBoundary: { ...runtime.stageCycleEvidenceLogBoundary } }),
+      attemptEvidenceLogBoundaries: new Map(
+        [...runtime.attemptEvidenceLogBoundaries].map(([attemptId, boundary]) => [
+          attemptId,
+          { ...boundary }
+        ])
+      )
+    };
+  }
+
+  public restoreStageRecovery(runtime: WorkRuntime, checkpoint: WorkStageRecoveryCheckpoint): void {
+    runtime.controller.restore(checkpoint.controller);
+    runtime.engine.restore(checkpoint.engine);
+    runtime.participantStageId = checkpoint.participantStageId;
+    runtime.logReceiveSequence = checkpoint.logReceiveSequence;
+    runtime.attemptEvidenceSequenceBoundaries = new Map(checkpoint.attemptEvidenceSequenceBoundaries);
+    if (checkpoint.stageCycleEvidenceLogBoundary === undefined) {
+      delete runtime.stageCycleEvidenceLogBoundary;
+    } else {
+      runtime.stageCycleEvidenceLogBoundary = { ...checkpoint.stageCycleEvidenceLogBoundary };
+    }
+    runtime.attemptEvidenceLogBoundaries = new Map(
+      [...checkpoint.attemptEvidenceLogBoundaries].map(([attemptId, boundary]) => [
+        attemptId,
+        { ...boundary }
+      ])
+    );
+    delete runtime.preparedStageRecovery;
+  }
+
+  public commitPreparedStageRecovery(runtime: WorkRuntime): readonly CommandRecord[] {
+    const prepared = runtime.preparedStageRecovery;
+    if (!prepared) return [];
+    const records = runtime.runtime.commitPreparedSupersession(prepared.supersession);
+    delete runtime.preparedStageRecovery;
+    this.recordStageCycleCommandIsolation(
+      runtime,
+      prepared.stageId,
+      prepared.supersession.actionKeys,
+      records
+    );
+    return records;
+  }
+
+  public discardPreparedStageRecovery(runtime: WorkRuntime): void {
+    delete runtime.preparedStageRecovery;
+  }
+
+  public markCurrentReadyStageStarted(
+    runtime: WorkRuntime,
+    expectedStageId: string,
+    options: WorkStageRecoveryOptions = {}
+  ): AutomationSnapshot["attempts"][number] {
+    const logBoundary = options.logAlreadyFlushed
+      ? options.logEvidenceBoundary
+      : this.flushAndCaptureLogEvidenceBoundary(runtime);
+    runtime.logReceiveSequence ??= 0;
+    runtime.attemptEvidenceSequenceBoundaries ??= new Map();
+    runtime.attemptEvidenceLogBoundaries ??= new Map();
+    const before = runtime.controller.snapshot();
+    const stageId = before.currentStageId;
+    const attempt = this.runExpectedStageAction(() => runtime.controller.markCurrentReadyStageStarted({
+      expectedCurrentStageId: expectedStageId
+    }));
+    const after = runtime.controller.snapshot();
+    this.isolateStageCycleCommands(runtime, before, after, stageId, options.deferCommandIsolation);
+    runtime.attemptEvidenceSequenceBoundaries.set(attempt.id, runtime.logReceiveSequence);
+    this.establishStageCycleLogEvidenceBoundary(runtime, logBoundary, attempt.id);
+    const wallClockOriginMs = after.wallClockOriginMs ?? Date.now() - performance.now();
+    runtime.engine.startRefereeMarkedAttempt({
+      id: attempt.id,
+      stageId: attempt.stageId,
+      attemptNumber: attempt.attemptNumber,
+      goAtMs: wallClockOriginMs + attempt.goAtMs,
+      deadlineAtMs: wallClockOriginMs + attempt.deadlineAtMs,
+      sourceId: `referee-marked-started:${attempt.id}`
+    });
+    this.host.saveScoreboards(runtime.competitionId, runtime.engine.snapshot().scoreboardVersions);
+    this.saveSnapshot(runtime);
+    this.host.journal.append({
+      type: "work.stage-marked-started",
+      competitionId: runtime.competitionId,
+      data: {
+        stageId,
+        attemptId: attempt.id,
+        attemptNumber: attempt.attemptNumber,
+        goAtMs: attempt.goAtMs,
+        deadlineAtMs: attempt.deadlineAtMs
+      }
+    });
+    return attempt;
+  }
+
+  public forceResetCurrentStage(
+    runtime: WorkRuntime,
+    sourceId: string,
+    expectedStageId: string,
+    options: WorkStageRecoveryOptions = {}
+  ): {
+    stageId: string;
+    voidedAttempts: readonly AutomationSnapshot["attempts"][number][];
+  } {
+    const logBoundary = options.logAlreadyFlushed
+      ? options.logEvidenceBoundary
+      : this.flushAndCaptureLogEvidenceBoundary(runtime);
+    const before = runtime.controller.snapshot();
+    const stageId = before.currentStageId;
+    const result = this.runExpectedStageAction(() => runtime.controller.forceResetCurrentStage({
+      expectedCurrentStageId: expectedStageId
+    }));
+    const after = runtime.controller.snapshot();
+    this.isolateStageCycleCommands(runtime, before, after, stageId, options.deferCommandIsolation);
+    this.establishStageCycleLogEvidenceBoundary(runtime, logBoundary);
+    for (const controlledAttempt of result.voidedAttempts) {
+      const engineAttempt = runtime.engine.snapshot().attempts.find((attempt) =>
+        attempt.stageId === controlledAttempt.stageId
+        && attempt.attemptNumber === controlledAttempt.attemptNumber
+        && !attempt.voided);
+      if (engineAttempt) runtime.engine.voidAttempt(controlledAttempt.stageId, controlledAttempt.attemptNumber, sourceId);
+    }
+    this.synchronizeParticipantStageStatuses(runtime, stageId, true);
+    this.host.saveScoreboards(runtime.competitionId, runtime.engine.snapshot().scoreboardVersions);
+    this.saveSnapshot(runtime);
+    this.host.journal.append({
+      type: "work.stage-force-reset",
+      competitionId: runtime.competitionId,
+      data: {
+        stageId,
+        attemptIds: result.voidedAttempts.map((attempt) => attempt.id),
+        attemptNumbers: result.voidedAttempts.map((attempt) => attempt.attemptNumber)
+      }
+    });
+    return {
+      stageId,
+      voidedAttempts: result.voidedAttempts
+    };
+  }
+
+  public forceAdvanceToNextStage(
+    runtime: WorkRuntime,
+    expectedCurrentStageId: string,
+    expectedTargetStageId: string,
+    options: WorkStageRecoveryOptions = {}
+  ): {
+    fromStageId: string;
+    toStageId: string;
+    closedAttempt?: AutomationSnapshot["attempts"][number];
+  } {
+    const logBoundary = options.logAlreadyFlushed
+      ? options.logEvidenceBoundary
+      : this.flushAndCaptureLogEvidenceBoundary(runtime);
+    const before = runtime.controller.snapshot();
+    const fromStageId = before.currentStageId;
+    const controlledAttempt = before.attempts.findLast((attempt) =>
+      attempt.stageId === fromStageId && !attempt.voided);
+    const result = this.runExpectedStageAction(() => runtime.controller.forceAdvanceToNextStage({
+      expectedCurrentStageId,
+      expectedTargetStageId
+    }));
+    const after = runtime.controller.snapshot();
+    this.isolateStageCycleCommands(runtime, before, after, fromStageId, options.deferCommandIsolation);
+    this.establishStageCycleLogEvidenceBoundary(runtime, logBoundary);
+    if (result.previousStageId !== fromStageId || result.targetStageId !== after.currentStageId) {
+      throw new ServiceError("STATE_CONFLICT", "强制进入下一关后关卡边界未推进", 409);
+    }
+    this.mirrorClosedAttempts(runtime);
+    this.synchronizeParticipantStageStatuses(runtime, after.currentStageId);
+    this.host.saveScoreboards(runtime.competitionId, runtime.engine.snapshot().scoreboardVersions);
+    this.saveSnapshot(runtime);
+    this.host.journal.append({
+      type: "work.stage-force-next",
+      competitionId: runtime.competitionId,
+      data: {
+        fromStageId,
+        toStageId: after.currentStageId,
+        ...(controlledAttempt === undefined ? {} : {
+          attemptId: controlledAttempt.id,
+          attemptNumber: controlledAttempt.attemptNumber
+        })
+      }
+    });
+    return {
+      fromStageId,
+      toStageId: after.currentStageId,
+      ...(controlledAttempt === undefined ? {} : { closedAttempt: controlledAttempt })
+    };
+  }
+
+  public restartCurrentStage(
+    runtime: WorkRuntime,
+    input: { stageId: string; impactHash: string; token: string; reason: string; sourceId: string },
+    options: WorkStageRecoveryOptions = {}
+  ): AutomationSnapshot["attempts"][number] | undefined {
+    const logBoundary = options.logAlreadyFlushed
+      ? options.logEvidenceBoundary
+      : this.flushAndCaptureLogEvidenceBoundary(runtime);
+    const before = runtime.controller.snapshot();
+    const controlledAttempt = before.attempts.findLast((attempt) =>
+      attempt.stageId === input.stageId && !attempt.voided);
+    runtime.controller.confirmStageRestart({
+      stageId: input.stageId,
+      impactHash: input.impactHash,
+      token: input.token,
+      reason: input.reason
+    });
+    this.isolateStageCycleCommands(
+      runtime,
+      before,
+      runtime.controller.snapshot(),
+      input.stageId,
+      options.deferCommandIsolation
+    );
+    this.establishStageCycleLogEvidenceBoundary(runtime, logBoundary);
+    if (controlledAttempt) {
+      const engineAttempt = runtime.engine.snapshot().attempts.find((attempt) =>
+        attempt.stageId === controlledAttempt.stageId
+        && attempt.attemptNumber === controlledAttempt.attemptNumber
+        && !attempt.voided);
+      if (engineAttempt) runtime.engine.voidAttempt(controlledAttempt.stageId, controlledAttempt.attemptNumber, input.sourceId);
+    }
+    this.synchronizeParticipantStageStatuses(runtime, input.stageId, true);
+    this.host.saveScoreboards(runtime.competitionId, runtime.engine.snapshot().scoreboardVersions);
+    this.saveSnapshot(runtime);
+    return controlledAttempt;
+  }
+
+  private flushAndCaptureLogEvidenceBoundary(runtime: WorkRuntime): WorkLogEvidenceBoundary | undefined {
+    if (!runtime.client) {
+      throw new Error("STAGE_RECOVERY_LOG_BOUNDARY_UNAVAILABLE: managed MockClient is not available");
+    }
+    const boundary = runtime.client.flushLog({ requirePresentStable: true });
+    return {
+      processGeneration: runtime.connection.processGeneration,
+      streamGeneration: boundary.streamGeneration,
+      byteOffset: boundary.byteOffset
+    };
+  }
+
+  private establishStageCycleLogEvidenceBoundary(
+    runtime: WorkRuntime,
+    boundary: WorkLogEvidenceBoundary | undefined,
+    attemptId?: string
+  ): void {
+    if (!boundary) return;
+    runtime.stageCycleEvidenceLogBoundary = boundary;
+    runtime.attemptEvidenceLogBoundaries ??= new Map();
+    if (attemptId) runtime.attemptEvidenceLogBoundaries.set(attemptId, boundary);
+  }
+
+  private isBeforeCurrentLogEvidenceBoundary(runtime: WorkRuntime, position: WorkLogLinePosition | undefined): boolean {
+    const boundary = runtime.stageCycleEvidenceLogBoundary;
+    return position !== undefined
+      && boundary !== undefined
+      && position.processGeneration === boundary.processGeneration
+      && position.streamGeneration === boundary.streamGeneration
+      && position.startByteOffset < boundary.byteOffset;
+  }
+
+  private isolateStageCycleCommands(
+    runtime: WorkRuntime,
+    before: AutomationSnapshot,
+    after: AutomationSnapshot,
+    stageId: string,
+    defer = false
+  ): readonly CommandRecord[] {
+    const afterById = new Map(after.actions.map((action) => [action.id, action] as const));
+    const actionKeys = before.actions
+      .filter((action) => {
+        if (!["pending", "failed", "uncertain"].includes(action.status)) return false;
+        const isolated = afterById.get(action.id);
+        return isolated !== undefined
+          && (isolated.isolated === true
+            || action.status === "pending" && isolated.status === "cancelled");
+      })
+      .map((action) => action.idempotencyKey);
+    if (actionKeys.length === 0) return [];
+    if (defer) {
+      if (runtime.preparedStageRecovery) throw new Error("STAGE_RECOVERY_ALREADY_PREPARED");
+      const supersession = runtime.runtime.prepareSupersedeActions(actionKeys);
+      runtime.runtime.projectPreparedSupersession(supersession);
+      runtime.preparedStageRecovery = { stageId, supersession };
+      for (const preview of supersession.previews) {
+        this.host.recordCommand(runtime.competitionId, preview.record);
+      }
+      return supersession.previews.map((preview) => preview.record);
+    }
+    const isolated = runtime.runtime.supersedeActions(actionKeys);
+    this.recordStageCycleCommandIsolation(runtime, stageId, actionKeys, isolated);
+    return isolated;
+  }
+
+  private recordStageCycleCommandIsolation(
+    runtime: WorkRuntime,
+    stageId: string,
+    actionKeys: readonly string[],
+    isolated: readonly CommandRecord[]
+  ): void {
+    this.host.journal.append({
+      type: "work.stage-cycle-commands-isolated",
+      competitionId: runtime.competitionId,
+      data: {
+        stageId,
+        actionKeys,
+        commands: isolated.map((record) => ({
+          id: record.id,
+          idempotencyKey: record.idempotencyKey,
+          status: record.status
+        }))
+      }
+    });
+  }
+
+  private runExpectedStageAction<T>(operation: () => T): T {
+    try {
+      return operation();
+    } catch (error) {
+      if (error instanceof Error && error.message === "ACTION_TARGET_CHANGED") {
+        throw new ServiceError("CONFIRMATION_STALE", "关卡边界已变化，请刷新现场状态后重新确认", 409);
+      }
+      throw error;
+    }
   }
 
   private settleStageBoundary(runtime: WorkRuntime): {
@@ -918,8 +1315,8 @@ export class WorkRuntimeManager {
     });
   }
 
-  private synchronizeParticipantStageStatuses(runtime: WorkRuntime, currentStageId: string): void {
-    if (runtime.participantStageId === currentStageId) return;
+  private synchronizeParticipantStageStatuses(runtime: WorkRuntime, currentStageId: string, force = false): void {
+    if (!force && runtime.participantStageId === currentStageId) return;
     const previousStageId = runtime.participantStageId;
     const config = this.host.getDraftConfig(runtime.competitionId);
     let resetCount = 0;
@@ -1233,11 +1630,53 @@ export class WorkRuntimeManager {
 
   // Log ingestion, participant reconciliation and event attribution are kept together below.
 
-  public ingestLine(runtime: WorkRuntime, line: string, observedCommand?: CommandRecord): void {
+  public ingestLine(
+    runtime: WorkRuntime,
+    line: string,
+    observedCommand?: CommandRecord,
+    logPosition?: WorkLogLinePosition
+  ): void {
+    runtime.logReceiveSequence = (runtime.logReceiveSequence ?? 0) + 1;
+    runtime.attemptEvidenceSequenceBoundaries ??= new Map();
+    runtime.attemptEvidenceLogBoundaries ??= new Map();
+    const receiveSequence = runtime.logReceiveSequence;
     const config = this.host.getPublishedConfig(runtime.competitionId);
     if (!config) return;
     this.host.appendRawLog(runtime.competitionId, "mock-client", line);
     const parsed = parseLogLine(line, { year: Number(config.date.slice(0, 4)), utcOffsetMinutes: utcOffsetMinutes(config.timezone) });
+    if (logPosition?.trustedEvidence === false) {
+      this.host.journal.append({
+        type: "work.log-discontinuity-prefix-ignored",
+        competitionId: runtime.competitionId,
+        data: {
+          eventType: parsed.event.type,
+          receiveSequence,
+          processGeneration: logPosition.processGeneration,
+          streamGeneration: logPosition.streamGeneration,
+          lineStartByteOffset: logPosition.startByteOffset,
+          lineEndByteOffset: logPosition.endByteOffset
+        }
+      });
+      this.saveSnapshot(runtime);
+      return;
+    }
+    if (this.isBeforeCurrentLogEvidenceBoundary(runtime, logPosition)) {
+      this.host.journal.append({
+        type: "work.pre-stage-cycle-log-line-ignored",
+        competitionId: runtime.competitionId,
+        data: {
+          eventType: parsed.event.type,
+          receiveSequence,
+          processGeneration: logPosition?.processGeneration,
+          streamGeneration: logPosition?.streamGeneration,
+          lineStartByteOffset: logPosition?.startByteOffset,
+          lineEndByteOffset: logPosition?.endByteOffset,
+          boundary: runtime.stageCycleEvidenceLogBoundary
+        }
+      });
+      this.saveSnapshot(runtime);
+      return;
+    }
     if (parsed.event.type === "connected") {
       this.observeConnected(runtime, parsed.event.occurredAt);
     }
@@ -1277,6 +1716,55 @@ export class WorkRuntimeManager {
       : before.phase;
     const openCurrentAttempt = before.attempts.findLast((attempt) =>
       attempt.stageId === before.currentStageId && attempt.intakeOpen && !attempt.voided);
+    const engineOpenAttempt = openCurrentAttempt === undefined
+      ? undefined
+      : runtime.engine.snapshot().attempts.find((attempt) =>
+          attempt.stageId === openCurrentAttempt.stageId
+          && attempt.attemptNumber === openCurrentAttempt.attemptNumber
+          && !attempt.voided);
+    const attemptGoWallMs = openCurrentAttempt === undefined
+      ? undefined
+      : engineOpenAttempt?.goAtMs
+        ?? (before.wallClockOriginMs ?? Date.now() - performance.now()) + openCurrentAttempt.goAtMs;
+    const isPotentialResultEvidence = ["finish", "dnf", "warning", "cheat-changed"].includes(parsed.event.type);
+    const evidenceMatchesCurrentStage = parsed.event.type === "finish" || parsed.event.type === "dnf"
+      ? eventStage?.id === currentStage?.id
+      : parsed.event.type === "warning" && parsed.event.level !== undefined
+        ? parsed.event.level === currentStage?.level
+        : true;
+    const parsedEvidenceAtMs = isPotentialResultEvidence ? Date.parse(parsed.event.occurredAt) : undefined;
+    const evidenceFloorMs = attemptGoWallMs === undefined
+      ? undefined
+      : openCurrentAttempt?.origin === "referee-marked-started"
+        // MockClient timestamps only carry seconds. The synchronous pre-mark log
+        // flush makes the current file prefix authoritative; accept a subsequently
+        // received line from the same second and clamp its business timestamp to
+        // goAt rather than discarding a legitimate post-click result.
+        ? Math.floor(attemptGoWallMs / 1_000) * 1_000
+        : attemptGoWallMs;
+    if (evidenceFloorMs !== undefined
+      && isPotentialResultEvidence
+      && evidenceMatchesCurrentStage
+      && parsedEvidenceAtMs !== undefined
+      && parsedEvidenceAtMs < evidenceFloorMs) {
+      this.host.journal.append({
+        type: "work.pre-attempt-evidence-ignored",
+        competitionId: runtime.competitionId,
+        data: {
+          stageId: before.currentStageId,
+          attemptId: openCurrentAttempt?.id,
+          sourceId: "sourceId" in parsed.event ? parsed.event.sourceId : undefined,
+          eventType: parsed.event.type,
+          occurredAt: parsed.event.occurredAt,
+          receiveSequence,
+          evidenceBoundarySequence: openCurrentAttempt === undefined
+            ? undefined
+            : runtime.attemptEvidenceSequenceBoundaries.get(openCurrentAttempt.id)
+        }
+      });
+      this.saveSnapshot(runtime);
+      return;
+    }
     if ((parsed.event.type === "finish" || parsed.event.type === "dnf")
       && (!openCurrentAttempt
         || effectivePhase !== "running" && effectivePhase !== "tail-intake"
@@ -1303,9 +1791,15 @@ export class WorkRuntimeManager {
     if (parsed.event.type === "countdown" && this.isLocalRefereeEvent(runtime, parsed.event) && eventStage?.id === currentStage?.id) {
       runtime.controller.observeCountdown(parsed.event.value);
     }
-    if (parsed.event.type === "warning") this.handleWarning(runtime, config, parsed.event);
-    if (parsed.event.type === "unknown" && typeof (parsed.event as { text?: string }).text === "string" && /toggled cheat off globally/i.test((parsed.event as { text?: string }).text ?? "")) runtime.controller.resetAllCheat();
-    const event = this.domainToScenarioEvent(runtime, config, parsed.event, eventStage);
+    if (parsed.event.type === "warning") this.handleWarning(runtime, config, parsed.event, attemptGoWallMs);
+    if (parsed.event.type === "unknown"
+      && typeof (parsed.event as { text?: string }).text === "string"
+      && /toggled cheat off globally/i.test((parsed.event as { text?: string }).text ?? "")
+      && observedCommand?.status === "acknowledged"
+      && observedCommand.action.type === "cheat-off") {
+      runtime.controller.resetAllCheat();
+    }
+    const event = this.domainToScenarioEvent(runtime, config, parsed.event, eventStage, attemptGoWallMs);
     const confirmsCurrentGo = observedCommand?.status === "acknowledged" && observedCommand.action.type === "go";
     if (event?.type === "go" && before.restartPending && !confirmsCurrentGo) {
       this.host.appendAttention(runtime.competitionId, {
@@ -1395,6 +1889,18 @@ export class WorkRuntimeManager {
           attempt.stageId === event.stageId && !attempt.voided);
         if (!controllerHasAttempt) runtime.controller.observeAuthoritativeGo(event.stageId);
         if (!engineHasAttempt) runtime.engine.apply(event);
+        const createdAttempt = runtime.controller.snapshot().attempts.findLast((attempt) =>
+          attempt.stageId === event.stageId && !attempt.voided);
+        if (createdAttempt) {
+          runtime.attemptEvidenceSequenceBoundaries.set(createdAttempt.id, receiveSequence);
+          if (!controllerHasAttempt && logPosition) {
+            this.establishStageCycleLogEvidenceBoundary(runtime, {
+              processGeneration: logPosition.processGeneration,
+              streamGeneration: logPosition.streamGeneration,
+              byteOffset: logPosition.endByteOffset
+            }, createdAttempt.id);
+          }
+        }
       } else {
         runtime.engine.apply(event);
       }
@@ -1418,7 +1924,7 @@ export class WorkRuntimeManager {
             const versionCount = runtime.engine.snapshot().scoreboardVersions.length;
             const stageId = activeAttempt?.stageId;
             if (!stageId) throw new Error("CHEAT_EXCLUSION_ATTEMPT_MISSING");
-            runtime.engine.apply({ atMs: Date.parse(parsed.event.occurredAt), sourceId: `${event.sourceId}:excluded`, type: "exclude", stageId, playerId: event.playerId, reason: "cheat-enabled" });
+            runtime.engine.apply({ atMs: event.atMs, sourceId: `${event.sourceId}:excluded`, type: "exclude", stageId, playerId: event.playerId, reason: "cheat-enabled" });
             if (runtime.engine.snapshot().scoreboardVersions.length > versionCount) {
               this.host.recordExclusionAttention(runtime.competitionId, stageId, event.playerId, event.sourceId, "开启 cheat");
             }
@@ -1560,7 +2066,12 @@ export class WorkRuntimeManager {
     return registration.promise;
   }
 
-  private handleWarning(runtime: WorkRuntime, config: CompetitionConfig, event: Extract<DomainEvent, { type: "warning" }>): void {
+  private handleWarning(
+    runtime: WorkRuntime,
+    config: CompetitionConfig,
+    event: Extract<DomainEvent, { type: "warning" }>,
+    attemptGoWallMs?: number
+  ): void {
     if (!event.playerName || event.level === undefined || !event.violationCode) {
       this.host.appendAttention(runtime.competitionId, {
         id: `warning:${event.sourceId}`,
@@ -1602,7 +2113,14 @@ export class WorkRuntimeManager {
         result.playerId === participant.id && result.status === "excluded" && result.sourceId === sourceId));
     if (!excluded) return;
     const versionCount = runtime.engine.snapshot().scoreboardVersions.length;
-    runtime.engine.apply({ atMs: Date.parse(event.occurredAt), sourceId, type: "exclude", stageId: stage.id, playerId: participant.id, reason: event.violationCode });
+    runtime.engine.apply({
+      atMs: Math.max(Date.parse(event.occurredAt), attemptGoWallMs ?? Number.NEGATIVE_INFINITY),
+      sourceId,
+      type: "exclude",
+      stageId: stage.id,
+      playerId: participant.id,
+      reason: event.violationCode
+    });
     this.observeParticipant(runtime.competitionId, participant.id, participant.connectionIds.at(-1) ?? participant.id, true, "excluded");
     if (runtime.engine.snapshot().scoreboardVersions.length > versionCount) {
       this.host.recordExclusionAttention(runtime.competitionId, stage.id, participant.id, sourceId, event.message);
@@ -1663,8 +2181,15 @@ export class WorkRuntimeManager {
     return candidates.find((candidate) => candidate.id === preferredStageId) ?? (candidates.length === 1 ? candidates[0] : undefined);
   }
 
-  private domainToScenarioEvent(runtime: WorkRuntime, config: CompetitionConfig, event: DomainEvent, stage?: StageConfig): ScenarioEvent | undefined {
+  private domainToScenarioEvent(
+    runtime: WorkRuntime,
+    config: CompetitionConfig,
+    event: DomainEvent,
+    stage?: StageConfig,
+    attemptGoWallMs?: number
+  ): ScenarioEvent | undefined {
     const competitionId = runtime.competitionId;
+    const resultAtMs = Math.max(Date.parse(event.occurredAt), attemptGoWallMs ?? Number.NEGATIVE_INFINITY);
     switch (event.type) {
       case "player-login":
       case "player-listed": {
@@ -1681,19 +2206,19 @@ export class WorkRuntimeManager {
       case "finish": {
         if (!stage) return undefined;
         const participant = this.observeParticipant(competitionId, event.playerName, event.connectionId, true, "finished");
-        return participant ? { atMs: Date.parse(event.occurredAt), sourceId: event.sourceId, type: "finish", stageId: stage.id, playerId: participant.id, score: event.score, elapsedMs: event.elapsedMs } : undefined;
+        return participant ? { atMs: resultAtMs, sourceId: event.sourceId, type: "finish", stageId: stage.id, playerId: participant.id, score: event.score, elapsedMs: event.elapsedMs } : undefined;
       }
       case "dnf": {
         if (!stage) return undefined;
         const participant = this.observeParticipant(competitionId, event.playerName, event.connectionId, true, event.cheat ? "excluded" : "dnf");
         return participant ? event.cheat
-          ? { atMs: Date.parse(event.occurredAt), sourceId: event.sourceId, type: "exclude", stageId: stage.id, playerId: participant.id, reason: "cheat-dnf" }
-          : { atMs: Date.parse(event.occurredAt), sourceId: event.sourceId, type: "dnf", stageId: stage.id, playerId: participant.id, reason: "dnf" }
+          ? { atMs: resultAtMs, sourceId: event.sourceId, type: "exclude", stageId: stage.id, playerId: participant.id, reason: "cheat-dnf" }
+          : { atMs: resultAtMs, sourceId: event.sourceId, type: "dnf", stageId: stage.id, playerId: participant.id, reason: "dnf" }
           : undefined;
       }
       case "cheat-changed": {
         const participant = this.observeParticipant(competitionId, event.playerName, event.connectionId, true);
-        return participant ? { atMs: Date.parse(event.occurredAt), sourceId: event.sourceId, type: "cheat", playerId: participant.id, enabled: event.enabled } : undefined;
+        return participant ? { atMs: resultAtMs, sourceId: event.sourceId, type: "cheat", playerId: participant.id, enabled: event.enabled } : undefined;
       }
       default: return undefined;
     }

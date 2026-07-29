@@ -1,5 +1,5 @@
 import { execFile, spawn, spawnSync, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { existsSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, statSync, writeFileSync, type Stats } from "node:fs";
 import { join, win32 } from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import { CONTEST_REFEREE_NAME, spectatorLoginName } from "@ballance/contracts";
@@ -9,6 +9,7 @@ export const MOCK_CLIENT_SOFT_RECONNECT_REASON = "contest-console-soft-reconnect
 const DEFAULT_STDIN_WRITE_TIMEOUT_MS = 5_000;
 const DEFAULT_FORCE_STOP_TIMEOUT_MS = 5_000;
 const DEFAULT_PROCESS_POLL_INTERVAL_MS = 50;
+const MOCK_CLIENT_LOG_CONTINUITY_TAIL_BYTES = 512;
 
 export interface MockClientLaunchOptions {
   executable: string;
@@ -20,6 +21,12 @@ export interface MockClientLaunchOptions {
 }
 
 const PRESET_SERVERS = new Set(["0.bmmo.win", "1.bmmo.win", "2.bmmo.win"]);
+
+const logFileIdentity = (stats: Stats): string =>
+  `${stats.dev}:${stats.ino}:${stats.birthtimeMs}`;
+
+const isMissingFileError = (error: unknown): boolean =>
+  error instanceof Error && "code" in error && error.code === "ENOENT";
 
 export const buildMockClientArguments = (options: MockClientLaunchOptions): readonly string[] => {
   if (PRESET_SERVERS.has(options.server.split(":")[0] ?? "") && options.server.includes(":")) throw new Error("bmmo.win presets must not include a port");
@@ -44,11 +51,14 @@ export interface ConsumeMockClientLogChunkResult {
   pending: string;
 }
 
+const normalizeMockClientLogLine = (line: string): string =>
+  line.replace(ANSI_ESCAPE_PATTERN, "").replace(/\r/g, "").trimEnd();
+
 export const consumeMockClientLogChunk = (chunk: string, pending: string): ConsumeMockClientLogChunkResult => {
   const combined = `${pending}${chunk}`;
   const segments = combined.split(/\r?\n/);
   const nextPending = segments.pop() ?? "";
-  const lines = segments.map((line) => line.replace(ANSI_ESCAPE_PATTERN, "").replace(/\r/g, "").trimEnd()).filter((line) => line.length > 0);
+  const lines = segments.map(normalizeMockClientLogLine).filter((line) => line.length > 0);
   return { lines, pending: nextPending };
 };
 
@@ -68,6 +78,32 @@ export interface MockClientExitInfo {
   code: number | null;
   signal: NodeJS.Signals | null;
   expected: boolean;
+}
+
+export interface MockClientLogBoundary {
+  readonly streamGeneration: number;
+  readonly byteOffset: number;
+}
+
+export interface MockClientLogLinePosition extends MockClientLogBoundary {
+  readonly startByteOffset: number;
+  readonly endByteOffset: number;
+  readonly trustedEvidence: boolean;
+  readonly discontinuityPrefix?: boolean;
+}
+
+interface MockClientLogFileSnapshot {
+  readonly content: Buffer;
+  readonly identity: string;
+}
+
+type MockClientLogFileReadResult =
+  | { readonly status: "present-stable"; readonly snapshot: MockClientLogFileSnapshot }
+  | { readonly status: "missing" }
+  | { readonly status: "unstable"; readonly detail?: string };
+
+export interface MockClientLogFlushOptions {
+  readonly requirePresentStable?: boolean;
 }
 
 export type MockClientSpawner = (options: MockClientLaunchOptions) => ChildProcessWithoutNullStreams;
@@ -212,11 +248,19 @@ let nextManagedProcessGeneration = 0;
 export class ManagedMockClient implements CommandTransport {
   private process: ChildProcessWithoutNullStreams | undefined;
   private processRef: ManagedMockClientProcessRef | undefined;
-  private readonly listeners = new Set<(line: string) => void>();
+  private readonly listeners = new Set<(line: string, position: MockClientLogLinePosition) => void>();
   private readonly exitListeners = new Set<(info: MockClientExitInfo) => void>();
   private readonly expectedExitProcesses = new WeakSet<ChildProcessWithoutNullStreams>();
   private logTailTimer: NodeJS.Timeout | undefined;
+  private logStreamGeneration = 0;
+  private logFileIdentity: string | undefined;
+  private logFileMissing = true;
+  private logStreamObserved = false;
   private logOffset = 0;
+  private logLineStartByteOffset = 0;
+  private logTrustedEvidenceFromByteOffset = 0;
+  private logContinuityTailStartByteOffset = 0;
+  private logContinuityTail = Buffer.alloc(0);
   private logPending = "";
   private logDecoder = new StringDecoder("utf8");
   private diagnosticTailBuffer = Buffer.alloc(0);
@@ -229,9 +273,8 @@ export class ManagedMockClient implements CommandTransport {
 
   public start(): void {
     if (this.process) throw new Error("MockClient is already running");
-    this.logOffset = existsSync(this.options.logPath) ? statSync(this.options.logPath).size : 0;
-    this.logPending = "";
-    this.logDecoder = new StringDecoder("utf8");
+    this.logStreamGeneration += 1;
+    this.initializeLogTailCursor();
     this.diagnosticTailBuffer = Buffer.alloc(0);
     this.diagnosticBytesRead = 0;
     const child = (this.dependencies.spawn ?? spawnMockClient)(this.options);
@@ -291,7 +334,7 @@ export class ManagedMockClient implements CommandTransport {
     return this.processRef === processRef && this.process?.pid === processRef.pid;
   }
 
-  public onLine(listener: (line: string) => void): () => void {
+  public onLine(listener: (line: string, position: MockClientLogLinePosition) => void): () => void {
     this.listeners.add(listener);
     return () => this.listeners.delete(listener);
   }
@@ -301,25 +344,173 @@ export class ManagedMockClient implements CommandTransport {
     return () => this.exitListeners.delete(listener);
   }
 
-  private startLogTail(): void {
-    const readNewLogLines = () => {
-      if (!existsSync(this.options.logPath)) return;
-      const content = readFileSync(this.options.logPath);
-      if (content.length < this.logOffset) {
-        this.logOffset = 0;
-        this.logPending = "";
-        this.logDecoder = new StringDecoder("utf8");
+  private readStableLogFileSnapshot(): MockClientLogFileReadResult {
+    let observedPresentFile = false;
+    let lastDetail: string | undefined;
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      try {
+        const before = statSync(this.options.logPath);
+        observedPresentFile = true;
+        const content = readFileSync(this.options.logPath);
+        const after = statSync(this.options.logPath);
+        if (logFileIdentity(before) !== logFileIdentity(after)
+          || before.size !== after.size
+          || content.length !== after.size
+          || before.mtimeMs !== after.mtimeMs) {
+          lastDetail = "the file changed while it was being read";
+          continue;
+        }
+        return {
+          status: "present-stable",
+          snapshot: { content, identity: logFileIdentity(after) }
+        };
+      } catch (error) {
+        if (isMissingFileError(error)) {
+          if (!observedPresentFile) return { status: "missing" };
+          lastDetail = "the file disappeared while it was being read";
+          continue;
+        }
+        lastDetail = error instanceof Error ? error.message : String(error);
       }
-      const chunk = this.logDecoder.write(content.subarray(this.logOffset));
-      this.logOffset = content.length;
-      const parsed = consumeMockClientLogChunk(chunk, this.logPending);
-      this.logPending = parsed.pending;
-      for (const line of parsed.lines) {
-        if (line.length > 0) for (const listener of this.listeners) listener(line);
-      }
+    }
+    return {
+      status: "unstable",
+      ...(lastDetail === undefined ? {} : { detail: lastDetail })
     };
-    readNewLogLines();
-    this.logTailTimer = setInterval(readNewLogLines, 250);
+  }
+
+  private resetLogDecodeCursor(): void {
+    this.logOffset = 0;
+    this.logLineStartByteOffset = 0;
+    this.logTrustedEvidenceFromByteOffset = 0;
+    this.logContinuityTailStartByteOffset = 0;
+    this.logContinuityTail = Buffer.alloc(0);
+    this.logPending = "";
+    this.logDecoder = new StringDecoder("utf8");
+  }
+
+  private initializeLogTailCursor(): void {
+    const result = this.readStableLogFileSnapshot();
+    this.resetLogDecodeCursor();
+    this.logStreamObserved = false;
+    if (result.status !== "present-stable") {
+      this.logFileIdentity = undefined;
+      this.logFileMissing = result.status === "missing";
+      // A present-but-unstable file may already contain arbitrary history.
+      // Unlike an initially missing file, its first later stable prefix must
+      // therefore cross a discontinuity boundary and remain audit-only.
+      this.logStreamObserved = result.status === "unstable";
+      return;
+    }
+    const { snapshot } = result;
+    this.logFileIdentity = snapshot.identity;
+    this.logFileMissing = false;
+    this.logStreamObserved = true;
+    this.logOffset = snapshot.content.length;
+    this.logLineStartByteOffset = this.logOffset;
+    this.logTrustedEvidenceFromByteOffset = this.logOffset;
+    this.updateLogContinuityTail(snapshot.content);
+  }
+
+  private hasContinuousLogPrefix(content: Buffer): boolean {
+    if (content.length < this.logOffset) return false;
+    if (this.logContinuityTail.length === 0) return true;
+    const endByteOffset = this.logContinuityTailStartByteOffset + this.logContinuityTail.length;
+    return endByteOffset <= content.length
+      && content.subarray(this.logContinuityTailStartByteOffset, endByteOffset).equals(this.logContinuityTail);
+  }
+
+  private updateLogContinuityTail(content: Buffer): void {
+    const endByteOffset = this.logOffset;
+    const startByteOffset = Math.max(0, endByteOffset - MOCK_CLIENT_LOG_CONTINUITY_TAIL_BYTES);
+    this.logContinuityTailStartByteOffset = startByteOffset;
+    this.logContinuityTail = Buffer.from(content.subarray(startByteOffset, endByteOffset));
+  }
+
+  /**
+   * Synchronously drain every complete line currently present in the managed
+   * MockClient log. High-risk local stage recovery calls this before it creates a
+   * new attempt/cycle so buffered evidence cannot be mistaken for evidence from
+   * the new referee boundary.
+   */
+  public flushLog(options: MockClientLogFlushOptions = {}): MockClientLogBoundary {
+    const result = this.readStableLogFileSnapshot();
+    if (result.status === "missing") {
+      if (this.logStreamObserved && !this.logFileMissing) {
+        this.logFileIdentity = undefined;
+        this.logFileMissing = true;
+        this.resetLogDecodeCursor();
+      }
+      if (options.requirePresentStable) {
+        throw new Error("STAGE_RECOVERY_LOG_BOUNDARY_UNAVAILABLE: managed MockClient log file is missing");
+      }
+      return { streamGeneration: this.logStreamGeneration, byteOffset: this.logOffset };
+    }
+    if (result.status === "unstable") {
+      if (options.requirePresentStable) {
+        throw new Error(
+          `STAGE_RECOVERY_LOG_BOUNDARY_UNAVAILABLE: managed MockClient log file was not stable after 3 reads${
+            result.detail === undefined ? "" : ` (${result.detail})`
+          }`
+        );
+      }
+      return { streamGeneration: this.logStreamGeneration, byteOffset: this.logOffset };
+    }
+    const { snapshot } = result;
+    const content = snapshot.content;
+    const streamReplaced = this.logStreamObserved
+      && (this.logFileMissing
+        || this.logFileIdentity !== snapshot.identity
+        || !this.hasContinuousLogPrefix(content));
+    if (streamReplaced) {
+      this.logStreamGeneration += 1;
+      this.resetLogDecodeCursor();
+      // The replacement prefix may contain arbitrarily old Ready/Go/results.
+      // Deliver it for raw audit, but do not let it become command or domain
+      // evidence. Lines genuinely appended after this stable prefix are trusted.
+      this.logTrustedEvidenceFromByteOffset = content.length;
+    }
+    this.logFileIdentity = snapshot.identity;
+    this.logFileMissing = false;
+    this.logStreamObserved = true;
+    const unread = content.subarray(this.logOffset);
+    const linePositions: Array<{ startByteOffset: number; endByteOffset: number }> = [];
+    let nextLineStartByteOffset = this.logLineStartByteOffset;
+    for (let index = 0; index < unread.length; index += 1) {
+      if (unread[index] !== 0x0a) continue;
+      const endByteOffset = this.logOffset + index + 1;
+      linePositions.push({ startByteOffset: nextLineStartByteOffset, endByteOffset });
+      nextLineStartByteOffset = endByteOffset;
+    }
+    const chunk = this.logDecoder.write(unread);
+    this.logOffset = content.length;
+    this.logLineStartByteOffset = nextLineStartByteOffset;
+    this.updateLogContinuityTail(content);
+    const combined = `${this.logPending}${chunk}`;
+    const segments = combined.split(/\r?\n/);
+    this.logPending = segments.pop() ?? "";
+    for (let index = 0; index < segments.length; index += 1) {
+      const line = normalizeMockClientLogLine(segments[index] ?? "");
+      const position = linePositions[index];
+      if (line.length === 0 || !position) continue;
+      const trustedEvidence = position.startByteOffset >= this.logTrustedEvidenceFromByteOffset;
+      for (const listener of this.listeners) {
+        listener(line, {
+          streamGeneration: this.logStreamGeneration,
+          byteOffset: position.endByteOffset,
+          startByteOffset: position.startByteOffset,
+          endByteOffset: position.endByteOffset,
+          trustedEvidence,
+          ...(trustedEvidence ? {} : { discontinuityPrefix: true })
+        });
+      }
+    }
+    return { streamGeneration: this.logStreamGeneration, byteOffset: this.logOffset };
+  }
+
+  private startLogTail(): void {
+    this.flushLog();
+    this.logTailTimer = setInterval(() => this.flushLog(), 250);
   }
 
   private stopLogTail(): void {
@@ -327,7 +518,14 @@ export class ManagedMockClient implements CommandTransport {
       clearInterval(this.logTailTimer);
       this.logTailTimer = undefined;
     }
+    this.logFileIdentity = undefined;
+    this.logFileMissing = true;
+    this.logStreamObserved = false;
     this.logOffset = 0;
+    this.logLineStartByteOffset = 0;
+    this.logTrustedEvidenceFromByteOffset = 0;
+    this.logContinuityTailStartByteOffset = 0;
+    this.logContinuityTail = Buffer.alloc(0);
     this.logPending = "";
     this.logDecoder = new StringDecoder("utf8");
   }

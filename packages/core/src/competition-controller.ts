@@ -1,4 +1,5 @@
 import { createHash, createHmac, randomUUID, timingSafeEqual } from "node:crypto";
+import type { AttemptOrigin } from "@ballance/contracts";
 
 export interface MonotonicClock {
   now(): number;
@@ -73,6 +74,8 @@ export interface AutomationAction {
   message?: string;
   manual?: boolean;
   acknowledgedAtMs?: number;
+  isolated?: boolean;
+  undelivered?: boolean;
   status: "pending" | "acknowledged" | "failed" | "uncertain" | "referee-confirmed" | "cancelled";
 }
 
@@ -97,6 +100,7 @@ export interface ControlledAttempt {
   id: string;
   stageId: string;
   attemptNumber: number;
+  origin?: AttemptOrigin;
   goAtMs: number;
   deadlineAtMs: number;
   intakeOpen: boolean;
@@ -122,7 +126,28 @@ export interface RejectedResult {
   playerId: string;
   sourceId: string;
   receivedAtMs: number;
-  reason: "no-attempt" | "wrong-stage" | "duplicate" | "intake-closed" | "deadline-passed";
+  reason: "no-attempt" | "wrong-stage" | "duplicate" | "intake-closed" | "deadline-passed" | "pre-go";
+}
+
+export interface ForceResetStageResult {
+  targetStageId: string;
+  boundaryAtMs: number;
+  voidedAttempts: readonly ControlledAttempt[];
+}
+
+export interface ForceNextStageResult {
+  previousStageId: string;
+  targetStageId: string;
+  boundaryAtMs: number;
+  closedAttempt?: ControlledAttempt;
+}
+
+export interface ExpectedCurrentStageInput {
+  expectedCurrentStageId: string;
+}
+
+export interface ExpectedNextStageInput extends ExpectedCurrentStageInput {
+  expectedTargetStageId: string;
 }
 
 export interface AutomationSnapshot {
@@ -156,6 +181,11 @@ export interface AutomationSnapshot {
   actions: readonly AutomationAction[];
 }
 
+export interface CompetitionControllerCheckpoint {
+  snapshot: AutomationSnapshot;
+  consumedRestartConfirmationNonces: readonly string[];
+}
+
 export interface AutomationParticipantState {
   participantId: string;
   online: boolean;
@@ -164,7 +194,8 @@ export interface AutomationParticipantState {
   cheatEnabledAfterCurrentOff?: boolean;
 }
 
-interface MutableAttempt extends Omit<ControlledAttempt, "results"> {
+interface MutableAttempt extends Omit<ControlledAttempt, "origin" | "results"> {
+  origin: AttemptOrigin;
   results: AutomationResult[];
 }
 
@@ -241,6 +272,15 @@ class RestartConfirmationTokens {
     }
     this.consumed.add(claims.nonce);
   }
+
+  public checkpoint(): readonly string[] {
+    return [...this.consumed];
+  }
+
+  public restore(consumedNonces: readonly string[]): void {
+    this.consumed.clear();
+    for (const nonce of consumedNonces) this.consumed.add(nonce);
+  }
 }
 
 export class CompetitionController {
@@ -305,9 +345,43 @@ export class CompetitionController {
     if (configuration.initialSnapshot) this.restoreSnapshot(configuration.initialSnapshot);
   }
 
-  private restoreSnapshot(snapshot: AutomationSnapshot): void {
+  public checkpoint(): CompetitionControllerCheckpoint {
+    return {
+      snapshot: this.snapshot(),
+      consumedRestartConfirmationNonces: this.tokenService.checkpoint()
+    };
+  }
+
+  public restore(checkpoint: CompetitionControllerCheckpoint): void {
+    this.tokenService.restore(checkpoint.consumedRestartConfirmationNonces);
+    this.restoreSnapshot(checkpoint.snapshot, true);
+  }
+
+  private restoreSnapshot(snapshot: AutomationSnapshot, forceParticipantState = false): void {
     const stageIndex = this.stages.findIndex((stage) => stage.id === snapshot.currentStageId);
     if (stageIndex < 0) throw new Error("RESTORE_STAGE_NOT_FOUND");
+    this.participantIds.clear();
+    for (const participantId of this.configuration.participants) this.participantIds.add(participantId);
+    this.online.clear();
+    this.cheat.clear();
+    this.stableSince.clear();
+    this.waiting.clear();
+    this.absent.clear();
+    this.startProtectionUsedStageIds.clear();
+    this.actions.length = 0;
+    this.undeliveredActionIds.clear();
+    this.attempts.length = 0;
+    this.incidents.length = 0;
+    this.rejectedResults.length = 0;
+    this.noticeActionId = undefined;
+    this.readyActionId = undefined;
+    this.readyActionIds.length = 0;
+    this.readyAnnouncementActionId = undefined;
+    this.cheatOffActionId = undefined;
+    this.goActionId = undefined;
+    this.lastCheatOffAcknowledgedAtMs = undefined;
+    this.permissionDeniedEvidence = undefined;
+    this.cheatEnabledAfterCurrentOff.clear();
     this.stageIndex = stageIndex;
     this.phase = snapshot.phase;
     this.pausedFromPhase = snapshot.pausedFromPhase;
@@ -345,7 +419,7 @@ export class CompetitionController {
     for (const participantId of snapshot.absentParticipants ?? []) this.absent.add(participantId);
     this.cheatWarningSent = snapshot.cheatWarningSent ?? false;
     this.cheatEnabledAfterCurrentOff.clear();
-    if (this.configuration.restoreParticipantState) {
+    if (forceParticipantState || this.configuration.restoreParticipantState) {
       for (const state of snapshot.participantStates ?? []) {
         this.online.set(state.participantId, state.online);
         this.cheat.set(state.participantId, state.cheatEnabled);
@@ -354,10 +428,18 @@ export class CompetitionController {
         if (state.cheatEnabledAfterCurrentOff) this.cheatEnabledAfterCurrentOff.add(state.participantId);
       }
     }
-    this.attempts.push(...snapshot.attempts.map((attempt) => ({ ...attempt, results: attempt.results.map((result) => ({ ...result })) })));
+    this.attempts.push(...snapshot.attempts.map((attempt) => ({
+      ...attempt,
+      origin: attempt.origin ?? "authoritative-go",
+      results: attempt.results.map((result) => ({ ...result }))
+    })));
     this.incidents.push(...snapshot.incidents.map((incident) => ({ ...incident, participantIds: [...incident.participantIds] })));
     this.rejectedResults.push(...snapshot.rejectedResults.map((result) => ({ ...result })));
     this.actions.push(...snapshot.actions.map(cloneAction));
+    for (const action of this.actions) {
+      if (action.status === "pending" && action.undelivered) this.undeliveredActionIds.add(action.id);
+      else if (action.undelivered) action.undelivered = false;
+    }
 
     const effectivePhase = this.phase === "paused" ? this.pausedFromPhase : this.phase;
     this.restartPending = snapshot.restartPending ?? effectivePhase === "restart-preparing";
@@ -369,12 +451,12 @@ export class CompetitionController {
     const goIndexes: number[] = [];
     for (let index = 0; index < this.actions.length; index += 1) {
       const candidate = this.actions[index];
-      if (candidate?.stageId === relevantStageId && candidate.kind === "go") goIndexes.push(index);
+      if (candidate?.stageId === relevantStageId && candidate.kind === "go" && !candidate.isolated) goIndexes.push(index);
     }
     const latestGoIndex = goIndexes.at(-1) ?? -1;
     const previousGoIndex = goIndexes.at(-2) ?? -1;
     const cycleStart = effectivePhase === "running" || effectivePhase === "tail-intake" ? previousGoIndex + 1 : latestGoIndex + 1;
-    const cycleActions = this.actions.slice(cycleStart).filter((action) => action.stageId === relevantStageId);
+    const cycleActions = this.actions.slice(cycleStart).filter((action) => action.stageId === relevantStageId && !action.isolated);
     const latest = (kind: AutomationActionKind): AutomationAction | undefined =>
       [...cycleActions].reverse().find((action) => action.kind === kind);
     const readyActions = cycleActions.filter((action) => action.kind === "ready");
@@ -612,14 +694,27 @@ export class CompetitionController {
     action.status = status;
     if (status === "acknowledged" || status === "referee-confirmed") {
       action.acknowledgedAtMs = this.clock.now();
-      if (action.kind === "cheat-off") { this.lastCheatOffAcknowledgedAtMs = this.clock.now(); this.resetAllCheat(); }
-      if (status === "acknowledged") this.permissionDeniedEvidence = undefined;
+      if (!action.isolated) {
+        if (action.kind === "cheat-off") { this.lastCheatOffAcknowledgedAtMs = this.clock.now(); this.resetAllCheat(); }
+        if (status === "acknowledged") this.permissionDeniedEvidence = undefined;
+      }
     }
     if ((status === "acknowledged" || status === "referee-confirmed")
       && action.kind === "go"
+      && !action.isolated
       && action.stageId === this.commandTargetStage.id) {
       this.startAttemptForStage(action.stageId);
     }
+    this.bump();
+  }
+
+  public reconcileIsolatedActionOutcome(actionId: string, status: "failed" | "uncertain"): void {
+    const action = this.actions.find((candidate) => candidate.id === actionId);
+    if (!action?.isolated || (action.status !== "cancelled" && action.status !== status)) {
+      throw new Error("ISOLATED_ACTION_RECONCILE_NOT_AVAILABLE");
+    }
+    if (action.status === status) return;
+    action.status = status;
     this.bump();
   }
 
@@ -725,6 +820,7 @@ export class CompetitionController {
     this.settleDueStageClosures(this.clock.now());
     const stageIndex = this.stages.findIndex((stage) => stage.id === stageId);
     if (stageIndex < 0) throw new Error("UNKNOWN_STAGE");
+    if (stageId !== this.commandTargetStage.id) return;
     if (this.restartPending && !this.isAcknowledged(this.goActionId)) return;
     const current = this.currentAttempt;
     if (current?.stageId === stageId && current.intakeOpen && this.isResultIntakePhase()) return;
@@ -735,6 +831,12 @@ export class CompetitionController {
   public observeCountdown(value: 3 | 2 | 1): void {
     this.settleDueStageClosures(this.clock.now());
     if (this.currentAttempt?.intakeOpen && this.isResultIntakePhase()) return;
+    const goAction = this.actions.find((action) => action.id === this.goActionId);
+    if (!goAction
+      || goAction.kind !== "go"
+      || goAction.status !== "pending"
+      || goAction.isolated
+      || goAction.stageId !== this.commandTargetStage.id) return;
     this.countdownValue = value;
     if (this.phase !== "countdown") this.phase = "countdown";
     this.bump();
@@ -751,6 +853,7 @@ export class CompetitionController {
       return reason;
     };
     if (!attempt) return reject(currentAttempt ? "wrong-stage" : "no-attempt");
+    if (receivedAtMs < attempt.goAtMs) return reject("pre-go");
     const existing = attempt.results.find((result) => result.playerId === input.playerId);
     if (existing?.status === "excluded" && input.status === "finished") {
       if (!attempt.intakeOpen) return reject("intake-closed");
@@ -805,6 +908,7 @@ export class CompetitionController {
       && candidate.stageId === input.stageId
       && !candidate.voided);
     if (!attempt) return reject("no-attempt");
+    if (input.receivedAtMs < attempt.goAtMs) return reject("pre-go");
     if (input.receivedAtMs > attempt.deadlineAtMs) return reject("deadline-passed");
     if (!attempt.intakeOpen && attempt.intakeClosedAtMs !== input.receivedAtMs) return reject("intake-closed");
     const existing = attempt.results.find((result) =>
@@ -898,6 +1002,93 @@ export class CompetitionController {
     this.bump();
   }
 
+  public markCurrentReadyStageStarted(input: ExpectedCurrentStageInput): ControlledAttempt {
+    const now = this.clock.now();
+    this.settleDueStageClosures(now);
+    this.assertExpectedCurrentStage(input.expectedCurrentStageId);
+    if (this.effectivePhase() !== "ready") throw new Error("MARK_STAGE_STARTED_NOT_AVAILABLE");
+    if (this.currentAttempt) throw new Error("MARK_STAGE_STARTED_ATTEMPT_EXISTS");
+
+    this.isolateUnfinishedActions((action) =>
+      action.stageId === this.stage.id
+      && (["bulletin", "notice", "ready", "cheat-off", "go"].includes(action.kind)
+        || action.kind === "announce" && action.message === "READY!"));
+    const attempt = this.startAttemptForStage(this.stage.id, {
+      origin: "referee-marked-started",
+      startedAtMs: now,
+      announceStart: false,
+      applyCheatExclusions: false
+    });
+    if (!attempt) throw new Error("MARK_STAGE_STARTED_ATTEMPT_EXISTS");
+    this.clearLaunchCycleState({ preserveParticipantWaitState: true, preserveStartProtection: true });
+    this.automationEnabled = false;
+    this.phase = "paused";
+    this.pausedFromPhase = "running";
+    this.nextStagePending = false;
+    this.restartPending = false;
+    this.bump();
+    return cloneAttempt(attempt);
+  }
+
+  public forceResetCurrentStage(input: ExpectedCurrentStageInput): ForceResetStageResult {
+    const now = this.clock.now();
+    this.settleDueStageClosures(now);
+    this.assertExpectedCurrentStage(input.expectedCurrentStageId);
+    const targetStageId = this.stage.id;
+    const voidedAttempts = this.attempts.filter((attempt) => attempt.stageId === targetStageId && !attempt.voided);
+    for (const attempt of voidedAttempts) {
+      attempt.voided = true;
+      this.closeIntake(attempt, now);
+    }
+    this.isolateUnfinishedActions();
+    this.clearOldCycleBlockers();
+    this.clearLaunchCycleState();
+    this.automationEnabled = true;
+    this.phase = "preparing";
+    this.pausedFromPhase = undefined;
+    this.restartPending = true;
+    this.nextStagePending = false;
+    this.planReady(this.stageIndex, now + READY_NOTICE_LEAD_MS);
+    this.queueDueReadyNotice();
+    this.bump();
+    return {
+      targetStageId,
+      boundaryAtMs: now,
+      voidedAttempts: voidedAttempts.map(cloneAttempt)
+    };
+  }
+
+  public forceAdvanceToNextStage(input: ExpectedNextStageInput): ForceNextStageResult {
+    const now = this.clock.now();
+    this.settleDueStageClosures(now);
+    this.assertExpectedCurrentStage(input.expectedCurrentStageId);
+    if (this.stageIndex >= this.stages.length - 1) {
+      throw new Error("FORCE_NEXT_STAGE_NOT_AVAILABLE");
+    }
+    if (this.stages[this.stageIndex + 1]?.id !== input.expectedTargetStageId) throw new Error("ACTION_TARGET_CHANGED");
+    const previousStageId = this.stage.id;
+    const previousAttempt = this.currentAttempt;
+    if (previousAttempt) this.closeIntake(previousAttempt, now);
+    this.isolateUnfinishedActions();
+    this.clearOldCycleBlockers();
+    this.clearLaunchCycleState();
+    this.stageIndex += 1;
+    this.automationEnabled = true;
+    this.phase = "preparing";
+    this.pausedFromPhase = undefined;
+    this.restartPending = false;
+    this.nextStagePending = false;
+    this.planReady(this.stageIndex, now + READY_NOTICE_LEAD_MS);
+    this.queueDueReadyNotice();
+    this.bump();
+    return {
+      previousStageId,
+      targetStageId: this.stage.id,
+      boundaryAtMs: now,
+      ...(previousAttempt === undefined ? {} : { closedAttempt: cloneAttempt(previousAttempt) })
+    };
+  }
+
   public endStage(reason: string): void {
     this.settleDueStageClosures(this.clock.now());
     if (!reason.trim()) throw new Error("END_STAGE_REASON_REQUIRED");
@@ -922,7 +1113,7 @@ export class CompetitionController {
       phase: this.phase,
       attempt: attempt ? { id: attempt.id, results: attempt.results } : null,
       unresolvedActions: this.actions
-        .filter((action) => action.status === "pending" || action.status === "failed" || action.status === "uncertain")
+        .filter((action) => !action.isolated && (action.status === "pending" || action.status === "failed" || action.status === "uncertain"))
         .map((action) => ({ id: action.id, status: action.status })),
       openIncidents: this.incidents.filter((incident) => incident.status === "open").map((incident) => incident.id),
       permissionDenied: Boolean(this.permissionDeniedEvidence)
@@ -948,42 +1139,29 @@ export class CompetitionController {
       attempt.voided = true;
       this.closeIntake(attempt);
     }
-    for (const action of this.actions) {
-      if (action.status !== "pending" && action.status !== "failed" && action.status !== "uncertain") continue;
-      action.status = "cancelled";
-      this.undeliveredActionIds.delete(action.id);
-    }
-    for (const incident of this.incidents) if (incident.status === "open") incident.status = "resolved";
-    this.permissionDeniedEvidence = undefined;
+    this.isolateUnfinishedActions();
+    this.clearOldCycleBlockers();
+    this.clearLaunchCycleState();
     this.automationEnabled = true;
     this.pausedFromPhase = undefined;
     this.restartPending = true;
     this.nextStagePending = false;
-    this.plannedReadyAtMs = undefined;
-    this.plannedReadyStageIndex = undefined;
-    this.noticeActionId = undefined;
-    this.waiting.clear();
-    this.absent.clear();
-    this.waitDeadlineAtMs = undefined;
-    this.readyAtMs = undefined;
-    this.readyActionId = undefined;
-    this.readyActionIds.length = 0;
-    this.readyAnnouncementActionId = undefined;
-    this.cheatOffActionId = undefined;
-    this.lastCheatOffAcknowledgedAtMs = undefined;
-    this.goActionId = undefined;
-    this.countdownValue = undefined;
-    this.cheatWarningSent = false;
-    this.cheatEnabledAfterCurrentOff.clear();
-    this.startProtectionSensitiveStageId = undefined;
-    this.startProtectionUntilMs = undefined;
     this.enterReady();
   }
 
-  public drainActions(): readonly AutomationAction[] {
+  public drainActions(predicate: (action: AutomationAction) => boolean = () => true): readonly AutomationAction[] {
     this.settleDueStageClosures(this.clock.now());
-    const result = this.actions.filter((action) => this.undeliveredActionIds.delete(action.id));
+    const result = this.actions.filter((action) => {
+      if (!this.undeliveredActionIds.has(action.id) || !predicate(action)) return false;
+      this.undeliveredActionIds.delete(action.id);
+      action.undelivered = false;
+      return true;
+    });
     return result.map(cloneAction);
+  }
+
+  public drainDispatchableActions(): readonly AutomationAction[] {
+    return this.drainActions((action) => this.automationEnabled || action.manual === true);
   }
 
   public snapshot(): AutomationSnapshot {
@@ -1117,11 +1295,14 @@ export class CompetitionController {
     }
   }
 
-  private startAttemptForStage(stageId: string): void {
+  private startAttemptForStage(
+    stageId: string,
+    options: { origin?: AttemptOrigin; startedAtMs?: number; announceStart?: boolean; applyCheatExclusions?: boolean } = {}
+  ): MutableAttempt | undefined {
     const targetStageIndex = this.stages.findIndex((stage) => stage.id === stageId);
     if (targetStageIndex < 0) throw new Error("UNKNOWN_STAGE");
     const existing = [...this.attempts].reverse().find((attempt) => attempt.stageId === stageId && !attempt.voided);
-    if (existing) return;
+    if (existing) return undefined;
     const openAttempt = [...this.attempts].reverse().find((attempt) => attempt.intakeOpen && !attempt.voided);
     if (openAttempt) this.closeIntake(openAttempt);
     this.stageIndex = targetStageIndex;
@@ -1130,24 +1311,30 @@ export class CompetitionController {
     this.plannedReadyStageIndex = undefined;
     this.noticeActionId = undefined;
     const attemptNumber = this.attempts.filter((attempt) => attempt.stageId === this.stage.id).length + 1;
-    const now = this.clock.now();
-    this.attempts.push({
-      id: randomUUID(), stageId: this.stage.id, attemptNumber, goAtMs: now,
+    const now = options.startedAtMs ?? this.clock.now();
+    const attempt: MutableAttempt = {
+      id: randomUUID(), stageId: this.stage.id, attemptNumber, origin: options.origin ?? "authoritative-go", goAtMs: now,
       deadlineAtMs: now + this.stage.timeLimitMs, intakeOpen: true, voided: false, results: []
-    });
+    };
+    this.attempts.push(attempt);
     this.phase = "running";
     this.startProtectionSensitiveStageId = this.stage.id;
     this.startProtectionUntilMs = now + this.policy.protectionWindowMs;
     this.countdownValue = undefined;
     this.cheatWarningSent = false;
     this.restartPending = false;
-    for (const participantId of this.participantIds) {
-      if (this.cheat.get(participantId) && this.lastCheatOffAcknowledgedAtMs !== undefined && this.cheatEnabledAfterCurrentOff.has(participantId)) {
-        this.acceptResult(this.attempts[this.attempts.length - 1]!, { playerId: participantId, status: "excluded", sourceId: randomUUID(), receivedAtMs: now, reason: "cheat-enabled" });
+    if (options.applyCheatExclusions ?? true) {
+      for (const participantId of this.participantIds) {
+        if (this.cheat.get(participantId) && this.lastCheatOffAcknowledgedAtMs !== undefined && this.cheatEnabledAfterCurrentOff.has(participantId)) {
+          this.acceptResult(attempt, { playerId: participantId, status: "excluded", sourceId: randomUUID(), receivedAtMs: now, reason: "cheat-enabled" });
+        }
       }
     }
-    const stageName = this.stage.displayName ?? `${this.stage.mode.toUpperCase()}${this.stage.map}`;
-    this.queueActionForStage("bulletin", this.stage, `${stageName}已起跑`, false);
+    if (options.announceStart ?? true) {
+      const stageName = this.stage.displayName ?? `${this.stage.mode.toUpperCase()}${this.stage.map}`;
+      this.queueActionForStage("bulletin", this.stage, `${stageName}已起跑`, false);
+    }
+    return attempt;
   }
 
   private acceptResult(attempt: MutableAttempt, result: AutomationResult): void {
@@ -1259,6 +1446,49 @@ export class CompetitionController {
         || !["ready", "announce", "cheat-off", "go"].includes(action.kind)) continue;
       action.status = "cancelled";
       this.undeliveredActionIds.delete(action.id);
+      action.undelivered = false;
+    }
+  }
+
+  private isolateUnfinishedActions(predicate: (action: AutomationAction) => boolean = () => true): void {
+    for (const action of this.actions) {
+      if (!predicate(action) || !["pending", "failed", "uncertain"].includes(action.status)) continue;
+      this.undeliveredActionIds.delete(action.id);
+      action.undelivered = false;
+      action.isolated = true;
+      if (action.status === "pending") action.status = "cancelled";
+    }
+  }
+
+  private clearOldCycleBlockers(): void {
+    for (const incident of this.incidents) {
+      if (incident.status === "open") incident.status = "resolved";
+    }
+    this.permissionDeniedEvidence = undefined;
+  }
+
+  private clearLaunchCycleState(options: { preserveParticipantWaitState?: boolean; preserveStartProtection?: boolean } = {}): void {
+    this.plannedReadyAtMs = undefined;
+    this.plannedReadyStageIndex = undefined;
+    this.noticeActionId = undefined;
+    if (!options.preserveParticipantWaitState) {
+      this.waiting.clear();
+      this.absent.clear();
+      this.waitDeadlineAtMs = undefined;
+    }
+    this.readyAtMs = undefined;
+    this.readyActionId = undefined;
+    this.readyActionIds.length = 0;
+    this.readyAnnouncementActionId = undefined;
+    this.cheatOffActionId = undefined;
+    this.lastCheatOffAcknowledgedAtMs = undefined;
+    this.goActionId = undefined;
+    this.countdownValue = undefined;
+    this.cheatWarningSent = false;
+    this.cheatEnabledAfterCurrentOff.clear();
+    if (!options.preserveStartProtection) {
+      this.startProtectionSensitiveStageId = undefined;
+      this.startProtectionUntilMs = undefined;
     }
   }
 
@@ -1272,6 +1502,7 @@ export class CompetitionController {
       if (!staleStageAction) continue;
       action.status = "cancelled";
       this.undeliveredActionIds.delete(action.id);
+      action.undelivered = false;
     }
   }
 
@@ -1286,6 +1517,7 @@ export class CompetitionController {
       ...(stage.displayName === undefined ? {} : { mapName: stage.displayName }),
       ...(message === undefined ? {} : { message }),
       ...(manual ? { manual: true } : {}),
+      undelivered: true,
       status: "pending"
     };
     this.actions.push(action);
@@ -1335,7 +1567,7 @@ export class CompetitionController {
   }
 
   private hasCurrentCheatOffConfirmation(stageId: string): boolean {
-    const stageActions = this.actions.filter((action) => action.stageId === stageId);
+    const stageActions = this.actions.filter((action) => action.stageId === stageId && !action.isolated);
     const previousGoIndex = stageActions.findLastIndex((action) => action.kind === "go" && this.isAcknowledged(action.id));
     return stageActions.slice(previousGoIndex + 1).some((action) => action.kind === "cheat-off" && this.isAcknowledged(action.id));
   }
@@ -1347,8 +1579,8 @@ export class CompetitionController {
   private startBlockers(): AutomationBlocker[] {
     const blockers: AutomationBlocker[] = [];
     if (this.permissionDeniedEvidence) blockers.push({ code: "PERMISSION_DENIED", severity: "critical", autoRecoverable: false, suggestion: "ContestConsole 权限不足；请在服务器修复权限后重新启动工作运行" });
-    if (this.actions.some((action) => action.status === "failed"
-      || action.status === "uncertain" && ["ready", "cheat-off", "go"].includes(action.kind))) {
+    if (this.actions.some((action) => !action.isolated && (action.status === "failed"
+      || action.status === "uncertain" && ["ready", "cheat-off", "go"].includes(action.kind)))) {
       blockers.push({ code: "COMMAND_UNCONFIRMED", severity: "critical", autoRecoverable: false, suggestion: "核对服务器现场与命令审计，禁止自动补发" });
     }
     const openIncident = this.incidents.find((incident) => incident.status === "open");
@@ -1367,6 +1599,10 @@ export class CompetitionController {
 
   private assertParticipant(participantId: string): void {
     if (!this.participantIds.has(participantId)) throw new Error(`Unknown participant: ${participantId}`);
+  }
+
+  private assertExpectedCurrentStage(expectedCurrentStageId: string): void {
+    if (this.stage.id !== expectedCurrentStageId) throw new Error("ACTION_TARGET_CHANGED");
   }
 
   private bump(): void {

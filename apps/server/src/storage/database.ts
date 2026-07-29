@@ -42,6 +42,17 @@ const MIGRATIONS: readonly string[] = [
     action TEXT
   ) STRICT;
   CREATE INDEX attention_items_competition_time ON attention_items(competition_id, occurred_at DESC);
+  `,
+  `
+  CREATE TABLE action_receipts (
+    competition_id TEXT NOT NULL REFERENCES competitions(id),
+    idempotency_key TEXT NOT NULL,
+    action_identity TEXT NOT NULL,
+    result_payload TEXT NOT NULL,
+    committed_state_version INTEGER NOT NULL,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY(competition_id, idempotency_key)
+  ) STRICT;
   `
 ];
 

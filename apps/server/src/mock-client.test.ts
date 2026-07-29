@@ -1,10 +1,10 @@
 import { type ChildProcessWithoutNullStreams } from "node:child_process";
 import { EventEmitter } from "node:events";
-import { appendFileSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdtempSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, win32 } from "node:path";
 import { PassThrough, Writable } from "node:stream";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   buildMockClientArguments,
   consumeMockClientLogChunk,
@@ -164,6 +164,294 @@ describe("MockClient launch", () => {
     const result = consumeMockClientLogChunk("\u001b[31mhello\u001b[0m\nworld\n", "");
     expect(result.lines).toEqual(["hello", "world"]);
     expect(result.pending).toBe("");
+  });
+
+  it("retains the line-start byte position when an incomplete line crosses a flushed boundary", () => {
+    const directory = mkdtempSync(join(tmpdir(), "mock-client-flush-"));
+    const logPath = join(directory, "mock-client.log");
+    writeFileSync(logPath, "", "utf8");
+    const child = new FakeChildProcess(new PassThrough());
+    const client = createManagedClient(child, 50, { ...managedOptions, workingDirectory: directory, logPath });
+    const lines: string[] = [];
+    const positions: Array<{ streamGeneration: number; startByteOffset: number; endByteOffset: number }> = [];
+    try {
+      client.start();
+      client.onLine((line, position) => {
+        lines.push(line);
+        positions.push(position);
+      });
+      appendFileSync(logPath, "old-complete\npartial", "utf8");
+      const boundary = client.flushLog();
+      expect(lines).toEqual(["old-complete"]);
+      appendFileSync(logPath, "-complete\n", "utf8");
+      client.flushLog();
+      expect(lines).toEqual(["old-complete", "partial-complete"]);
+      expect(positions[1]?.startByteOffset).toBeLessThan(boundary.byteOffset);
+      expect(positions[1]?.endByteOffset).toBeGreaterThan(boundary.byteOffset);
+
+      appendFileSync(logPath, "fresh-same-second\n", "utf8");
+      client.flushLog();
+      expect(lines).toEqual(["old-complete", "partial-complete", "fresh-same-second"]);
+      expect(positions[2]?.startByteOffset).toBeGreaterThanOrEqual(boundary.byteOffset);
+      expect(positions[2]?.streamGeneration).toBe(boundary.streamGeneration);
+    } finally {
+      child.emitExit();
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("detects truncate-and-regrow beyond the old offset from the continuity tail", () => {
+    const directory = mkdtempSync(join(tmpdir(), "mock-client-regrow-"));
+    const logPath = join(directory, "mock-client.log");
+    writeFileSync(logPath, "", "utf8");
+    const child = new FakeChildProcess(new PassThrough());
+    const client = createManagedClient(child, 50, { ...managedOptions, workingDirectory: directory, logPath });
+    const observed: Array<{
+      line: string;
+      streamGeneration: number;
+      startByteOffset: number;
+      trustedEvidence: boolean;
+    }> = [];
+    try {
+      client.start();
+      client.onLine((line, position) => observed.push({
+        line,
+        streamGeneration: position.streamGeneration,
+        startByteOffset: position.startByteOffset,
+        trustedEvidence: position.trustedEvidence
+      }));
+      appendFileSync(logPath, "old-complete\nold-incomplete-tail", "utf8");
+      const oldBoundary = client.flushLog();
+      const replacement = `replacement-first\nreplacement-${"x".repeat(oldBoundary.byteOffset + 16)}\n`;
+      expect(Buffer.byteLength(replacement, "utf8")).toBeGreaterThan(oldBoundary.byteOffset);
+
+      writeFileSync(logPath, replacement, "utf8");
+      const replacementBoundary = client.flushLog();
+
+      expect(replacementBoundary.streamGeneration).toBeGreaterThan(oldBoundary.streamGeneration);
+      expect(observed.map((entry) => entry.line)).toEqual([
+        "old-complete",
+        "replacement-first",
+        `replacement-${"x".repeat(oldBoundary.byteOffset + 16)}`
+      ]);
+      expect(observed[1]).toMatchObject({
+        streamGeneration: replacementBoundary.streamGeneration,
+        startByteOffset: 0,
+        trustedEvidence: false
+      });
+      expect(observed[2]?.trustedEvidence).toBe(false);
+
+      appendFileSync(logPath, "genuinely-appended\n", "utf8");
+      client.flushLog();
+      expect(observed.at(-1)).toMatchObject({
+        line: "genuinely-appended",
+        streamGeneration: replacementBoundary.streamGeneration,
+        trustedEvidence: true
+      });
+    } finally {
+      child.emitExit();
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("advances the log stream generation when a missing file is recreated", () => {
+    const directory = mkdtempSync(join(tmpdir(), "mock-client-recreate-"));
+    const logPath = join(directory, "mock-client.log");
+    writeFileSync(logPath, "", "utf8");
+    const child = new FakeChildProcess(new PassThrough());
+    const client = createManagedClient(child, 50, { ...managedOptions, workingDirectory: directory, logPath });
+    const observed: Array<{ line: string; streamGeneration: number; trustedEvidence: boolean }> = [];
+    try {
+      client.start();
+      client.onLine((line, position) => observed.push({
+        line,
+        streamGeneration: position.streamGeneration,
+        trustedEvidence: position.trustedEvidence
+      }));
+      appendFileSync(logPath, "before-delete\n", "utf8");
+      const oldBoundary = client.flushLog();
+
+      rmSync(logPath);
+      client.flushLog();
+      writeFileSync(logPath, "after-recreate\n", "utf8");
+      const recreatedBoundary = client.flushLog();
+
+      expect(recreatedBoundary.streamGeneration).toBeGreaterThan(oldBoundary.streamGeneration);
+      expect(observed).toEqual([
+        { line: "before-delete", streamGeneration: oldBoundary.streamGeneration, trustedEvidence: true },
+        { line: "after-recreate", streamGeneration: recreatedBoundary.streamGeneration, trustedEvidence: false }
+      ]);
+
+      appendFileSync(logPath, "after-recreate-append\n", "utf8");
+      client.flushLog();
+      expect(observed.at(-1)).toEqual({
+        line: "after-recreate-append",
+        streamGeneration: recreatedBoundary.streamGeneration,
+        trustedEvidence: true
+      });
+    } finally {
+      child.emitExit();
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("audits an atomically replaced prefix as untrusted and trusts only later appends", () => {
+    const directory = mkdtempSync(join(tmpdir(), "mock-client-replace-"));
+    const logPath = join(directory, "mock-client.log");
+    const replacementPath = join(directory, "replacement.log");
+    writeFileSync(logPath, "", "utf8");
+    const child = new FakeChildProcess(new PassThrough());
+    const client = createManagedClient(child, 50, { ...managedOptions, workingDirectory: directory, logPath });
+    const observed: Array<{ line: string; trustedEvidence: boolean; discontinuityPrefix?: boolean }> = [];
+    try {
+      client.start();
+      client.onLine((line, position) => observed.push({
+        line,
+        trustedEvidence: position.trustedEvidence,
+        ...(position.discontinuityPrefix === undefined
+          ? {}
+          : { discontinuityPrefix: position.discontinuityPrefix })
+      }));
+      appendFileSync(logPath, "before-replace\n", "utf8");
+      client.flushLog();
+
+      writeFileSync(replacementPath, "old-ready\nold-go\n", "utf8");
+      rmSync(logPath);
+      renameSync(replacementPath, logPath);
+      client.flushLog();
+      appendFileSync(logPath, "fresh-after-replace\n", "utf8");
+      client.flushLog();
+
+      expect(observed).toEqual([
+        { line: "before-replace", trustedEvidence: true },
+        { line: "old-ready", trustedEvidence: false, discontinuityPrefix: true },
+        { line: "old-go", trustedEvidence: false, discontinuityPrefix: true },
+        { line: "fresh-after-replace", trustedEvidence: true }
+      ]);
+    } finally {
+      child.emitExit();
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("allows initial log creation but fails a strict stage-recovery flush when the log is missing", () => {
+    const directory = mkdtempSync(join(tmpdir(), "mock-client-late-log-"));
+    const logPath = join(directory, "mock-client.log");
+    const child = new FakeChildProcess(new PassThrough());
+    const client = createManagedClient(child, 50, { ...managedOptions, workingDirectory: directory, logPath });
+    const observed: Array<{ line: string; trustedEvidence: boolean }> = [];
+    try {
+      expect(() => client.start()).not.toThrow();
+      client.onLine((line, position) => observed.push({ line, trustedEvidence: position.trustedEvidence }));
+
+      writeFileSync(logPath, "Connected to server OK\n", "utf8");
+      expect(() => client.flushLog({ requirePresentStable: true })).not.toThrow();
+      expect(observed).toEqual([{ line: "Connected to server OK", trustedEvidence: true }]);
+
+      rmSync(logPath);
+      expect(() => client.flushLog({ requirePresentStable: true }))
+        .toThrow(/STAGE_RECOVERY_LOG_BOUNDARY_UNAVAILABLE.*missing/);
+    } finally {
+      child.emitExit();
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("treats the first stable prefix after an unstable initial read as audit-only", () => {
+    const directory = mkdtempSync(join(tmpdir(), "mock-client-unstable-initial-"));
+    const logPath = join(directory, "mock-client.log");
+    writeFileSync(logPath, "old-go-from-unstable-prefix\n", "utf8");
+    const child = new FakeChildProcess(new PassThrough());
+    const client = createManagedClient(child, 50, { ...managedOptions, workingDirectory: directory, logPath });
+    const observed: Array<{ line: string; trustedEvidence: boolean }> = [];
+    const readStable = vi.spyOn(
+      client as unknown as { readStableLogFileSnapshot(): unknown },
+      "readStableLogFileSnapshot"
+    );
+    readStable.mockReturnValueOnce({
+      status: "unstable",
+      detail: "simulated file mutation during initial read"
+    });
+    try {
+      client.onLine((line, position) => observed.push({
+        line,
+        trustedEvidence: position.trustedEvidence
+      }));
+      client.start();
+      expect(observed).toEqual([{
+        line: "old-go-from-unstable-prefix",
+        trustedEvidence: false
+      }]);
+
+      appendFileSync(logPath, "fresh-after-stable-boundary\n", "utf8");
+      client.flushLog();
+      expect(observed.at(-1)).toEqual({
+        line: "fresh-after-stable-boundary",
+        trustedEvidence: true
+      });
+    } finally {
+      child.emitExit();
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("fails a strict stage-recovery flush when the present log cannot be read stably", () => {
+    const directory = mkdtempSync(join(tmpdir(), "mock-client-unstable-flush-"));
+    const logPath = join(directory, "mock-client.log");
+    writeFileSync(logPath, "", "utf8");
+    const child = new FakeChildProcess(new PassThrough());
+    const client = createManagedClient(child, 50, { ...managedOptions, workingDirectory: directory, logPath });
+    try {
+      client.start();
+      vi.spyOn(
+        client as unknown as { readStableLogFileSnapshot(): unknown },
+        "readStableLogFileSnapshot"
+      ).mockReturnValueOnce({
+        status: "unstable",
+        detail: "simulated mutation during all stable-read attempts"
+      });
+
+      expect(() => client.flushLog({ requirePresentStable: true }))
+        .toThrow(/STAGE_RECOVERY_LOG_BOUNDARY_UNAVAILABLE.*not stable after 3 reads/);
+    } finally {
+      child.emitExit();
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("preserves UTF-8 characters and a CRLF terminator split across flushes", () => {
+    const directory = mkdtempSync(join(tmpdir(), "mock-client-utf8-"));
+    const logPath = join(directory, "mock-client.log");
+    writeFileSync(logPath, "", "utf8");
+    const child = new FakeChildProcess(new PassThrough());
+    const client = createManagedClient(child, 50, { ...managedOptions, workingDirectory: directory, logPath });
+    const observed: Array<{ line: string; startByteOffset: number; endByteOffset: number }> = [];
+    const encoded = Buffer.from("玩家完成\r\n", "utf8");
+    try {
+      client.start();
+      client.onLine((line, position) => observed.push({
+        line,
+        startByteOffset: position.startByteOffset,
+        endByteOffset: position.endByteOffset
+      }));
+
+      appendFileSync(logPath, encoded.subarray(0, 1));
+      client.flushLog();
+      appendFileSync(logPath, encoded.subarray(1, encoded.length - 1));
+      client.flushLog();
+      expect(observed).toEqual([]);
+      appendFileSync(logPath, encoded.subarray(encoded.length - 1));
+      client.flushLog();
+
+      expect(observed).toEqual([{
+        line: "玩家完成",
+        startByteOffset: 0,
+        endByteOffset: encoded.length
+      }]);
+    } finally {
+      child.emitExit();
+      rmSync(directory, { recursive: true, force: true });
+    }
   });
 
   it("keeps list writes, log tailing and stop responsive while draining over 1 MiB from each diagnostic pipe", async () => {

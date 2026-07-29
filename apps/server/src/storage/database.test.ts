@@ -26,6 +26,7 @@ describe("SQLite storage", () => {
       expect((database.sqlite.prepare("SELECT COUNT(*) AS count FROM raw_log_events").get() as { count: number }).count).toBe(1);
       expect((database.sqlite.prepare("SELECT COUNT(*) AS count FROM domain_events").get() as { count: number }).count).toBe(1);
       expect((database.sqlite.prepare("SELECT state_version AS version FROM competitions WHERE id=?").get(competitionId) as { version: number }).version).toBe(1);
+      expect((database.sqlite.prepare("SELECT COUNT(*) AS count FROM action_receipts").get() as { count: number }).count).toBe(0);
     } finally {
       database.close();
     }

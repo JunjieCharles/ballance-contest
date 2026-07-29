@@ -391,6 +391,7 @@ export interface RuntimeSnapshot {
 export type RefereeActionId =
   | "start-work" | "reconnect-work" | "restart-work" | "enable-automation" | "pause-automation" | "notification" | "start-ready-flow" | "ready" | "cheat-off" | "manual-go"
   | "delay-ready" | "extend-stage-deadline" | "reschedule" | "reschedule-stage-deadline" | "end-stage" | "restart-stage" | "set-start-protection"
+  | "mark-stage-started" | "force-reset-stage" | "force-next-stage"
   | "kick" | "raw-command" | "finish" | "archive" | "delete";
 
 export interface ActionAvailability {
@@ -492,6 +493,7 @@ export type ConfirmationKind = "restart-stage" | "manual-action" | "manual-go" |
 export type ConfirmationIntent =
   | "reconnect-work" | "restart-work" | "start-ready-flow" | "ready" | "manual-go" | "delay-ready" | "extend-stage-deadline"
   | "reschedule" | "reschedule-stage-deadline" | "end-stage" | "restart-stage" | "set-start-protection"
+  | "mark-stage-started" | "force-reset-stage" | "force-next-stage"
   | "kick" | "raw-command" | "finish" | "finish-and-archive" | "delete"
   | "scoreboard-set-place" | "scoreboard-set-dnf";
 
@@ -535,6 +537,7 @@ export type ScoreboardAdjudicationInput =
 export type ScoreboardOverrideInput = ScoreboardAdjudicationInput;
 
 export type NotificationChannel = "bulletin" | "notice" | "announce";
+export type AttemptOrigin = "authoritative-go" | "referee-marked-started";
 
 export type CompetitionAction =
   | { type: "notification"; channel: NotificationChannel; text: string }
@@ -550,6 +553,9 @@ export type CompetitionAction =
   | { type: "extend-stage-deadline"; milliseconds: number; confirmationToken: string; impactHash: string }
   | { type: "end-stage"; confirmationToken: string; impactHash: string }
   | { type: "restart-stage"; stageId: string; confirmationToken: string; impactHash: string }
+  | { type: "mark-stage-started"; stageId: string; confirmationToken: string; impactHash: string }
+  | { type: "force-reset-stage"; stageId: string; confirmationToken: string; impactHash: string }
+  | { type: "force-next-stage"; stageId: string; confirmationToken: string; impactHash: string }
   | { type: "set-start-protection"; used: boolean; confirmationToken: string; impactHash: string }
   | { type: "participant-associate"; participantId: string; connectionId: string }
   | { type: "participant-split"; connectionId: string }
