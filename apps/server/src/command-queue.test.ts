@@ -499,7 +499,7 @@ describe("CommandQueue", () => {
     expect(names).toContain("Level_01/45°");
   });
 
-  it("encodes bulletin, notice and announce as distinct MockClient commands", async () => {
+  it("encodes bulletin, notice, announce and s as distinct MockClient commands", async () => {
     const transport = new FakeTransport();
     const queue = new CommandQueue(transport, 100);
     queue.setRefereeConnectionId("7");
@@ -508,6 +508,11 @@ describe("CommandQueue", () => {
       const text = content.join(" ");
       const label = channel === "announce" ? "Announcement" : channel === "notice" ? "Notice" : "Bulletin";
       setTimeout(() => queue.observeLine(`[07-02 20:00:00] > ${command}`), 0);
+      if (channel === "s") {
+        setTimeout(() => queue.observeLine(`[07-02 20:00:00] [999, *ContestConsole]: ${text}`), 1);
+        setTimeout(() => queue.observeLine(`[07-02 20:00:00] [7, *ContestConsole]: ${text}`), 2);
+        return;
+      }
       if (channel !== "bulletin") setTimeout(() => queue.observeLine(`[07-02 20:00:00] [${label}] (999, *ContestConsole): ${text}`), 1);
       setTimeout(() => queue.observeLine(channel === "bulletin"
         ? `[07-02 20:00:00] [${label}] *ContestConsole: ${text}`
@@ -516,7 +521,8 @@ describe("CommandQueue", () => {
     await queue.enqueue({ type: "notification", channel: "bulletin", text: "SR1 20:10" }, "bulletin");
     await queue.enqueue({ type: "notification", channel: "notice", text: "wait Player" }, "notice");
     await queue.enqueue({ type: "notification", channel: "announce", text: "READY!" }, "announce");
-    expect(transport.writes).toEqual(["bulletin SR1 20:10", "notice wait Player", "announce READY!"]);
+    await queue.enqueue({ type: "notification", channel: "s", text: "请回到大厅" }, "chat");
+    expect(transport.writes).toEqual(["bulletin SR1 20:10", "notice wait Player", "announce READY!", "s 请回到大厅"]);
   });
 
   it("keeps a business newline but protocol-escapes it into one MockClient command", async () => {

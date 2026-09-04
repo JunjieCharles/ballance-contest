@@ -118,6 +118,17 @@ const encode = (
       acknowledge: () => false
     };
     case "notification": {
+      if (action.channel === "s") {
+        const text = cleanText(action.text);
+        return {
+          command: `s ${text}`,
+          acknowledge: (line) => {
+            const expected = refereeConnectionId();
+            return expected !== undefined && (line.endsWith(`[${expected}, *ContestConsole]: ${text}`)
+              || line.endsWith(`(${expected}, *ContestConsole): ${text}`));
+          }
+        };
+      }
       const text = cleanNotificationText(action.text);
       const label = action.channel === "announce" ? "Announcement" : action.channel === "notice" ? "Notice" : "Bulletin";
       return {

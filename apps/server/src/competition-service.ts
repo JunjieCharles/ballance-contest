@@ -12,6 +12,7 @@ import {
   stageMapKind,
   validateCompetitionConfigForPublish,
   type CommandRecordView,
+  type ActiveScoringView,
   type ActionAvailability,
   type AttentionItem,
   type CompetitionAction,
@@ -28,6 +29,7 @@ import {
   type ScenarioDefinition,
   type StageConfig,
   type ScoreboardOverrideInput,
+  type ScoreboardScoringUpdateInput,
   type ScoreboardVersionView,
   type TestRunSnapshot,
   type TestScenarioSummary
@@ -130,6 +132,7 @@ interface ConfirmationBindingInput {
   operation?: "set-place" | "set-dnf";
   place?: number;
   rankPolicy?: "tie" | "shift";
+  points?: readonly number[];
 }
 
 const confirmationInputBinding = (intent: ConfirmationIntent | undefined, input: ConfirmationBindingInput): string | undefined => {
@@ -147,6 +150,8 @@ const confirmationInputBinding = (intent: ConfirmationIntent | undefined, input:
       return JSON.stringify({ playerId: input.playerId, stageId: input.stageId, operation: input.operation, place: input.place, rankPolicy: input.rankPolicy });
     case "scoreboard-set-dnf":
       return JSON.stringify({ playerId: input.playerId, stageId: input.stageId, operation: input.operation, rankPolicy: input.rankPolicy });
+    case "scoreboard-update-scoring":
+      return JSON.stringify({ points: input.points });
     default:
       return undefined;
   }
@@ -234,6 +239,7 @@ export class CompetitionService {
     this.testRuntimeManager = new TestRuntimeManager({
       getCompetition: (competitionId) => this.get(competitionId),
       getDraftConfig: (competitionId) => this.getDraftConfig(competitionId),
+      getRuntimeScoringPoints: (competitionId) => this.getPayload(competitionId).runtimeScoring?.points,
       upsertConfig: (competitionId, version, immutable, config) => this.upsertConfig(competitionId, version, immutable, config),
       getPayload: (competitionId) => this.getPayload(competitionId),
       savePayload: (competitionId, payload) => this.savePayload(competitionId, payload),
@@ -458,6 +464,7 @@ export class CompetitionService {
       scoreboardVersions,
       currentScoreboard: scoreboardVersions.at(-1)?.entries ?? [],
       scoreboardOverrides: this.scoreboardOverrideHistory(id),
+      activeScoring: this.activeScoringFor(id),
       ...(testRun === undefined ? {} : { testRun }),
       archives: payload.archives ?? []
     };
@@ -646,6 +653,7 @@ export class CompetitionService {
       operation?: "set-place" | "set-dnf";
       place?: number;
       rankPolicy?: "tie" | "shift";
+      points?: readonly number[];
       actionId?: string;
       commandId?: string;
       gapId?: string;
@@ -664,6 +672,18 @@ export class CompetitionService {
     const intent = input.intent ?? (input.kind === "scoreboard-override" && input.operation
       ? input.operation === "set-place" ? "scoreboard-set-place" : "scoreboard-set-dnf"
       : undefined);
+    if (intent === "scoreboard-update-scoring") {
+      if (input.kind !== "scoreboard-override") throw new ServiceError("CONFIRMATION_UNAVAILABLE", "计分映射必须使用成绩修订确认", 409);
+      if (competition.status === "draft") throw new ServiceError("CONFIRMATION_UNAVAILABLE", "比赛发布后才能实时修改计分映射", 409);
+      if (!input.points?.length || input.points.some((point) => !Number.isFinite(point))) {
+        throw new ServiceError("VALIDATION_FAILED", "计分映射至少需要一个名次，且分数必须是有限数字", 400);
+      }
+      const config = this.getPublishedConfig(competitionId) ?? this.getDraftConfig(competitionId);
+      if (!config.scoring.allowNegative && input.points.some((point) => point < 0)) {
+        throw new ServiceError("VALIDATION_FAILED", "当前比赛不允许负分", 400);
+      }
+      target = `${competitionId}:scoring`;
+    }
     if (intent === "reconnect-work" || intent === "restart-work") {
       target = this.workLifecycleConfirmationTarget(competitionId, intent);
       const availability = this.availableActionsFor(competitionId, runtimeSnapshot).find((candidate) => candidate.action === intent);
@@ -735,6 +755,7 @@ export class CompetitionService {
       operation: input.operation,
       place: input.place,
       rankPolicy: input.rankPolicy,
+      points: input.points,
       milliseconds: input.milliseconds,
       plannedReadyAt: input.plannedReadyAt,
       deadlineAt: input.deadlineAt,
@@ -820,7 +841,7 @@ export class CompetitionService {
           const activeTestRunId = competition.mode === "test" ? this.getPayload(competitionId).activeRunId : undefined;
           const testStages = activeTestRunId ? this.testRuntimeManager.getRuntime(competitionId, activeTestRunId).definition.stages : [];
           const base = this.getLatestScoreboard(competitionId);
-          const ledger = new ScoreboardRevisionLedger(base, Object.fromEntries([...config.stages, ...testStages].map((stage) => [stage.id, stage.scoring])));
+          const ledger = new ScoreboardRevisionLedger(base, this.scoringByStageFor(competitionId, config, testStages));
           if (input.operation === "set-place" && !Number.isInteger(input.place)) throw new ServiceError("VALIDATION_FAILED", "成绩修订缺少名次", 400);
           const revised = ledger.apply({
             playerId: input.playerId,
@@ -1044,6 +1065,16 @@ export class CompetitionService {
             irreversible: false,
             ...(scorePreview === undefined ? {} : { affectedPlayers: scorePreview.affectedPlayers })
           };
+        case "scoreboard-update-scoring":
+          return {
+            title: "实时更新全部关卡的名次—分数映射？",
+            consequences: [
+              `新映射为：${input.points?.map((point, index) => `第 ${index + 1} 名 ${point} 分`).join("，") ?? "未填写"}。`,
+              "已产生的单关成绩、总分和排名将立即重算并生成新榜单版本；已发布配置快照和旧榜单版本保持不变。",
+              "后续自动成绩和人工名次修订将继续使用这份新映射。"
+            ],
+            irreversible: false
+          };
       }
       if (input.kind === "automation-command-resolution") {
         return {
@@ -1165,6 +1196,13 @@ export class CompetitionService {
     if (old) return old as CommandRecordView;
     const competition = this.get(competitionId);
     if (competition.stateVersion !== input.expectedStateVersion) throw new ServiceError("STATE_CONFLICT", "状态版本已变化", 409, { latestStateVersion: competition.stateVersion });
+    if (input.action.type === "notification") {
+      const text = input.action.text;
+      if (!text.trim()) throw new ServiceError("VALIDATION_FAILED", "通知或聊天内容不能为空", 400);
+      if (text.length > 500 || text.includes("\r") || input.action.channel === "s" && text.includes("\n")) {
+        throw new ServiceError("VALIDATION_FAILED", input.action.channel === "s" ? "聊天内容不能换行且长度不能超过 500 个字符" : "通知内容包含无效控制字符或长度超过 500 个字符", 400);
+      }
+    }
     if (input.action.type === "resolve-observation-gap") {
       const resolutionAction = input.action;
       const gap = this.observationGapsFor(competitionId).find((candidate) => candidate.id === resolutionAction.gapId);
@@ -1590,6 +1628,7 @@ export class CompetitionService {
         competition,
         config,
         testStages: testRuntime?.definition.stages ?? [],
+        scoringByStage: this.scoringByStageFor(competitionId, config, testRuntime?.definition.stages ?? []),
         base: () => this.getLatestScoreboard(competitionId),
         existingVersions: () => this.snapshot(competitionId).scoreboardVersions,
         payload: () => this.getPayload(competitionId),
@@ -1625,6 +1664,122 @@ export class CompetitionService {
         journal: this.journal
       };
     });
+  }
+
+  public updateScoreboardScoring(
+    competitionId: string,
+    input: ScoreboardScoringUpdateInput & { expectedStateVersion: number; idempotencyKey: string }
+  ): ScoreboardVersionView {
+    const key = `${competitionId}:scoreboard-scoring:${input.idempotencyKey}`;
+    const identity = JSON.stringify({ action: "scoreboard-update-scoring", expectedStateVersion: input.expectedStateVersion, points: [...input.points] });
+    const receipt = this.actionReceipt(competitionId, input.idempotencyKey);
+    if (receipt) {
+      if (receipt.actionIdentity !== identity) throw new ServiceError("IDEMPOTENCY_CONFLICT", "该幂等键已绑定到另一项裁判操作或另一份计分映射", 409);
+      const result = JSON.parse(receipt.resultPayload) as ScoreboardVersionView;
+      this.actionIdempotencyIdentities.set(key, identity);
+      this.idempotency.set(key, result);
+      return result;
+    }
+    const claimedIdentity = this.actionIdempotencyIdentities.get(key);
+    if (claimedIdentity !== undefined && claimedIdentity !== identity) {
+      throw new ServiceError("IDEMPOTENCY_CONFLICT", "该幂等键已绑定到另一份计分映射", 409);
+    }
+    this.actionIdempotencyIdentities.set(key, identity);
+    const existing = this.idempotency.get(key);
+    if (existing) return existing as ScoreboardVersionView;
+    if (this.hasDurableCommandAudit(competitionId, input.idempotencyKey)) {
+      throw new ServiceError("IDEMPOTENCY_CONFLICT", "该幂等键已经由另一条现场命令使用", 409);
+    }
+
+    const competitionBefore = { ...this.get(competitionId) };
+    const confirmationBefore = this.confirmations.get(input.confirmationToken);
+    const activeTestRunId = competitionBefore.mode === "test"
+      ? this.getPayload(competitionId).activeRunId ?? competitionBefore.activeRunId
+      : undefined;
+    const testRuntime = activeTestRunId ? this.testRuntimeManager.getRuntime(competitionId, activeTestRunId) : undefined;
+    const workRuntime = competitionBefore.mode === "work" ? this.workRuntimeManager.get(competitionId) : undefined;
+    const testCheckpoint = testRuntime ? this.testRuntimeManager.checkpointStageRecovery(testRuntime) : undefined;
+    const workCheckpoint = workRuntime ? this.workRuntimeManager.checkpointStageRecovery(workRuntime) : undefined;
+    const journalBuffer = this.journal.beginBuffer();
+    let result: ScoreboardVersionView | undefined;
+
+    const execute = (): void => {
+      result = this.scoreboardService.updateScoring(competitionId, input, () => {
+        const competition = this.get(competitionId);
+        const config = this.getPublishedConfig(competitionId) ?? this.getDraftConfig(competitionId);
+        const testStages = testRuntime?.definition.stages ?? [];
+        const snapshot = this.snapshot(competitionId);
+        const latest = snapshot.scoreboardVersions.at(-1);
+        const base: ScoreboardVersion = latest
+          ? this.toScoreboardVersion(competitionId, latest)
+          : {
+              id: `empty-scoreboard:${competitionId}`,
+              version: 0,
+              triggerSourceId: `published-scoring:${competitionId}`,
+              stageId: config.stages[0]?.id ?? testStages[0]?.id ?? "scoring-config",
+              entries: [],
+              deterministicHash: createHash("sha256").update(`empty-scoreboard:${competitionId}`).digest("hex")
+            };
+        return {
+          competition,
+          config,
+          activeScoring: this.activeScoringFor(competitionId),
+          scoringByStage: this.scoringByStageFor(competitionId, config, testStages),
+          base: () => base,
+          existingVersions: () => snapshot.scoreboardVersions,
+          payload: () => this.getPayload(competitionId),
+          consumeConfirmation: (token, impactHash, confirmationInput) => {
+            this.consumeConfirmation(
+              competitionId,
+              "scoreboard-override",
+              token,
+              impactHash,
+              `${competitionId}:scoring`,
+              "scoreboard-update-scoring",
+              confirmationInputBinding("scoreboard-update-scoring", confirmationInput)
+            );
+          },
+          savePayload: (payload) => this.savePayload(competitionId, payload),
+          rebaseActiveEngine: (version, scoringByStage) => {
+            const workRuntime = this.workRuntimeManager.get(competitionId);
+            const engine = testRuntime?.engine ?? workRuntime?.engine;
+            if (!engine) return;
+            const minimumByStage = Object.fromEntries(Object.entries(scoringByStage).map(([stageId, scoring]) => [stageId, minimumScoringPlaceFor(scoring)]));
+            (testRuntime?.automation ?? workRuntime?.controller)?.updateMinimumScoringPlaces(minimumByStage);
+            const engineSnapshot = engine.snapshot();
+            engine.restore({
+              ...engineSnapshot,
+              scoringByStage,
+              scoreboardVersions: this.mergeEngineScoreboardVersions([...engineSnapshot.scoreboardVersions, version]),
+              currentScoreboard: version.entries
+            });
+            if (testRuntime) this.testRuntimeManager.persist(testRuntime);
+            else if (workRuntime) this.workRuntimeManager.saveSnapshot(workRuntime);
+          },
+          bumpCompetitionVersion: () => this.bumpCompetitionVersion(competitionId).stateVersion,
+          appendAttention: (item) => this.appendAttention(competitionId, item),
+          journal: this.journal
+        };
+      });
+      this.savePayload(competitionId, this.getPayload(competitionId));
+      this.saveActionReceipt(competitionId, input.idempotencyKey, identity, result);
+    };
+
+    try {
+      if (this.options.database) this.options.database.sqlite.transaction(execute).immediate();
+      else execute();
+    } catch (error) {
+      if (testRuntime && testCheckpoint) this.testRuntimeManager.restoreStageRecovery(testRuntime, testCheckpoint);
+      if (workRuntime && workCheckpoint) this.workRuntimeManager.restoreStageRecovery(workRuntime, workCheckpoint);
+      this.competitions.set(competitionId, competitionBefore);
+      if (confirmationBefore) this.confirmations.set(confirmationBefore.token, confirmationBefore);
+      journalBuffer.rollback();
+      throw error;
+    }
+    journalBuffer.commit();
+    if (!result) throw new Error("SCORING_UPDATE_RESULT_MISSING");
+    this.idempotency.set(key, result);
+    return result;
   }
 
   public recordArchive(competitionId: string, archive: CreatedArchive): void {
@@ -2058,11 +2213,14 @@ export class CompetitionService {
   private restoredEngineSnapshot(competitionId: string, automation: AutomationSnapshot): EngineSnapshot | undefined {
     const payload = this.getPayload(competitionId);
     const storedEngine = payload.work?.engine;
+    const config = this.getPublishedConfig(competitionId) ?? this.getDraftConfig(competitionId);
+    const scoringByStage = this.scoringByStageFor(competitionId, config);
     const persistedVersions = this.storedScoreboardVersions(competitionId)
       .map((version) => this.scoreboardService.toVersion(version, Math.max(1, version.entries.length)));
     if (storedEngine) {
       return {
         ...storedEngine,
+        scoringByStage,
         // Work-engine event times are parsed MockClient wall-clock timestamps.
         // Referee-marked attempts use wallClockOrigin + controller monotonic time
         // for the same reason. Only the controller snapshot is relocated to a
@@ -2088,7 +2246,8 @@ export class CompetitionService {
       })),
       scoreboardVersions: persistedVersions,
       anomalies: [],
-      currentScoreboard: persistedVersions.at(-1)?.entries ?? []
+      currentScoreboard: persistedVersions.at(-1)?.entries ?? [],
+      scoringByStage
     };
   }
 
@@ -2196,11 +2355,49 @@ export class CompetitionService {
     const published = this.getPublishedConfig(competitionId);
     if (!published) throw new ServiceError("STATE_CONFLICT", "请先发布比赛配置", 409);
     const operational = this.getDraftConfig(competitionId);
+    const runtimePoints = this.getPayload(competitionId).runtimeScoring?.points;
     return {
       ...published,
+      ...(runtimePoints === undefined ? {} : {
+        scoring: {
+          ...published.scoring,
+          contestType: "custom" as const,
+          points: [...runtimePoints],
+          minimumScoringPlace: minimumScoringPlaceFor(runtimePoints)
+        },
+        stages: published.stages.map((stage) => ({
+          ...stage,
+          scoring: [...runtimePoints],
+          minimumScoringPlace: minimumScoringPlaceFor(runtimePoints)
+        }))
+      }),
       playerAliases: operational.playerAliases,
       participants: operational.participants
     };
+  }
+
+  private activeScoringFor(competitionId: string): ActiveScoringView {
+    const runtimeScoring = this.getPayload(competitionId).runtimeScoring;
+    if (runtimeScoring) return { ...runtimeScoring, points: [...runtimeScoring.points] };
+    const config = this.getPublishedConfig(competitionId) ?? this.getDraftConfig(competitionId);
+    return {
+      source: "published",
+      revision: 0,
+      points: [...config.scoring.points],
+      minimumScoringPlace: minimumScoringPlaceFor(config.scoring.points)
+    };
+  }
+
+  private scoringByStageFor(
+    competitionId: string,
+    config: CompetitionConfig,
+    extraStages: ReadonlyArray<Pick<StageConfig, "id" | "scoring">> = []
+  ): Readonly<Record<string, readonly number[]>> {
+    const runtimePoints = this.getPayload(competitionId).runtimeScoring?.points;
+    return Object.fromEntries([...config.stages, ...extraStages].map((stage) => [
+      stage.id,
+      [...(runtimePoints ?? stage.scoring)]
+    ]));
   }
 
   private mergeScoreboardVersions(versions: readonly ScoreboardVersionView[]): ScoreboardVersionView[] {
@@ -2647,7 +2844,7 @@ export class CompetitionService {
     const resultIntakeEffective = effectivePhase === "running" || effectivePhase === "tail-intake";
     const hasRuntime = competition.mode === "work"
       ? this.workRuntimeManager.has(competitionId)
-      : Boolean(this.getPayload(competitionId).activeRunId && snapshot);
+      : Boolean((this.getPayload(competitionId).activeRunId ?? competition.activeRunId) && snapshot);
     const hasPersistedWorkRuntime = competition.mode === "work" && Boolean(this.getPayload(competitionId).work?.started);
     const startProtectionEnabled = (this.getPublishedConfig(competitionId) ?? this.getDraftConfig(competitionId)).flow.startProtectionEnabled !== false;
     const startProtectionUsed = snapshot?.startProtectionUsedStageIds?.includes(snapshot.currentStageId) ?? false;

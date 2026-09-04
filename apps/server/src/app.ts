@@ -9,7 +9,8 @@ import {
   type CompetitionConfig,
   type ConfirmationIntent,
   type HealthResponse,
-  type ScoreboardOverrideInput
+  type ScoreboardOverrideInput,
+  type ScoreboardScoringUpdateInput
 } from "@ballance/contracts";
 import { APPLICATION_VERSION } from "@ballance/core";
 import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from "fastify";
@@ -183,6 +184,7 @@ export const buildApp = async (options: BuildAppOptions): Promise<FastifyInstanc
     operation?: "set-place" | "set-dnf";
     place?: number;
     rankPolicy?: "tie" | "shift";
+    points?: readonly number[];
     actionId?: string;
     commandId?: string;
     gapId?: string;
@@ -210,6 +212,13 @@ export const buildApp = async (options: BuildAppOptions): Promise<FastifyInstanc
   }>("/api/v1/competitions/:competitionId/scoreboard/overrides", async (request) => {
     requireSession(request, true);
     return { data: service.applyScoreboardOverride(request.params.competitionId, request.body) };
+  });
+  app.post<{
+    Params: { competitionId: string };
+    Body: ScoreboardScoringUpdateInput & { expectedStateVersion: number; idempotencyKey: string };
+  }>("/api/v1/competitions/:competitionId/scoreboard/scoring", async (request) => {
+    requireSession(request, true);
+    return { data: service.updateScoreboardScoring(request.params.competitionId, request.body) };
   });
 
   app.post<{ Params: { competitionId: string }; Body: unknown }>("/api/v1/competitions/:competitionId/test-runs", async (request) => {

@@ -66,6 +66,7 @@ export interface EngineSnapshot {
   scoreboardVersions: readonly ScoreboardVersion[];
   anomalies: readonly EngineAnomaly[];
   currentScoreboard: readonly ScoreboardEntry[];
+  scoringByStage?: Readonly<Record<string, readonly number[]>>;
 }
 
 interface MutableStageResult extends Omit<StageResult, "place" | "points"> {
@@ -122,6 +123,11 @@ export class CompetitionEngine {
     this.baselines.clear();
     this.finishSequence = 0;
     this.nextScoreboardVersion = 1;
+
+    for (const [stageId, scoring] of Object.entries(snapshot.scoringByStage ?? {})) {
+      const stage = this.stages.get(stageId);
+      if (stage) this.stages.set(stageId, { ...stage, scoring: [...scoring] });
+    }
 
     this.attempts.push(...snapshot.attempts.map((attempt) => ({
       ...attempt,
@@ -396,7 +402,8 @@ export class CompetitionEngine {
       attempts: this.attempts.map((attempt) => ({ ...attempt })),
       scoreboardVersions: this.versions.map((version) => ({ ...version })),
       anomalies: this.anomalies.map((anomaly) => ({ ...anomaly })),
-      currentScoreboard: this.versions.at(-1)?.entries ?? this.buildScoreboard()
+      currentScoreboard: this.versions.at(-1)?.entries ?? this.buildScoreboard(),
+      scoringByStage: Object.fromEntries([...this.stages].map(([stageId, stage]) => [stageId, [...stage.scoring]]))
     };
   }
 }

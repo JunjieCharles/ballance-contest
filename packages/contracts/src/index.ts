@@ -442,6 +442,20 @@ export interface ScoreboardOverrideView {
   createdAt: string;
 }
 
+export interface ActiveScoringView {
+  source: "published" | "runtime-override";
+  revision: number;
+  points: readonly number[];
+  minimumScoringPlace: number;
+  updatedAt?: string;
+}
+
+export interface ScoreboardScoringUpdateInput {
+  points: readonly number[];
+  confirmationToken: string;
+  impactHash: string;
+}
+
 export interface RawClientLogLine {
   id: string;
   source: "mock-client" | "test-player" | "test-referee";
@@ -484,6 +498,7 @@ export interface CompetitionSnapshot {
   scoreboardVersions: readonly ScoreboardVersionView[];
   currentScoreboard: ScoreboardVersionView["entries"];
   scoreboardOverrides: readonly ScoreboardOverrideView[];
+  activeScoring: ActiveScoringView;
   testRun?: TestRunSnapshot;
   archives: readonly { version: number; directory: string; packagePath: string; manifestHash: string; createdAt: string }[];
 }
@@ -495,7 +510,7 @@ export type ConfirmationIntent =
   | "reschedule" | "reschedule-stage-deadline" | "end-stage" | "restart-stage" | "set-start-protection"
   | "mark-stage-started" | "force-reset-stage" | "force-next-stage"
   | "kick" | "raw-command" | "finish" | "finish-and-archive" | "delete"
-  | "scoreboard-set-place" | "scoreboard-set-dnf";
+  | "scoreboard-set-place" | "scoreboard-set-dnf" | "scoreboard-update-scoring";
 
 export interface ConfirmationSummary {
   token: string;
@@ -536,7 +551,7 @@ export type ScoreboardAdjudicationInput =
 
 export type ScoreboardOverrideInput = ScoreboardAdjudicationInput;
 
-export type NotificationChannel = "bulletin" | "notice" | "announce";
+export type NotificationChannel = "bulletin" | "notice" | "announce" | "s";
 export type AttemptOrigin = "authoritative-go" | "referee-marked-started";
 
 export type CompetitionAction =

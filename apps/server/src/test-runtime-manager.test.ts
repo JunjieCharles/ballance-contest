@@ -83,6 +83,7 @@ const harness = (): {
   const host: TestRuntimeHost = {
     getCompetition: () => ({ id: competitionId, mode: "test", stateVersion: 1 }),
     getDraftConfig: () => config,
+    getRuntimeScoringPoints: () => payload.runtimeScoring?.points,
     upsertConfig: (_id, _version, _immutable, next) => { config = next; },
     getPayload: () => payload,
     savePayload: (_id, next) => { payload = next; },

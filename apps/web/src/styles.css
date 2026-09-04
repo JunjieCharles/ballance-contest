@@ -446,6 +446,22 @@ header > span:last-of-type { margin-left: auto; font-size: 13px; }
 .scoreboard {
   min-width: 860px;
 }
+.live-scoring-editor {
+  margin: 14px 0;
+  padding: 14px;
+  border: 1px solid #cbd8e3;
+  border-radius: 8px;
+  background: #f7fafc;
+}
+.live-scoring-editor h3 { margin: 0 0 4px; }
+.live-scoring-editor p { margin: 0; }
+.scoring-point-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(92px, 1fr));
+  gap: 8px;
+  margin: 12px 0;
+}
+.scoring-point-grid label { margin: 0; }
 .copy-message { margin: 0 0 10px; color: #315e47; font-size: 13px; }
 .copy-fallback { margin-bottom: 12px; }
 .copy-fallback textarea { min-height: 130px; font-family: Consolas, monospace; white-space: pre; }

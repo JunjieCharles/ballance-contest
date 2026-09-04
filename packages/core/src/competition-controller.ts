@@ -345,6 +345,17 @@ export class CompetitionController {
     if (configuration.initialSnapshot) this.restoreSnapshot(configuration.initialSnapshot);
   }
 
+  public updateMinimumScoringPlaces(minimumByStage: Readonly<Record<string, number>>): void {
+    for (const stage of this.stages) {
+      const minimum = minimumByStage[stage.id];
+      if (minimum === undefined) continue;
+      if (!Number.isInteger(minimum) || minimum < 1) throw new Error("INVALID_MINIMUM_SCORING_PLACE");
+      stage.minimumScoringPlace = minimum;
+    }
+    const attempt = this.currentAttempt;
+    if (attempt?.intakeOpen && !attempt.voided) this.evaluateStageCompletion(attempt);
+  }
+
   public checkpoint(): CompetitionControllerCheckpoint {
     return {
       snapshot: this.snapshot(),
@@ -1339,6 +1350,10 @@ export class CompetitionController {
 
   private acceptResult(attempt: MutableAttempt, result: AutomationResult): void {
     attempt.results.push(result);
+    this.evaluateStageCompletion(attempt);
+  }
+
+  private evaluateStageCompletion(attempt: MutableAttempt): void {
     const finished = attempt.results.filter((candidate) => candidate.status === "finished").length;
     const activeCount = this.participantIds.size - this.absent.size;
     if (this.stageIndex === this.stages.length - 1) {

@@ -789,6 +789,7 @@ test("runs the 20-player sandbox from the console and edits a score without losi
   await expect(page.getByText(/虚拟时钟：0:00/)).toBeVisible();
 
   await page.getByRole("button", { name: "控制台", exact: true }).click();
+  await expect(page.getByLabel("通知类型").locator('option[value="s"]')).toHaveText("s · 公共聊天发言");
   await page.getByRole("button", { name: "启动自动化" }).click();
   await expect(page.getByText("阶段", { exact: true }).locator("..")).toContainText("准备检查");
   expect(await accelerateActiveTestRun(page, name)).toBe("review");
@@ -805,6 +806,18 @@ test("runs the 20-player sandbox from the console and edits a score without losi
   expect(rowsBefore).toBe(20);
   const firstStageResults = await page.locator(".scoreboard tbody tr td:nth-child(5) .cell-button").allTextContents();
   expect(firstStageResults.filter((value) => value.trim().startsWith("#")).length).toBeGreaterThan(12);
+  const liveScoring = page.locator(".live-scoring-editor");
+  await liveScoring.getByLabel("第 1 名分数").fill("25");
+  await liveScoring.getByRole("button", { name: "保存并实时重算" }).click();
+  const scoringConfirmation = liveScoring.getByRole("group", { name: "保存并实时重算确认" });
+  await expect(scoringConfirmation).toContainText("已产生的单关成绩、总分和排名将立即重算");
+  await scoringConfirmation.getByRole("button", { name: "确认" }).click();
+  await expect(page.getByText("运行期修订 r1")).toBeVisible();
+  await expect(liveScoring.getByLabel("第 1 名分数")).toHaveValue("25");
+  const liveSnapshot = await selectedCompetitionSnapshot(page, name);
+  expect(liveSnapshot.snapshot.activeScoring.points[0]).toBe(25);
+  expect(liveSnapshot.snapshot.publishedConfig?.scoring.points[0]).toBe(20);
+  expect(liveSnapshot.snapshot.scoreboardVersions.at(-1)?.entries).toHaveLength(rowsBefore);
   const editable = page.locator(".scoreboard .cell-button").filter({ hasText: /^#/ }).first();
   await editable.click();
   const editor = page.locator(".score-cell-editor").first();

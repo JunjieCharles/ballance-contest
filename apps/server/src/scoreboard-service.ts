@@ -1,14 +1,17 @@
 import { createHash, randomUUID } from "node:crypto";
-import type {
-  AttentionItem,
-  CompetitionConfig,
-  CompetitionLifecycleStatus,
-  CompetitionMode,
-  CompetitionSnapshot,
-  RuntimeSnapshot,
-  ScoreboardOverrideInput,
-  ScoreboardVersionView,
-  StageConfig
+import {
+  minimumScoringPlaceFor,
+  type ActiveScoringView,
+  type AttentionItem,
+  type CompetitionConfig,
+  type CompetitionLifecycleStatus,
+  type CompetitionMode,
+  type CompetitionSnapshot,
+  type RuntimeSnapshot,
+  type ScoreboardOverrideInput,
+  type ScoreboardScoringUpdateInput,
+  type ScoreboardVersionView,
+  type StageConfig
 } from "@ballance/contracts";
 import { ScoreboardRevisionLedger, type ScoreboardEntry, type ScoreboardVersion } from "@ballance/core";
 import type { EventJournal } from "./event-journal.js";
@@ -21,6 +24,7 @@ interface ScoreboardOverrideContext {
   competition: { mode: CompetitionMode; stateVersion: number };
   config: CompetitionConfig;
   testStages: ReadonlyArray<Pick<StageConfig, "id" | "scoring">>;
+  scoringByStage: Readonly<Record<string, readonly number[]>>;
   base(): ScoreboardVersion;
   existingVersions(): readonly ScoreboardVersionView[];
   payload(): ServiceSnapshotPayload;
@@ -39,6 +43,64 @@ interface ScoreboardOverrideContext {
   appendAttention(item: AttentionItem): void;
   journal: EventJournal;
 }
+
+interface ScoringUpdateContext {
+  competition: { status: CompetitionLifecycleStatus; stateVersion: number };
+  config: CompetitionConfig;
+  activeScoring: ActiveScoringView;
+  scoringByStage: Readonly<Record<string, readonly number[]>>;
+  base(): ScoreboardVersion;
+  existingVersions(): readonly ScoreboardVersionView[];
+  payload(): ServiceSnapshotPayload;
+  consumeConfirmation(token: string, impactHash: string, input: ScoreboardScoringUpdateInput): void;
+  savePayload(payload: ServiceSnapshotPayload): void;
+  rebaseActiveEngine(version: ScoreboardVersion, scoringByStage: Readonly<Record<string, readonly number[]>>): void;
+  bumpCompetitionVersion(): number;
+  appendAttention(item: AttentionItem): void;
+  journal: EventJournal;
+}
+
+const repriceEntries = (
+  entries: readonly ScoreboardEntry[],
+  scoringByStage: Readonly<Record<string, readonly number[]>>
+): ScoreboardEntry[] => {
+  const baselineRanks = new Map(entries.map((entry) => [
+    entry.playerId,
+    entry.change === null ? null : entry.rank + entry.change
+  ]));
+  const repriced = entries.map((entry) => {
+    const stages = Object.fromEntries(Object.entries(entry.stages).map(([stageId, result]) => {
+      const scoring = scoringByStage[stageId];
+      return [stageId, result.status === "finished" && scoring
+        ? { ...result, points: scoring[result.place - 1] ?? 0 }
+        : { ...result }];
+    }));
+    return {
+      ...entry,
+      points: Object.values(stages).reduce((sum, result) => sum + result.points, 0),
+      placeCounts: [...entry.placeCounts],
+      stages
+    };
+  }).sort((left, right) => {
+    if (left.points !== right.points) return right.points - left.points;
+    for (let index = 0; index < Math.max(left.placeCounts.length, right.placeCounts.length); index += 1) {
+      const difference = (right.placeCounts[index] ?? 0) - (left.placeCounts[index] ?? 0);
+      if (difference !== 0) return difference;
+    }
+    return left.playerId.localeCompare(right.playerId);
+  });
+  let rank = 1;
+  return repriced.map((entry, index) => {
+    if (index > 0) {
+      const previous = repriced[index - 1] as ScoreboardEntry;
+      const tied = previous.points === entry.points
+        && previous.placeCounts.every((count, place) => count === (entry.placeCounts[place] ?? 0));
+      if (!tied) rank = index + 1;
+    }
+    const baselineRank = baselineRanks.get(entry.playerId);
+    return { ...entry, rank, change: baselineRank === null || baselineRank === undefined ? null : baselineRank - rank };
+  });
+};
 
 export class ScoreboardService {
   private readonly idempotency = new Map<string, ScoreboardVersionView>();
@@ -156,7 +218,7 @@ export class ScoreboardService {
     const base = context.base();
     const ledger = new ScoreboardRevisionLedger(
       base,
-      Object.fromEntries([...context.config.stages, ...context.testStages].map((stage) => [stage.id, stage.scoring]))
+      context.scoringByStage
     );
     let revised: ReturnType<ScoreboardRevisionLedger["apply"]>;
     try {
@@ -219,6 +281,83 @@ export class ScoreboardService {
       participantIds: [input.playerId]
     });
     context.journal.append({ type: "scoreboard.override", competitionId, stateVersion, data: view });
+    return view;
+  }
+
+  public updateScoring(
+    competitionId: string,
+    input: ScoreboardScoringUpdateInput & { expectedStateVersion: number; idempotencyKey: string },
+    createContext: () => ScoringUpdateContext
+  ): ScoreboardVersionView {
+    const points = [...input.points];
+    const context = createContext();
+    if (context.competition.stateVersion !== input.expectedStateVersion) {
+      throw new ServiceError("STATE_CONFLICT", "状态版本已变化", 409, { latestStateVersion: context.competition.stateVersion });
+    }
+    if (context.competition.status === "draft") throw new ServiceError("STATE_CONFLICT", "比赛发布后才能实时修改计分映射", 409);
+    if (points.length === 0 || points.some((point) => !Number.isFinite(point))) {
+      throw new ServiceError("VALIDATION_FAILED", "计分映射至少需要一个名次，且分数必须是有限数字", 400);
+    }
+    if (!context.config.scoring.allowNegative && points.some((point) => point < 0)) {
+      throw new ServiceError("VALIDATION_FAILED", "当前比赛不允许负分", 400);
+    }
+    context.consumeConfirmation(input.confirmationToken, input.impactHash, { ...input, points });
+    const scoringByStage = Object.fromEntries(Object.keys(context.scoringByStage).map((stageId) => [stageId, points]));
+    const base = context.base();
+    const versionNumber = Math.max(base.version, ...context.existingVersions().map((candidate) => candidate.version)) + 1;
+    const overrideId = randomUUID();
+    const entries = repriceEntries(base.entries, scoringByStage);
+    const hashPayload = { version: versionNumber, baseVersion: base.version, triggerOverrideId: overrideId, scoringByStage, entries };
+    const version: ScoreboardVersion = {
+      id: randomUUID(),
+      version: versionNumber,
+      triggerSourceId: `scoring-override:${overrideId}`,
+      stageId: base.stageId || context.config.stages[0]?.id || "scoring-config",
+      entries,
+      deterministicHash: createHash("sha256").update(JSON.stringify(hashPayload)).digest("hex")
+    };
+    const view = scoreboardView(version);
+    const updatedAt = new Date().toISOString();
+    const activeScoring: ActiveScoringView = {
+      source: "runtime-override",
+      revision: context.activeScoring.revision + 1,
+      points,
+      minimumScoringPlace: minimumScoringPlaceFor(points),
+      updatedAt
+    };
+    const payload = context.payload();
+    context.savePayload({
+      ...payload,
+      runtimeScoring: activeScoring,
+      scoreboardRevisions: [...(payload.scoreboardRevisions ?? []), view]
+    });
+    this.saveVersions(competitionId, [version]);
+    context.rebaseActiveEngine(version, scoringByStage);
+    if (this.database) {
+      this.database.sqlite.prepare("INSERT INTO overrides(id,competition_id,target_type,target_id,before_value,after_value,reason,actor,reversed_by,created_at) VALUES (?,?,?,?,?,?,?,?,?,?)")
+        .run(
+          overrideId,
+          competitionId,
+          "scoring-config",
+          "all-stages",
+          JSON.stringify({ points: context.activeScoring.points }),
+          JSON.stringify({ points }),
+          "update-scoring-table",
+          "local-referee",
+          null,
+          updatedAt
+        );
+    }
+    const stateVersion = context.bumpCompetitionVersion();
+    context.appendAttention({
+      id: `scoreboard-scoring:${overrideId}`,
+      category: "result",
+      severity: "warning",
+      title: "实时计分映射已更新",
+      message: `第 1 至第 ${points.length} 名的分数映射已更新，全部关卡成绩和总榜已重算并生成榜单 v${versionNumber}。`,
+      occurredAt: updatedAt
+    });
+    context.journal.append({ type: "scoreboard.scoring-updated", competitionId, stateVersion, data: { activeScoring, scoreboard: view } });
     return view;
   }
 }

@@ -543,6 +543,20 @@ export function App() {
     });
   }, "成绩修订版本已生成");
 
+  const updateScoreboardScoring = (points: readonly number[], confirmation: ConfirmationSummary) => run(async () => {
+    if (!session || !snapshot) throw new Error("请选择比赛");
+    await request(`/api/v1/competitions/${snapshot.competition.id}/scoreboard/scoring`, session, {
+      method: "POST",
+      body: JSON.stringify({
+        points,
+        confirmationToken: confirmation.token,
+        impactHash: confirmation.impactHash,
+        expectedStateVersion: snapshot.competition.stateVersion,
+        idempotencyKey: crypto.randomUUID()
+      })
+    });
+  }, "实时计分映射已更新，榜单已重算");
+
   const loadScenario = async (scenarioId: string) => {
     if (!session) return;
     setScenarioDetail(await request<ScenarioDefinition>(`/api/v1/test-scenarios/${scenarioId}`, session));
@@ -658,7 +672,7 @@ export function App() {
             saving={draftSaving} saveDraft={(patch) => saveDraft(patch)} publish={() => publish()} />}
           {activeTab === "players" && <PlayersPanel snapshot={snapshot} canWrite={canWrite} performAction={(action) => performAction(action)} />}
           {activeTab === "scoreboard" && <ScoreboardPanel snapshot={snapshot} canWrite={canWrite} versionKey={scoreboardVersionKey}
-            requestConfirmation={requestConfirmation} overrideScoreboard={overrideScoreboard} downloadExport={downloadExport} />}
+            requestConfirmation={requestConfirmation} overrideScoreboard={overrideScoreboard} updateScoring={updateScoreboardScoring} downloadExport={downloadExport} />}
           {activeTab === "test" && <TestPanel snapshot={snapshot} scenarios={scenarios} scenarioDetail={scenarioDetail} canWrite={canWrite}
             loadScenario={loadScenario} createRun={createRun} advanceClock={(ms) => advanceClock(ms)} />}
           {activeTab === "archive" && <ArchivePanel snapshot={snapshot} canWrite={canWrite} versionKey={versionKey}
@@ -761,7 +775,7 @@ function ConsolePanel({ snapshot, canWrite, versionKey, startWork, enableAutomat
       {workConnection && <WorkConnectionPanel connection={workConnection} />}
       <h3>面向玩家的通知</h3>
       <div className="inline-form notification-form"><select aria-label="通知类型" value={channel} onChange={(event) => setChannel(event.target.value as NotificationChannel)}>
-        <option value="bulletin">Bulletin · 顶部状态</option><option value="notice">Notice · 普通通知</option><option value="announce">Announce · 中央重要通知</option>
+        <option value="bulletin">Bulletin · 顶部状态</option><option value="notice">Notice · 普通通知</option><option value="announce">Announce · 中央重要通知</option><option value="s">s · 公共聊天发言</option>
       </select><input aria-label="通知文本" value={notification} onChange={(event) => setNotification(event.target.value)} /><ActionButton runtime={runtime} action="notification" canWrite={canWrite} disabled={!notification.trim()} disabledReason="请输入通知文本" onClick={() => void performAction({ type: "notification", channel, text: notification })}>发送</ActionButton></div>
       <h3>流程控制</h3>
       <div className="button-row action-row">
@@ -1081,10 +1095,11 @@ function PlayersPanel({ snapshot, canWrite, performAction }: { snapshot: Competi
   </section>;
 }
 
-function ScoreboardPanel({ snapshot, canWrite, versionKey, requestConfirmation, overrideScoreboard, downloadExport }: {
+function ScoreboardPanel({ snapshot, canWrite, versionKey, requestConfirmation, overrideScoreboard, updateScoring, downloadExport }: {
   snapshot: CompetitionSnapshot; canWrite: boolean; versionKey: string;
   requestConfirmation(kind: ConfirmationKind, target: string, requestPayload?: unknown): Promise<ConfirmationSummary>;
   overrideScoreboard(draft: ScoreDraft, confirmation: ConfirmationSummary): Promise<void>;
+  updateScoring(points: readonly number[], confirmation: ConfirmationSummary): Promise<void>;
   downloadExport(format: "csv" | "xlsx"): Promise<void>;
 }) {
   const editPermissions = new Map(snapshot.runtime.scoreEditPermissions.map((permission) => [permission.stageId, permission]));
@@ -1110,6 +1125,8 @@ function ScoreboardPanel({ snapshot, canWrite, versionKey, requestConfirmation, 
   };
   return <section className="panel"><div className="panel-title-row"><h2>实时成绩</h2><div className="button-row compact"><button onClick={() => void copyScoreboard()}>复制表格</button><button onClick={() => void downloadExport("xlsx")}>XLSX</button><button onClick={() => void downloadExport("csv")}>CSV</button></div></div>
     <p className="muted">当前关成绩由现场事件持续接收；进入下一关 Ready 前 1 分钟的准备阶段后可修订此前关卡，比赛结束后可修订全部关卡。</p>
+    <LiveScoringEditor key={`${snapshot.competition.id}:${snapshot.activeScoring.revision}:${snapshot.activeScoring.points.join(",")}`}
+      snapshot={snapshot} canWrite={canWrite} versionKey={versionKey} requestConfirmation={requestConfirmation} updateScoring={updateScoring} />
     {copyMessage && <p className="copy-message" role="status">{copyMessage}</p>}
     {copyFallback && <label className="copy-fallback">手工复制表格<textarea aria-label="手工复制表格" readOnly value={copyFallback} onFocus={(event) => event.currentTarget.select()} /></label>}
     <table className="scoreboard"><thead><tr>{table.headers.map((header, index) => <th key={`${index}:${header}`}>{header}</th>)}</tr></thead><tbody>{table.rows.map((row) => {
@@ -1119,7 +1136,7 @@ function ScoreboardPanel({ snapshot, canWrite, versionKey, requestConfirmation, 
       {row.cells.slice(0, 4).map((cell, index) => <td className={cell.style === "plain" ? "" : cell.style} key={`${entry.playerId}:fixed:${index}`}>{cell.text}</td>)}
       {snapshot.config.stages.map((stage, index) => {
         const permission = editPermissions.get(stage.id);
-        return <EditableScoreCell key={stage.id} value={entry.stages[stage.id] as { status?: string; place?: number; points?: number; reason?: string } | undefined} stage={stage} playerId={entry.playerId} playerName={entry.displayName}
+        return <EditableScoreCell key={stage.id} value={entry.stages[stage.id] as { status?: string; place?: number; points?: number; reason?: string } | undefined} stage={{ ...stage, scoring: snapshot.activeScoring.points, minimumScoringPlace: snapshot.activeScoring.minimumScoringPlace }} playerId={entry.playerId} playerName={entry.displayName}
           display={row.cells[index + 4] as ScoreboardTableCell}
           canWrite={canWrite && Boolean(permission?.editable)} {...(!canWrite ? { disabledReason: "实时连接或控制权不可用" } : permission?.reason ? { disabledReason: permission.reason } : {})}
           versionKey={versionKey} requestConfirmation={requestConfirmation} save={(draft, confirmation) => overrideScoreboard(draft, confirmation)} />;
@@ -1132,8 +1149,40 @@ function ScoreboardPanel({ snapshot, canWrite, versionKey, requestConfirmation, 
   </section>;
 }
 
+function LiveScoringEditor({ snapshot, canWrite, versionKey, requestConfirmation, updateScoring }: {
+  snapshot: CompetitionSnapshot; canWrite: boolean; versionKey: string;
+  requestConfirmation(kind: ConfirmationKind, target: string, requestPayload?: unknown): Promise<ConfirmationSummary>;
+  updateScoring(points: readonly number[], confirmation: ConfirmationSummary): Promise<void>;
+}) {
+  const activeScoringSignature = snapshot.activeScoring.points.join(",");
+  const [livePoints, setLivePoints] = useState<number[]>([...snapshot.activeScoring.points]);
+  const liveScoringValid = livePoints.length > 0 && livePoints.every(Number.isFinite)
+    && (snapshot.config.scoring.allowNegative || livePoints.every((point) => point >= 0));
+  const liveScoringDirty = activeScoringSignature !== livePoints.join(",");
+  return <section className="live-scoring-editor">
+    <div className="panel-title-row"><div><h3>实时计分映射</h3><p className="muted">发布后可调整全部关卡的名次—分数映射。保存会立即重算已有成绩并生成新榜单版本，不改写发布快照或旧榜单。</p></div><span className="mode-badge">{snapshot.activeScoring.source === "runtime-override" ? `运行期修订 r${snapshot.activeScoring.revision}` : "发布配置"}</span></div>
+    <div className="scoring-point-grid">{livePoints.map((point, index) => <label key={index}>第 {index + 1} 名<input aria-label={`第 ${index + 1} 名分数`} type="number" value={Number.isFinite(point) ? point : ""} onChange={(event) => {
+      const next = [...livePoints];
+      next[index] = event.target.value === "" ? Number.NaN : Number(event.target.value);
+      setLivePoints(next);
+    }} /></label>)}</div>
+    <div className="button-row compact">
+      <button className="ghost" disabled={!canWrite || snapshot.competition.status === "draft"} onClick={() => setLivePoints([...livePoints, 0])}>增加名次</button>
+      <button className="ghost" disabled={!canWrite || snapshot.competition.status === "draft" || livePoints.length <= 1} onClick={() => setLivePoints(livePoints.slice(0, -1))}>删除末位</button>
+      <ConfirmButton label="保存并实时重算" kind="scoreboard-override" target={`${snapshot.competition.id}:scoring`}
+        versionKey={`${versionKey}:${livePoints.join(",")}`} requestPayload={{ intent: "scoreboard-update-scoring", points: livePoints }}
+        disabled={!canWrite || snapshot.competition.status === "draft" || !liveScoringValid || !liveScoringDirty}
+        disabledReason={snapshot.competition.status === "draft" ? "请先发布比赛" : !liveScoringValid ? "至少保留一个名次，分数必须有效且符合负分设置" : !liveScoringDirty ? "计分映射没有变化" : !canWrite ? "实时连接或控制权不可用" : undefined}
+        requestConfirmation={requestConfirmation} onConfirm={(confirmation) => updateScoring(livePoints, confirmation)} />
+    </div>
+  </section>;
+}
+
 const formatOverrideValue = (value: unknown): string => {
   if (!value) return "空成绩";
+  if (typeof value === "object" && value !== null && Array.isArray((value as { points?: unknown }).points)) {
+    return (value as { points: readonly number[] }).points.map((point, index) => `第 ${index + 1} 名 ${point} 分`).join("，");
+  }
   const result = value as { status?: string; place?: number; points?: number };
   if (result.status === "dnf") return "DNF";
   if (result.status === "excluded") return "排除计分";

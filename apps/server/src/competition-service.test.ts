@@ -61,6 +61,27 @@ describe("CompetitionService dynamic participants", () => {
     await service.close();
   });
 
+  it("simulates the s public-chat command without leaving test mode", async () => {
+    const service = new CompetitionService();
+    const record = service.create({ name: "Test chat", mode: "test", idempotencyKey: "test-chat" });
+    service.publish(record.id, 0, "publish-test-chat");
+    const manager = testRuntimeManager(service);
+    const scenario = manager.listScenarios()[0];
+    if (!scenario) throw new Error("missing test scenario");
+    const created = service.createTestRunFromScenario(record.id, scenario.id);
+    const runtime = manager.getRuntime(record.id, created.runId);
+    const before = service.snapshot(record.id);
+    const result = await service.performAction(record.id, {
+      expectedStateVersion: before.competition.stateVersion,
+      idempotencyKey: "send-test-chat",
+      action: { type: "notification", channel: "s", text: "请回到大厅" }
+    });
+    expect(result).toMatchObject({ actionType: "notification", status: "simulated", simulated: true });
+    expect(service.getRawClientLogs(record.id).at(-1)?.rawLine).toContain(`[${runtime.definition.refereeConnectionId}, *ContestConsole]: 请回到大厅`);
+    expect(service.snapshot(record.id).runtime.attentionItems).toContainEqual(expect.objectContaining({ title: "裁判已发送公共聊天", message: "请回到大厅" }));
+    await service.close();
+  });
+
   it("keeps work automation on the fixed Ready cadence", async () => {
     const service = new CompetitionService();
     const record = service.create({ name: "Realtime work", mode: "work", idempotencyKey: "realtime-work" });
@@ -2921,6 +2942,98 @@ describe("CompetitionService dynamic participants", () => {
     expect(first.target).toBe(second.target);
     expect(first.target.startsWith("same.server ")).toBe(true);
     await service.close();
+  });
+
+  it("recalculates published scores with a live scoring map and restores it for later results", async () => {
+    dataRoot = mkdtempSync(join(tmpdir(), "ballance-live-scoring-"));
+    database = openDatabase(join(dataRoot, "console.sqlite"));
+    const service = new CompetitionService(undefined, { database, dataRoot });
+    const record = service.create({ name: "Live scoring", mode: "work", idempotencyKey: "live-scoring" });
+    service.updateDraft(record.id, {
+      expectedStateVersion: 0,
+      idempotencyKey: "live-scoring-stage",
+      scoring: { contestType: "custom", points: [5, 3], minimumScoringPlace: 2, allowNegative: false },
+      stages: [{ id: "sr-1", order: 1, label: "SR1", level: 1, mode: "SR", mapKind: "official", timeLimitMs: 600_000, scoring: [5, 3], minimumScoringPlace: 2 }]
+    });
+    service.publish(record.id, 1, "publish-live-scoring");
+    const manager = workRuntimeManager(service);
+    const runtime = manager.makeRuntime(record.id, service.snapshot(record.id).publishedConfig as CompetitionConfig, { write: async () => undefined });
+    manager.register(record.id, runtime);
+    establishAuthenticatedReferee(runtime);
+    manager.ingestLine(runtime, "[07-03 20:00:00] [7, *ContestConsole]: Level 01 - Go!");
+    manager.ingestLine(runtime, "[07-03 20:00:01] (#10, Alpha) finished Level 01 in 1st place (score: 100; real time: 00:00:01.000).");
+    manager.ingestLine(runtime, "[07-03 20:00:02] (#11, Beta) finished Level 01 in 2nd place (score: 90; real time: 00:00:02.000).");
+    expect(service.snapshot(record.id).currentScoreboard.map((entry) => entry.points)).toEqual([5, 3]);
+
+    const beforeUpdate = service.snapshot(record.id);
+    const confirmation = service.createConfirmation(record.id, {
+      kind: "scoreboard-override",
+      intent: "scoreboard-update-scoring",
+      target: `${record.id}:scoring`,
+      points: [10, 7, 4]
+    });
+    const updateInput = {
+      expectedStateVersion: beforeUpdate.competition.stateVersion,
+      idempotencyKey: "update-live-scoring",
+      points: [10, 7, 4],
+      confirmationToken: confirmation.token,
+      impactHash: confirmation.impactHash
+    };
+    const receiptWrite = vi.spyOn(service as unknown as {
+      saveActionReceipt(...args: unknown[]): void;
+    }, "saveActionReceipt").mockImplementationOnce(() => { throw new Error("simulated receipt failure"); });
+    expect(() => service.updateScoreboardScoring(record.id, updateInput)).toThrow("simulated receipt failure");
+    expect(service.snapshot(record.id)).toMatchObject({
+      competition: { stateVersion: beforeUpdate.competition.stateVersion },
+      activeScoring: { source: "published", points: [5, 3] }
+    });
+    expect(service.snapshot(record.id).currentScoreboard.map((entry) => entry.points)).toEqual([5, 3]);
+    receiptWrite.mockRestore();
+
+    const revised = service.updateScoreboardScoring(record.id, updateInput);
+    expect(revised.entries.map((entry) => entry.points)).toEqual([10, 7]);
+    expect(revised.entries.map((entry) => entry.change)).toEqual([null, null]);
+    const updated = service.snapshot(record.id);
+    expect(updated.activeScoring).toMatchObject({ source: "runtime-override", revision: 1, points: [10, 7, 4] });
+    expect(updated.publishedConfig?.scoring.points).toEqual([5, 3]);
+    expect(updated.scoreboardOverrides[0]).toMatchObject({ targetType: "scoring-config", targetId: "all-stages" });
+
+    manager.saveSnapshot(runtime);
+    await service.close();
+    const restoredService = new CompetitionService(undefined, { database, dataRoot });
+    const restoredManager = workRuntimeManager(restoredService);
+    const replayed = restoredService.updateScoreboardScoring(record.id, {
+      expectedStateVersion: beforeUpdate.competition.stateVersion,
+      idempotencyKey: "update-live-scoring",
+      points: [10, 7, 4],
+      confirmationToken: confirmation.token,
+      impactHash: confirmation.impactHash
+    });
+    expect(replayed.id).toBe(revised.id);
+    expect(restoredService.snapshot(record.id).scoreboardVersions.filter((version) => version.id === revised.id)).toHaveLength(1);
+    expect(() => restoredService.updateScoreboardScoring(record.id, {
+      expectedStateVersion: beforeUpdate.competition.stateVersion,
+      idempotencyKey: "update-live-scoring",
+      points: [9, 6, 3],
+      confirmationToken: confirmation.token,
+      impactHash: confirmation.impactHash
+    })).toThrow(/幂等键/);
+    const restoredRuntime = restoredManager.makeRuntime(record.id, restoredService.snapshot(record.id).publishedConfig as CompetitionConfig, { write: async () => undefined });
+    restoredManager.register(record.id, restoredRuntime);
+    const attempt = restoredRuntime.engine.snapshot().attempts[0];
+    if (!attempt) throw new Error("missing restored attempt");
+    restoredRuntime.engine.apply({
+      type: "finish",
+      sourceId: "finish-after-scoring-restore",
+      atMs: attempt.goAtMs + 3_000,
+      stageId: "sr-1",
+      playerId: "Gamma",
+      score: 80,
+      elapsedMs: 3_000
+    });
+    expect(restoredRuntime.engine.snapshot().currentScoreboard.find((entry) => entry.playerId === "Gamma")?.points).toBe(4);
+    expect(restoredService.snapshot(record.id).activeScoring.points).toEqual([10, 7, 4]);
+    await restoredService.close();
   });
 
   it("allows multiple work competitions but blocks starting two on the same server", () => {

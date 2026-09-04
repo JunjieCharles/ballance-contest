@@ -8,6 +8,7 @@ import {
   type CommandRecordView,
   type CompetitionConfig,
   type CompetitionSnapshot,
+  type NotificationChannel,
   type ScenarioDefinition,
   type ScenarioEvent,
   type TestRunSnapshot,
@@ -86,8 +87,9 @@ interface RealtimeTestTimer {
 }
 
 export interface TestRuntimeHost {
-  getCompetition(competitionId: string): { id: string; mode: "work" | "test"; stateVersion: number };
+  getCompetition(competitionId: string): { id: string; mode: "work" | "test"; stateVersion: number; activeRunId?: string };
   getDraftConfig(competitionId: string): CompetitionConfig;
+  getRuntimeScoringPoints(competitionId: string): readonly number[] | undefined;
   upsertConfig(competitionId: string, version: number, immutable: boolean, config: CompetitionConfig): void;
   getPayload(competitionId: string): ServiceSnapshotPayload;
   savePayload(competitionId: string, payload: ServiceSnapshotPayload): void;
@@ -314,7 +316,7 @@ export class TestRuntimeManager {
   }
 
   public activeRuntime(competitionId: string): TestRuntime | undefined {
-    const runId = this.host.getPayload(competitionId).activeRunId;
+    const runId = this.host.getPayload(competitionId).activeRunId ?? this.host.getCompetition(competitionId).activeRunId;
     return runId ? this.getRuntime(competitionId, runId) : undefined;
   }
 
@@ -504,10 +506,29 @@ export class TestRuntimeManager {
     return controlledAttempt;
   }
 
-  public recordManualNotification(competitionId: string, channel: "bulletin" | "notice" | "announce", text: string): void {
+  public recordManualNotification(competitionId: string, channel: NotificationChannel, text: string): void {
     const runtime = this.activeRuntime(competitionId);
     if (!runtime) throw new ServiceError("NOT_FOUND", "请先创建测试运行", 404);
     const snapshot = runtime.automation.snapshot();
+    if (channel === "s") {
+      const occurredAt = this.testOccurredAt(runtime, runtime.automationClock.now());
+      this.host.appendRawLog(
+        competitionId,
+        "test-referee",
+        `${this.testLogPrefix(runtime, runtime.automationClock.now())} [${runtime.definition.refereeConnectionId}, *ContestConsole]: ${text}`,
+        occurredAt
+      );
+      this.host.appendAttention(competitionId, {
+        id: `manual-chat:${randomUUID()}`,
+        category: "flow",
+        severity: "info",
+        title: "裁判已发送公共聊天",
+        message: text,
+        occurredAt,
+        stageId: snapshot.currentStageId
+      });
+      return;
+    }
     const automationAction: AutomationAction = {
       id: randomUUID(), kind: channel, idempotencyKey: `manual-notification:${randomUUID()}`,
       createdAtMs: runtime.automationClock.now(), stageId: snapshot.currentStageId,
@@ -561,6 +582,7 @@ export class TestRuntimeManager {
     >
   ): TestRuntime {
     const config = this.host.getDraftConfig(competitionId);
+    const runtimeScoring = this.host.getRuntimeScoringPoints(competitionId);
     const automationClock = new VirtualClock(persisted?.automation?.clockNowMs ?? 0);
     const automation = new CompetitionController({
       competitionId,
@@ -571,7 +593,7 @@ export class TestRuntimeManager {
         ...(stage.displayName === undefined ? {} : { displayName: stage.displayName }),
         mode: stage.mode.toLowerCase() as "sr" | "hs",
         timeLimitMs: stage.timeLimitMs,
-        minimumScoringPlace: stage.minimumScoringPlace
+        minimumScoringPlace: runtimeScoring ? minimumScoringPlaceFor(runtimeScoring) : stage.minimumScoringPlace
       })),
       policy: automationPolicyFor(config),
       wallClockOriginMs: Date.parse(createdAt),
@@ -579,11 +601,14 @@ export class TestRuntimeManager {
         ? {}
         : { initialSnapshot: persisted.automation, restoreParticipantState: true })
     }, automationClock);
-    const engine = new CompetitionEngine(definition);
+    const effectiveDefinition = runtimeScoring
+      ? { ...definition, stages: definition.stages.map((stage) => ({ ...stage, scoring: [...runtimeScoring], minimumScoringPlace: minimumScoringPlaceFor(runtimeScoring) })) }
+      : definition;
+    const engine = new CompetitionEngine(effectiveDefinition);
     if (persisted?.engine) engine.restore(persisted.engine);
     const runtime: TestRuntime = {
-      id, competitionId, definition,
-      runner: new ScenarioRunner(definition),
+      id, competitionId, definition: effectiveDefinition,
+      runner: new ScenarioRunner(effectiveDefinition),
       engine,
       automationClock,
       automation,
@@ -700,7 +725,8 @@ export class TestRuntimeManager {
     this.host.setActiveRun(runtime.competitionId, runtime.id);
   }
 
-  private configToScenarioDefinition(config: CompetitionConfig): ScenarioDefinition {
+  private configToScenarioDefinition(competitionId: string, config: CompetitionConfig): ScenarioDefinition {
+    const runtimeScoring = this.host.getRuntimeScoringPoints(competitionId);
     return {
       schemaVersion: 1,
       kind: "scripted-replay",
@@ -719,8 +745,8 @@ export class TestRuntimeManager {
         ...(stage.mapHash === undefined ? {} : { mapHash: stage.mapHash }),
         displayName: stage.label,
         timeLimitMs: stage.timeLimitMs,
-        scoring: [...stage.scoring],
-        minimumScoringPlace: stage.minimumScoringPlace
+        scoring: [...(runtimeScoring ?? stage.scoring)],
+        minimumScoringPlace: runtimeScoring ? minimumScoringPlaceFor(runtimeScoring) : stage.minimumScoringPlace
       })),
       events: [],
       expected: { attempts: 0, scoreboardVersions: 0 }
@@ -729,7 +755,7 @@ export class TestRuntimeManager {
 
   private materializeBehaviorScenario(competitionId: string, behavior: ScenarioDefinition): ScenarioDefinition {
     const config = this.host.getDraftConfig(competitionId);
-    const base = this.configToScenarioDefinition(config);
+    const base = this.configToScenarioDefinition(competitionId, config);
     const stages = base.stages;
     return {
       ...behavior,

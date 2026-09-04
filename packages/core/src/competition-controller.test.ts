@@ -343,6 +343,27 @@ describe("CompetitionController", () => {
     expect(controller.snapshot()).toMatchObject({ phase: "ready", currentStageId: "s2" });
   });
 
+  it("re-evaluates the next-stage threshold when live scoring changes the last scoring place", () => {
+    const clock = new FakeClock();
+    const controller = new CompetitionController(configuration({
+      policy: {
+        announcementLeadMs: 0,
+        readyBufferMs: 1_000,
+        reconnectStableMs: 15_000,
+        intermissionMs: 120_000,
+        protectionWindowMs: 15_000
+      }
+    }), clock);
+    connectAll(controller);
+    enterRunning(controller, clock);
+    for (const playerId of ["p1", "p2"]) {
+      expect(controller.recordResult({ stageId: "s1", playerId, status: "finished", sourceId: `before-live-scoring-${playerId}` })).toBe("accepted");
+    }
+    expect(controller.snapshot().phase).toBe("running");
+    controller.updateMinimumScoringPlaces({ s1: 2, s2: 2 });
+    expect(controller.snapshot()).toMatchObject({ phase: "tail-intake", plannedReadyStageId: "s2" });
+  });
+
   it("attaches finish evidence to an exclusion only while that exact attempt is still open", () => {
     const makeController = (): { controller: CompetitionController; clock: FakeClock } => {
       const clock = new FakeClock();
