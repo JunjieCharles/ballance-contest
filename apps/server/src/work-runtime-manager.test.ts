@@ -373,6 +373,60 @@ describe("WorkRuntimeManager connection lifecycle", () => {
     return { service, competitionId: competition.id, clients, lifecycle };
   };
 
+  it("connects a draft for players, publishes the final configuration, and unlocks the independent address only after manual disconnect", async () => {
+    const context = setup([{ connectionId: "101", listEntries: [{ connectionId: "11", name: "Alice" }, { connectionId: "101", name: "*ContestConsole" }] }], {}, () => {});
+    const { service: active, competitionId: id } = context;
+    active.updateConnectionSettings(id, { server: "2.bmmo.win", expectedStateVersion: 0, idempotencyKey: "address" });
+    const connect = { expectedStateVersion: 1, idempotencyKey: "connect" };
+    active.startWorkMode(id, connect);
+    active.startWorkMode(id, connect);
+    expect(context.clients).toHaveLength(1);
+    await vi.waitFor(() => expect(active.snapshot(id).runtime.workConnection?.status).toBe("healthy"));
+    expect(active.snapshot(id).config.participants).toEqual(expect.arrayContaining([expect.objectContaining({ id: "Alice", online: true })]));
+    expect(active.snapshot(id).connectionSettings).toEqual({ server: "2.bmmo.win", locked: true });
+    expect(context.clients[0]?.writes.every(command => command === "list")).toBe(true);
+    await expect(active.enableAutomation(id, {})).rejects.toThrow("发布");
+    expect(() => active.updateConnectionSettings(id, { server: "1.bmmo.win", expectedStateVersion: 1, idempotencyKey: "locked" })).toThrow("手动断开");
+    context.clients[0]?.emitRawLine("[07-22 12:00:01] *ContestConsole [101]: Level 01 - Go!");
+    expect(managerFor(active).get(id)?.controller.snapshot().attempts).toHaveLength(0);
+    await managerFor(active).reconcileParticipantsNow(id);
+    expect(context.clients[0]?.writes.filter(command => command === "list").length).toBeGreaterThan(1);
+
+    const stages = [{ ...active.snapshot(id).config.stages[0]!, id: "final-stage", timeLimitMs: 123_000, mapKind: "custom" as const, mapName: "Final map", mapHash: "a".repeat(32) }];
+    active.updateDraft(id, { stages, expectedStateVersion: 1, idempotencyKey: "final-config" });
+    active.publish(id, 2, "publish");
+    expect(active.snapshot(id).runtime.currentStageId).toBe("final-stage");
+    expect(active.snapshot(id).runtime.automationEnabled).toBe(false);
+    await vi.waitFor(() => expect(context.clients[0]?.writes.some(command => command.startsWith("setmap "))).toBe(true));
+    await vi.waitFor(() => expect(managerFor(active).get(id)?.mapRegistration).toBeUndefined(), { timeout: 5_000 });
+    const published = active.snapshot(id).publishedConfig;
+    const confirmation = active.createConfirmation(id, { kind: "high-risk", intent: "disconnect-work", target: id });
+    const runtime = managerFor(active).get(id)!;
+    await vi.waitFor(() => expect(runtime.automationDispatching).not.toBe(true));
+    let releaseDispatch!: () => void;
+    const dispatchGate = new Promise<void>(resolve => { releaseDispatch = resolve; });
+    vi.spyOn(runtime.runtime, "dispatch").mockImplementationOnce(async () => { await dispatchGate; return []; });
+    const oldTick = managerFor(active).tickRealtime(runtime);
+    const input = { expectedStateVersion: active.get(id).stateVersion, idempotencyKey: "disconnect", action: { type: "disconnect-work" as const, confirmationToken: confirmation.token, impactHash: confirmation.impactHash } };
+    await Promise.all([active.performAction(id, input), active.performAction(id, input)]);
+    releaseDispatch();
+    await oldTick;
+    expect(context.clients[0]?.isRunning).toBe(false);
+    expect(active.snapshot(id).connectionSettings).toEqual({ server: "2.bmmo.win", locked: false });
+    expect(active.snapshot(id).runtime.workConnection).toBeUndefined();
+    expect(managerFor(active).get(id)).toBeUndefined();
+    active.updateConnectionSettings(id, { server: "1.bmmo.win", expectedStateVersion: active.get(id).stateVersion, idempotencyKey: "new-address" });
+    expect(active.snapshot(id).publishedConfig).toEqual(published);
+    await active.close();
+    database?.close();
+    database = openDatabase(join(dataRoot, "console.sqlite"));
+    service = new CompetitionService(undefined, { database, dataRoot });
+    expect(service.snapshot(id).connectionSettings).toEqual({ server: "1.bmmo.win", locked: false });
+    expect(service.snapshot(id).publishedConfig).toEqual(published);
+    service.updateConnectionSettings(id, { server: "2.bmmo.win", expectedStateVersion: service.get(id).stateVersion, idempotencyKey: "after-reopen" });
+    expect(service.snapshot(id).connectionSettings?.server).toBe("2.bmmo.win");
+  });
+
   it("keeps Connected in authenticating until the explicit list closes with exactly one referee ID", async () => {
     const context = setup([{ connectionId: "101", authenticate: false }]);
     context.service.startWorkMode(context.competitionId);
@@ -385,6 +439,30 @@ describe("WorkRuntimeManager connection lifecycle", () => {
       status: "healthy",
       refereeConnectionId: "101"
     }), { timeout: 3_000 });
+  });
+
+  it("keeps a draft address locked when managed shutdown fails and releases it on a later successful disconnect", async () => {
+    const behavior = { connectionId: "101", gracefulStopFails: true, forceStopFails: true };
+    const context = setup([behavior], {}, () => {});
+    context.service.startWorkMode(context.competitionId);
+    await vi.waitFor(() => expect(context.service.snapshot(context.competitionId).runtime.workConnection?.status).toBe("healthy"));
+    await expect(managerFor(context.service).disconnect(context.competitionId)).rejects.toThrow();
+    expect(context.service.snapshot(context.competitionId).connectionSettings?.locked).toBe(true);
+    expect(context.service.snapshot(context.competitionId).runtime.workConnection?.status).toBe("blocked");
+    expect(() => context.service.updateConnectionSettings(context.competitionId, { server: "2.bmmo.win", expectedStateVersion: 0, idempotencyKey: "still-locked" })).toThrow("手动断开");
+    behavior.gracefulStopFails = false;
+    await managerFor(context.service).disconnect(context.competitionId);
+    context.service.updateConnectionSettings(context.competitionId, { server: "2.bmmo.win", expectedStateVersion: 0, idempotencyKey: "unlocked" });
+    context.service.startWorkMode(context.competitionId);
+    await vi.waitFor(() => expect(context.service.snapshot(context.competitionId).runtime.workConnection?.status).toBe("healthy"));
+    expect(managerFor(context.service).get(context.competitionId)?.server).toBe("2.bmmo.win");
+    expect(context.clients).toHaveLength(2);
+    await context.service.close();
+    database?.close();
+    database = openDatabase(join(dataRoot, "console.sqlite"));
+    service = new CompetitionService(undefined, { database, dataRoot });
+    expect(service.snapshot(context.competitionId).connectionSettings).toEqual({ server: "2.bmmo.win", locked: true });
+    expect(() => service!.updateConnectionSettings(context.competitionId, { server: "1.bmmo.win", expectedStateVersion: 1, idempotencyKey: "restart-locked" })).toThrow("手动断开");
   });
 
   it("does not start a second authentication when Connected is repeated during the same authentication window", async () => {

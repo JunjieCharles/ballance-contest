@@ -307,9 +307,17 @@ test("hides test controls in work mode and keeps official-stage actions clear of
   await expect(page.getByText("工作模式不提供测试运行控制。")).toHaveCount(0);
   await page.getByRole("button", { name: "控制台", exact: true }).click();
   await expect(page.getByRole("button", { name: "连接比赛服务器" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "连接比赛服务器" })).toBeEnabled();
+  await expect(page.getByRole("button", { name: "启动自动化", exact: true })).toBeDisabled();
+  await page.getByLabel("服务器地址", { exact: true }).fill("2.bmmo.win");
   await expect(page.getByRole("button", { name: "连接比赛服务器" })).toBeDisabled();
+  await page.getByRole("button", { name: "保存地址", exact: true }).click();
+  await expect(page.getByRole("button", { name: "连接比赛服务器" })).toBeEnabled();
+  await expect(page.getByLabel("服务器地址", { exact: true })).toHaveValue("2.bmmo.win");
   await expect(page.getByRole("button", { name: /恢复工作运行|重启 MockClient/ })).toHaveCount(0);
   await page.getByRole("button", { name: "比赛配置", exact: true }).click();
+
+  await expect(page.getByLabel("服务器", { exact: true })).toHaveCount(0);
 
   const official = page.locator(".stage-editor.official-stage").first();
   const scoringBox = await official.getByLabel("单关计分").boundingBox();
@@ -322,6 +330,16 @@ test("hides test controls in work mode and keeps official-stage actions clear of
     && scoringBox.y < actionsBox.y + actionsBox.height
     && scoringBox.y + scoringBox.height > actionsBox.y;
   expect(overlaps).toBe(false);
+  await page.getByRole("button", { name: "发布比赛", exact: true }).click();
+  await expect(page.locator(".competition-list button.selected")).toContainText("published");
+  await page.getByRole("button", { name: "控制台", exact: true }).click();
+  await expect(page.getByLabel("服务器地址", { exact: true })).toBeEnabled();
+  await expect(page.getByLabel("服务器地址", { exact: true })).toHaveValue("2.bmmo.win");
+  await page.getByLabel("服务器地址", { exact: true }).fill("1.bmmo.win");
+  await page.getByRole("button", { name: "保存地址", exact: true }).click();
+  await expect(page.getByRole("button", { name: "保存地址", exact: true })).toBeDisabled();
+  await page.locator(".competition-list button.selected").click();
+  await expect(page.getByLabel("服务器地址", { exact: true })).toHaveValue("1.bmmo.win");
 });
 
 test("renders every work connection state and invalidates lifecycle confirmations on generation changes", async ({ page }, testInfo) => {
@@ -362,6 +380,7 @@ test("renders every work connection state and invalidates lifecycle confirmation
   ): Promise<void> => {
     mockedSnapshot = {
       ...mockedSnapshot,
+      connectionSettings: { server: "1.bmmo.win", locked: true },
       runtime: {
         ...mockedSnapshot.runtime,
         workConnection: workConnectionFixture(status, processGeneration, connectionGeneration),
@@ -373,6 +392,7 @@ test("renders every work connection state and invalidates lifecycle confirmation
     await expect(connectionPanel).toHaveClass(new RegExp(`connection-${status}`));
     await expect(connectionPanel).toContainText(`进程代次${processGeneration}`);
     await expect(connectionPanel).toContainText(`连接代次${connectionGeneration}`);
+    await expect(page.getByLabel("服务器地址", { exact: true })).toBeDisabled();
   };
 
   await page.getByRole("button", { name: "控制台", exact: true }).click();

@@ -43,6 +43,7 @@ export interface PersistedTestRun {
 }
 
 export interface ServiceSnapshotPayload {
+  connectionSettings?: { server: string; locked: boolean };
   activeRunId?: string;
   testRuns?: PersistedTestRun[];
   scoreboardRevisions?: ScoreboardVersionView[];

@@ -236,6 +236,10 @@ export class RefereeActionService {
     }
     const controller = (): CompetitionController => this.host.controllerFor(competitionId);
     switch (action.type) {
+      case "disconnect-work": {
+        await this.host.workRuntimeManager.disconnect(competitionId);
+        break;
+      }
       case "reconnect-work": {
         if (competition.mode !== "work") throw new ServiceError("CAPABILITY_UNSUPPORTED", "测试模式没有真实 MockClient 可软重连", 409);
         await this.host.workRuntimeManager.reconnectClient(competitionId);
@@ -561,6 +565,7 @@ export class RefereeActionService {
   public describe(action: CompetitionAction): string {
     switch (action.type) {
       case "notification": return `${action.channel}: ${action.text}`;
+      case "disconnect-work": return "手动断开服务器并暂停自动化";
       case "reconnect-work": return "通过当前 MockClient 软重新连接服务器";
       case "restart-work": return "重启 MockClient 并重新认证服务器连接";
       case "set-start-protection": return action.used ? "将本关起跑保护标记为已使用" : "将本关起跑保护重置为未使用";

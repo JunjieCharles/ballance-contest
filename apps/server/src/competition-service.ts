@@ -355,11 +355,14 @@ export class CompetitionService {
     const current = this.get(id);
     if (current.stateVersion !== input.expectedStateVersion) throw new ServiceError("STATE_CONFLICT", "状态版本已变化", 409, { latestStateVersion: current.stateVersion });
     if (current.status !== "draft") throw new ServiceError("STATE_CONFLICT", "只有草稿比赛可以直接编辑配置", 409);
+    const legacyServerChanged = input.server !== undefined && input.server !== this.getDraftConfig(id).server;
+    if (legacyServerChanged && this.connectionSettings(id).locked) throw new ServiceError("STATE_CONFLICT", "请先手动断开服务器，再修改地址", 409);
     const nextConfig = this.normalizeConfig({ ...this.getDraftConfig(id), ...input, name: input.name ?? this.getDraftConfig(id).name });
     const updated = { ...current, name: nextConfig.name, stateVersion: current.stateVersion + 1, updatedAt: new Date().toISOString() };
     this.withDatabase((database) => {
       database.sqlite.transaction(() => {
         this.upsertConfig(id, 0, false, nextConfig);
+        if (legacyServerChanged) this.savePayload(id, { ...this.getPayload(id), connectionSettings: { server: nextConfig.server, locked: false } });
         database.sqlite.prepare("UPDATE competitions SET name=?, timezone=?, state_version=?, updated_at=? WHERE id=?")
           .run(updated.name, nextConfig.timezone, updated.stateVersion, updated.updatedAt, id);
         this.savePayload(id, this.getPayload(id));
@@ -377,6 +380,7 @@ export class CompetitionService {
     if (old) return old as CompetitionRecord;
     const current = this.get(id);
     if (current.stateVersion !== expectedStateVersion) throw new ServiceError("STATE_CONFLICT", "状态版本已变化", 409, { latestStateVersion: current.stateVersion });
+    if (current.status !== "draft") throw new ServiceError("STATE_CONFLICT", "比赛已经发布", 409);
     const config = this.normalizeConfig(this.getDraftConfig(id));
     const issues = validateCompetitionConfigForPublish(config);
     if (issues.length > 0) throw new ServiceError("VALIDATION_FAILED", "发布检查未通过", 400, { issues });
@@ -391,6 +395,7 @@ export class CompetitionService {
     });
     this.competitions.set(id, updated);
     this.idempotency.set(key, updated);
+    this.workRuntimeManager.applyPublishedConfig(id);
     this.journal.append({ type: "competition.published", competitionId: id, stateVersion: updated.stateVersion, data: updated });
     return updated;
   }
@@ -424,7 +429,7 @@ export class CompetitionService {
     const config = this.getDraftConfig(id);
     const workScoreboard = workRuntime?.engine.snapshot().scoreboardVersions.map(scoreboardView) ?? this.storedScoreboardVersions(id);
     const persistedWorkConnection = payload.work?.connection;
-    const workConnection = workRuntime?.connection ?? (payload.work?.started
+    const workConnection = workRuntime?.connection ?? (payload.work?.started && this.connectionSettings(id).locked
       ? {
           status: "blocked" as const,
           processGeneration: persistedWorkConnection?.processGeneration ?? 0,
@@ -458,6 +463,7 @@ export class CompetitionService {
     const runtime: RuntimeSnapshot = baseRuntime;
     return {
       competition,
+      connectionSettings: this.connectionSettings(id),
       config,
       ...(this.getPublishedConfig(id) === undefined ? {} : { publishedConfig: this.getPublishedConfig(id) as CompetitionConfig }),
       runtime: { ...runtime, scoreEditPermissions: this.scoreEditPermissionsFor(id, competition.status, runtime.currentStageId) },
@@ -540,8 +546,51 @@ export class CompetitionService {
     return this.toScoreboardVersion(id, selected);
   }
 
-  public startWorkMode(competitionId: string): RuntimeSnapshot {
-    return this.workRuntimeManager.start(competitionId);
+  private connectionSettings(id: string): { server: string; locked: boolean } {
+    const payload = this.getPayload(id);
+    return { server: payload.connectionSettings?.server ?? this.getDraftConfig(id).server,
+      locked: this.workRuntimeManager.has(id) || (payload.connectionSettings?.locked ?? payload.work?.started ?? false) };
+  }
+
+  public updateConnectionSettings(id: string, input: { server: string; expectedStateVersion: number; idempotencyKey: string }): CompetitionRecord {
+    const current = this.get(id);
+    const server = typeof input.server === "string" ? input.server.trim() : "";
+    const key = id + ":connection:" + input.idempotencyKey;
+    const identity = JSON.stringify({ server, expectedStateVersion: input.expectedStateVersion });
+    const old = this.idempotency.get(key) as { identity: string; result: CompetitionRecord } | undefined;
+    if (old) {
+      if (old.identity !== identity) throw new ServiceError("STATE_CONFLICT", "幂等键不能用于不同连接设置", 409);
+      return old.result;
+    }
+    if (!input.idempotencyKey || current.stateVersion !== input.expectedStateVersion) throw new ServiceError("STATE_CONFLICT", "状态版本已变化或缺少幂等键", 409);
+    if (current.mode !== "work" || !["draft", "published"].includes(current.status)) throw new ServiceError("ACTION_UNAVAILABLE", "当前比赛不能修改真实连接设置", 409);
+    if (this.connectionSettings(id).locked) throw new ServiceError("STATE_CONFLICT", "请先手动断开服务器，再修改地址", 409);
+    if (!server || /[\s\r\n]/.test(server)) throw new ServiceError("VALIDATION_FAILED", "请输入有效的服务器地址", 400);
+    if (/^[012]\.bmmo\.win:/i.test(server)) throw new ServiceError("VALIDATION_FAILED", "bmmo.win 预设服务器不得填写端口", 400);
+    const result = { ...current, stateVersion: current.stateVersion + 1, updatedAt: new Date().toISOString() };
+    this.withDatabase(database => database.sqlite.transaction(() => {
+      this.savePayload(id, { ...this.getPayload(id), connectionSettings: { server, locked: false } });
+      database.sqlite.prepare("UPDATE competitions SET state_version=?,updated_at=? WHERE id=?").run(result.stateVersion, result.updatedAt, id);
+    })());
+    this.competitions.set(id, result);
+    this.idempotency.set(key, { identity, result });
+    this.journal.append({ type: "work.connection-settings-updated", competitionId: id, stateVersion: result.stateVersion, data: { server } });
+    return result;
+  }
+
+  public startWorkMode(competitionId: string, input?: { expectedStateVersion: number; idempotencyKey: string }): RuntimeSnapshot {
+    if (!input) return this.workRuntimeManager.start(competitionId);
+    const key = `${competitionId}:connection-start:${input.idempotencyKey}`;
+    const identity = JSON.stringify(input);
+    const old = this.idempotency.get(key) as { identity: string; result: RuntimeSnapshot } | undefined;
+    if (old) {
+      if (old.identity !== identity) throw new ServiceError("STATE_CONFLICT", "幂等键不能用于不同连接请求", 409);
+      return old.result;
+    }
+    if (!input.idempotencyKey || this.get(competitionId).stateVersion !== input.expectedStateVersion) throw new ServiceError("STATE_CONFLICT", "状态版本已变化或缺少幂等键", 409);
+    const result = this.workRuntimeManager.start(competitionId);
+    this.idempotency.set(key, { identity, result });
+    return result;
   }
 
   public async enableAutomation(competitionId: string, input: {
@@ -684,7 +733,7 @@ export class CompetitionService {
       }
       target = `${competitionId}:scoring`;
     }
-    if (intent === "reconnect-work" || intent === "restart-work") {
+    if (intent === "disconnect-work" || intent === "reconnect-work" || intent === "restart-work") {
       target = this.workLifecycleConfirmationTarget(competitionId, intent);
       const availability = this.availableActionsFor(competitionId, runtimeSnapshot).find((candidate) => candidate.action === intent);
       if (!availability?.enabled) {
@@ -909,6 +958,8 @@ export class CompetitionService {
         };
       }
       switch (intent) {
+        case "disconnect-work":
+          return { title: "手动断开比赛服务器？", consequences: ["暂停自动化并关闭当前受管 MockClient，断开期间无法接收玩家和成绩事件。", "保留比赛现场与审计；断开成功后可修改服务器地址，再连接时保持自动化暂停。"], irreversible: false };
         case "reconnect-work":
           return {
             title: "使用当前 MockClient 软重新连接比赛服务器？",
@@ -2352,8 +2403,7 @@ export class CompetitionService {
   }
 
   private getOperationalWorkConfig(competitionId: string): CompetitionConfig {
-    const published = this.getPublishedConfig(competitionId);
-    if (!published) throw new ServiceError("STATE_CONFLICT", "请先发布比赛配置", 409);
+    const published = this.getPublishedConfig(competitionId) ?? this.getDraftConfig(competitionId);
     const operational = this.getDraftConfig(competitionId);
     const runtimePoints = this.getPayload(competitionId).runtimeScoring?.points;
     return {
@@ -2371,6 +2421,7 @@ export class CompetitionService {
           minimumScoringPlace: minimumScoringPlaceFor(runtimePoints)
         }))
       }),
+      server: this.connectionSettings(competitionId).server,
       playerAliases: operational.playerAliases,
       participants: operational.participants
     };
@@ -2625,7 +2676,7 @@ export class CompetitionService {
 
   private workLifecycleConfirmationTarget(
     competitionId: string,
-    intent: "reconnect-work" | "restart-work"
+    intent: "disconnect-work" | "reconnect-work" | "restart-work"
   ): string {
     const competition = this.get(competitionId);
     if (competition.mode === "test") return `比赛“${competition.name}”的模拟服务器连接`;
@@ -2648,6 +2699,7 @@ export class CompetitionService {
       return { targetStageId, runtimeStateVersion: snapshot.stateVersion };
     };
     switch (action.type) {
+      case "disconnect-work":
       case "reconnect-work":
       case "restart-work":
         return this.consumeConfirmation(
@@ -2873,8 +2925,9 @@ export class CompetitionService {
       ...(enabled ? {} : { disabledReason })
     });
     return [
-      descriptor("start-work", hasPersistedWorkRuntime ? "恢复比赛现场" : "连接比赛服务器", hasPersistedWorkRuntime ? "重新建立比赛连接，恢复持久化阶段、尝试、榜单和计划，并保持自动化暂停等待现场核对。" : "建立比赛服务器连接，并立即开始在线名单对账。", competition.mode === "work" && competition.status === "published" && !hasRuntime,
-        competition.mode !== "work" ? "测试比赛不连接真实服务器" : competition.status !== "published" ? "请先发布比赛配置" : "比赛连接已经启动"),
+      descriptor("disconnect-work", "手动断开", "暂停自动化并关闭受管 MockClient；成功后允许修改服务器地址。", competition.mode === "work" && hasRuntime && !workConnectionBusy, !hasRuntime ? "请先连接服务器" : "连接建立或恢复流程正在进行"),
+      descriptor("start-work", hasPersistedWorkRuntime ? "恢复比赛现场" : "连接比赛服务器", hasPersistedWorkRuntime ? "重新建立比赛连接，恢复持久化阶段、尝试、榜单和计划，并保持自动化暂停等待现场核对。" : "建立比赛服务器连接，并立即开始在线名单对账。", competition.mode === "work" && ["draft", "published"].includes(competition.status) && !hasRuntime,
+        competition.mode !== "work" ? "测试比赛不连接真实服务器" : !["draft", "published"].includes(competition.status) ? "比赛已经结束" : "比赛连接已经启动"),
       descriptor("reconnect-work", "软重新连接", "连接仍健康时先精确请求本机 *ContestConsole 自身断开并核对 1101 回显，再通过专用生命周期通道发送一次 reconnect；仅在新连接通过拒绝观察窗和显式 list 身份核验后恢复健康。",
         competition.mode === "work" && competition.status === "published" && hasRuntime && !workConnectionBusy,
         competition.mode !== "work" ? "测试模式没有真实 MockClient" : competition.status !== "published" ? "只有活动中的已发布比赛可以恢复连接" : !hasRuntime ? "请先建立比赛连接" : "连接建立或恢复流程正在进行"),
@@ -2996,7 +3049,7 @@ export class CompetitionService {
 
   private actionIdFor(action: CompetitionAction): RefereeActionId | undefined {
     switch (action.type) {
-      case "reconnect-work": case "restart-work": case "notification": case "start-ready-flow": case "ready": case "cheat-off": case "manual-go": case "reschedule": case "reschedule-stage-deadline": case "delay-ready":
+      case "disconnect-work": case "reconnect-work": case "restart-work": case "notification": case "start-ready-flow": case "ready": case "cheat-off": case "manual-go": case "reschedule": case "reschedule-stage-deadline": case "delay-ready":
       case "extend-stage-deadline": case "end-stage": case "restart-stage": case "mark-stage-started": case "force-reset-stage": case "force-next-stage": case "set-start-protection": case "kick": case "raw-command":
         return action.type;
       default: return undefined;

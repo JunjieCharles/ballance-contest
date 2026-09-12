@@ -4,6 +4,7 @@ import { join, resolve } from "node:path";
 import { performance } from "node:perf_hooks";
 import {
   CONTEST_REFEREE_NAME,
+  createDefaultCompetitionConfig,
   stageCommandTarget,
   stageDisplayName,
   stageMapKind,
@@ -232,6 +233,9 @@ export class WorkRuntimeManager {
     const competition = this.host.getCompetition(competitionId);
     if (competition.mode !== "work") throw new ServiceError("CAPABILITY_UNSUPPORTED", "测试模式不支持真实 MockClient", 409);
     const config = this.host.getOperationalConfig(competitionId);
+    if (!config.server.trim() || /\s/.test(config.server) || /^[012]\.bmmo\.win:/i.test(config.server)) {
+      throw new ServiceError("VALIDATION_FAILED", "请输入有效服务器地址；bmmo.win 预设服务器不得填写端口", 400);
+    }
     const existing = this.runtimes.get(competitionId);
     if (existing) return this.view(existing);
     this.host.assertActionAvailable(competitionId, "start-work");
@@ -327,16 +331,17 @@ export class WorkRuntimeManager {
   }
 
   public businessCommandsReady(runtime: WorkRuntime): boolean {
-    return runtime.connection.status === "healthy"
+    return this.host.getCompetition(runtime.competitionId).status !== "draft" && runtime.connection.status === "healthy"
       && (runtime.client === undefined
         || runtime.registeredMapsProcessGeneration === runtime.connection.processGeneration)
       && runtime.mapRegistration === undefined;
   }
 
-  public makeRuntime(competitionId: string, config: CompetitionConfig, transport: CommandTransport, mockClientVersion?: string): WorkRuntime {
+  public makeRuntime(competitionId: string, config: CompetitionConfig, transport: CommandTransport, mockClientVersion?: string, restore = true): WorkRuntime {
+    if (!config.stages.length) config = { ...config, stages: createDefaultCompetitionConfig(config.name).stages };
     const definition = this.configToScenarioDefinition(config);
     const wallClockOriginMs = Date.now() - performance.now();
-    const initialSnapshot = this.host.getPayload(competitionId).work?.started
+    const initialSnapshot = restore && this.host.getCompetition(competitionId).status !== "draft" && this.host.getPayload(competitionId).work?.started
       ? this.host.prepareAutomationSnapshot(competitionId, wallClockOriginMs)
       : undefined;
     const controller = new CompetitionController({
@@ -413,7 +418,60 @@ export class WorkRuntimeManager {
     return runtime;
   }
 
-  public register(competitionId: string, runtime: WorkRuntime): void { this.runtimes.set(competitionId, runtime); }
+  public register(competitionId: string, runtime: WorkRuntime): void {
+    if (!runtime.disposed) this.runtimes.set(competitionId, runtime);
+  }
+
+  public applyPublishedConfig(competitionId: string): void {
+    const runtime = this.runtimes.get(competitionId);
+    if (!runtime) {
+      const payload = this.host.getPayload(competitionId);
+      // A draft connection has no race state to restore after publication.
+      if (payload.work) {
+        delete payload.work.automation;
+        delete payload.work.engine;
+        this.host.savePayload(competitionId, payload);
+      }
+      return;
+    }
+    const config = this.host.getOperationalConfig(competitionId);
+    const prepared = this.makeRuntime(competitionId, config, runtime.client ?? { write: async () => {} }, runtime.mockClientVersion, false);
+    for (const player of runtime.controller.snapshot().participantStates ?? []) {
+      prepared.controller.observeConnection(player.participantId, player.online);
+      prepared.controller.observeCheat(player.participantId, player.cheatEnabled, `publish:${player.participantId}`);
+    }
+    runtime.controller = prepared.controller;
+    runtime.engine = prepared.engine;
+    runtime.runtime = new WorkAutomationRuntime(runtime.controller, runtime.commands);
+    runtime.participantStageId = runtime.controller.snapshot().currentStageId;
+    this.saveSnapshot(runtime);
+    if (runtime.connection.status === "healthy") {
+      runtime.connection.recoveryStep = "register-maps";
+      void this.registerPublishedCustomMaps(runtime, config).then(() => {
+        if (runtime.disposed) return;
+        if (runtime.connection.recoveryStep === "register-maps") delete runtime.connection.recoveryStep;
+        this.publishConnectionState(runtime);
+      }).catch((error: unknown) => {
+        if (!runtime.disposed) this.markConnectionBlocked(runtime, error instanceof Error ? error.message : String(error), "hard");
+      });
+    }
+  }
+
+  public async disconnect(competitionId: string): Promise<void> {
+    const runtime = this.runtimes.get(competitionId);
+    if (!runtime) throw new ServiceError("NOT_FOUND", "比赛连接尚未建立", 404);
+    runtime.controller.pause();
+    this.saveSnapshot(runtime);
+    await this.remove(competitionId);
+    const payload = this.host.getPayload(competitionId);
+    this.host.savePayload(competitionId, { ...payload, connectionSettings: { server: runtime.server, locked: false } });
+    const config = this.host.getDraftConfig(competitionId);
+    this.host.upsertConfig(competitionId, 0, false, {
+      ...config,
+      participants: config.participants.map(player => ({ ...player, online: false }))
+    });
+    this.host.journal.append({ type: "work.disconnected", competitionId, data: { server: runtime.server } });
+  }
 
   private createManagedClient(config: CompetitionConfig, executable: string, logPath: string): ManagedMockClient {
     const options = {
@@ -737,7 +795,7 @@ export class WorkRuntimeManager {
   }
 
   public startRealtime(runtime: WorkRuntime): void {
-    if (runtime.automationTimer) return;
+    if (runtime.disposed || runtime.automationTimer) return;
     runtime.automationTimer = setInterval(() => { void this.tickRealtime(runtime); }, 500);
     runtime.automationTimer.unref?.();
   }
@@ -758,6 +816,7 @@ export class WorkRuntimeManager {
       this.mirrorVoidedAttempts(runtime);
       this.mirrorClosedAttempts(runtime);
       const records = this.businessCommandsReady(runtime) ? await runtime.runtime.dispatch() : [];
+      if (runtime.disposed || this.runtimes.get(runtime.competitionId) !== runtime) return;
       const snapshot = runtime.controller.snapshot();
       this.host.completeCompetitionOnReview(runtime.competitionId, snapshot);
       for (const action of snapshot.actions.filter((candidate) => candidate.status === "acknowledged")) {
@@ -810,7 +869,7 @@ export class WorkRuntimeManager {
   }
 
   private async requestParticipantList(runtime: WorkRuntime): Promise<void> {
-    if (this.runtimes.get(runtime.competitionId) !== runtime || !this.businessCommandsReady(runtime)
+    if (this.runtimes.get(runtime.competitionId) !== runtime || !(this.host.getCompetition(runtime.competitionId).status === "draft" ? runtime.connection.status === "healthy" : this.businessCommandsReady(runtime))
       || runtime.listReconciliation) return;
     let reconciliation: ListReconciliation | undefined;
     const connectionGeneration = runtime.connection.connectionGeneration;
@@ -905,6 +964,7 @@ export class WorkRuntimeManager {
   }
 
   public saveSnapshot(runtime: WorkRuntime): void {
+    if (runtime.disposed) return;
     const settled = this.settleStageBoundary(runtime);
     this.persistSnapshot(runtime, settled.after);
     if (settled.controllerChanged) this.recordStageBoundary(runtime, settled.before, settled.after);
@@ -915,6 +975,7 @@ export class WorkRuntimeManager {
     const payload = this.host.getPayload(runtime.competitionId);
     this.host.savePayload(runtime.competitionId, {
       ...payload,
+      connectionSettings: { server: runtime.server, locked: true },
       work: {
         started: true,
         ...(runtime.mockClientVersion === undefined ? {} : { mockClientVersion: runtime.mockClientVersion }),
@@ -1640,8 +1701,8 @@ export class WorkRuntimeManager {
     runtime.attemptEvidenceSequenceBoundaries ??= new Map();
     runtime.attemptEvidenceLogBoundaries ??= new Map();
     const receiveSequence = runtime.logReceiveSequence;
-    const config = this.host.getPublishedConfig(runtime.competitionId);
-    if (!config) return;
+    const published = this.host.getPublishedConfig(runtime.competitionId);
+    const config = published ?? this.host.getDraftConfig(runtime.competitionId);
     this.host.appendRawLog(runtime.competitionId, "mock-client", line);
     const parsed = parseLogLine(line, { year: Number(config.date.slice(0, 4)), utcOffsetMinutes: utcOffsetMinutes(config.timezone) });
     if (logPosition?.trustedEvidence === false) {
@@ -1677,6 +1738,7 @@ export class WorkRuntimeManager {
       this.saveSnapshot(runtime);
       return;
     }
+    if (!published && !["connected", "authentication-failed", "server-disconnected", "player-list-start", "player-list-summary", "player-listed", "player-login", "player-disconnect", "cheat-changed"].includes(parsed.event.type)) return;
     if (parsed.event.type === "connected") {
       this.observeConnected(runtime, parsed.event.occurredAt);
     }
@@ -1952,6 +2014,7 @@ export class WorkRuntimeManager {
     processGeneration = runtime.connection.processGeneration,
     connectionGeneration = runtime.connection.connectionGeneration
   ): Promise<void> {
+    if (this.host.getCompetition(runtime.competitionId).status === "draft") return Promise.resolve();
     if (runtime.registeredMapsProcessGeneration === processGeneration) return Promise.resolve();
     const existing = runtime.mapRegistration;
     if (existing?.processGeneration === processGeneration) return existing.promise;

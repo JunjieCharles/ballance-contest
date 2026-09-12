@@ -683,3 +683,6 @@ header > span:last-of-type { margin-left: auto; font-size: 13px; }
   .raw-log-line { grid-template-columns: 68px minmax(0, 1fr); }
   .raw-log-line code { grid-column: 1 / -1; }
 }
+.connection-settings { display: flex; flex-wrap: wrap; align-items: end; gap: 8px; max-width: 100%; }
+.connection-settings label { flex: 1; min-width: 180px; }
+.connection-settings small { flex-basis: 100%; }

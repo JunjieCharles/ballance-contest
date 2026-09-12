@@ -156,9 +156,13 @@ export const buildApp = async (options: BuildAppOptions): Promise<FastifyInstanc
     requireSession(request, true);
     return { data: service.publish(request.params.competitionId, request.body.expectedStateVersion, request.body.idempotencyKey) };
   });
-  app.post<{ Params: { competitionId: string } }>("/api/v1/competitions/:competitionId/work/start", async (request) => {
+  app.patch<{ Params: { competitionId: string }; Body: { server: string; expectedStateVersion: number; idempotencyKey: string } }>("/api/v1/competitions/:competitionId/connection", async (request) => {
     requireSession(request, true);
-    return { data: service.startWorkMode(request.params.competitionId) };
+    return { data: service.updateConnectionSettings(request.params.competitionId, request.body) };
+  });
+  app.post<{ Params: { competitionId: string }; Body: { expectedStateVersion: number; idempotencyKey: string } }>("/api/v1/competitions/:competitionId/work/start", async (request) => {
+    requireSession(request, true);
+    return { data: service.startWorkMode(request.params.competitionId, request.body ?? { expectedStateVersion: -1, idempotencyKey: "" }) };
   });
   app.post<{ Params: { competitionId: string }; Body: {
     runId?: string;

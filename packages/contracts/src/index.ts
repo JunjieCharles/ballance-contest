@@ -253,10 +253,6 @@ export const validateCompetitionConfigForPublish = (config: CompetitionConfig): 
   const issues: string[] = [];
   if (!config.name.trim()) issues.push("比赛名称不能为空");
   if (normalizeRefereeName(config.refereeName) !== CONTEST_REFEREE_NAME) issues.push(`服务器控制身份固定为 ${CONTEST_REFEREE_NAME}`);
-  if (!config.server.trim()) issues.push("服务器不能为空");
-  if (["0.bmmo.win", "1.bmmo.win", "2.bmmo.win"].some((server) => config.server.startsWith(`${server}:`))) {
-    issues.push("bmmo.win 预设服务器不得填写端口");
-  }
   if (config.stages.length === 0) issues.push("至少需要一个轮次");
   if (config.scoring.points.length === 0) issues.push("计分表至少需要一个名次");
   if (config.scoring.points.some((point) => !Number.isFinite(point))) issues.push("计分必须是有限数字");
@@ -389,7 +385,7 @@ export interface RuntimeSnapshot {
 }
 
 export type RefereeActionId =
-  | "start-work" | "reconnect-work" | "restart-work" | "enable-automation" | "pause-automation" | "notification" | "start-ready-flow" | "ready" | "cheat-off" | "manual-go"
+  | "start-work" | "disconnect-work" | "reconnect-work" | "restart-work" | "enable-automation" | "pause-automation" | "notification" | "start-ready-flow" | "ready" | "cheat-off" | "manual-go"
   | "delay-ready" | "extend-stage-deadline" | "reschedule" | "reschedule-stage-deadline" | "end-stage" | "restart-stage" | "set-start-protection"
   | "mark-stage-started" | "force-reset-stage" | "force-next-stage"
   | "kick" | "raw-command" | "finish" | "archive" | "delete";
@@ -491,6 +487,7 @@ export interface TestRunSnapshot {
 }
 
 export interface CompetitionSnapshot {
+  connectionSettings?: { server: string; locked: boolean };
   competition: CompetitionRecordView;
   config: CompetitionConfig;
   publishedConfig?: CompetitionConfig;
@@ -506,7 +503,7 @@ export interface CompetitionSnapshot {
 export type ConfirmationKind = "restart-stage" | "manual-action" | "manual-go" | "scoreboard-override" | "automation-command-resolution" | "command-resolution" | "observation-gap-resolution" | "high-risk";
 
 export type ConfirmationIntent =
-  | "reconnect-work" | "restart-work" | "start-ready-flow" | "ready" | "manual-go" | "delay-ready" | "extend-stage-deadline"
+  | "disconnect-work" | "reconnect-work" | "restart-work" | "start-ready-flow" | "ready" | "manual-go" | "delay-ready" | "extend-stage-deadline"
   | "reschedule" | "reschedule-stage-deadline" | "end-stage" | "restart-stage" | "set-start-protection"
   | "mark-stage-started" | "force-reset-stage" | "force-next-stage"
   | "kick" | "raw-command" | "finish" | "finish-and-archive" | "delete"
@@ -556,6 +553,7 @@ export type AttemptOrigin = "authoritative-go" | "referee-marked-started";
 
 export type CompetitionAction =
   | { type: "notification"; channel: NotificationChannel; text: string }
+  | { type: "disconnect-work"; confirmationToken: string; impactHash: string }
   | { type: "reconnect-work"; confirmationToken: string; impactHash: string }
   | { type: "restart-work"; confirmationToken: string; impactHash: string }
   | { type: "start-ready-flow"; confirmationToken: string; impactHash: string }

@@ -492,10 +492,17 @@ export function App() {
     });
   }, "发布检查通过，比赛已发布");
 
+  const saveConnection = (server: string) => run(async () => {
+    if (!session || !snapshot) throw new Error("请选择比赛");
+    await request('/api/v1/competitions/' + snapshot.competition.id + '/connection', session, {
+      method: "PATCH", body: JSON.stringify({ server, expectedStateVersion: snapshot.competition.stateVersion, idempotencyKey: crypto.randomUUID() })
+    });
+  }, "服务器地址已保存");
+
   const startWork = () => run(async () => {
     if (!session || !snapshot) throw new Error("请选择比赛");
-    await request(`/api/v1/competitions/${snapshot.competition.id}/work/start`, session, { method: "POST", body: "{}" });
-  }, "比赛连接已建立");
+    await request(`/api/v1/competitions/${snapshot.competition.id}/work/start`, session, { method: "POST", body: JSON.stringify({ expectedStateVersion: snapshot.competition.stateVersion, idempotencyKey: crypto.randomUUID() }) });
+  }, "已启动服务器连接，等待身份认证");
 
   const enableAutomation = () => run(async () => {
     if (!session || !snapshot) throw new Error("请选择比赛");
@@ -666,7 +673,7 @@ export function App() {
           <div className="tabs">{visibleTabs.map((item) =>
             <button className={activeTab === item ? "active" : ""} key={item} onClick={() => setTab(item)}>{({ config: "比赛配置", console: "控制台", players: "玩家", scoreboard: "成绩", test: "测试", archive: "归档" })[item]}</button>)}</div>
           {activeTab === "console" && <ConsolePanel snapshot={snapshot} canWrite={canWrite} versionKey={versionKey}
-            startWork={() => startWork()} enableAutomation={() => enableAutomation()} pauseAutomation={() => pauseAutomation()}
+            saveConnection={saveConnection} startWork={() => startWork()} enableAutomation={() => enableAutomation()} pauseAutomation={() => pauseAutomation()}
             performAction={(action) => performAction(action)} requestConfirmation={requestConfirmation} />}
           {activeTab === "config" && <ConfigPanel key={`${snapshot.competition.id}:${snapshot.competition.stateVersion}`} snapshot={snapshot} canWrite={canWrite}
             saving={draftSaving} saveDraft={(patch) => saveDraft(patch)} publish={() => publish()} />}
@@ -685,13 +692,23 @@ export function App() {
   </main>;
 }
 
-function ConsolePanel({ snapshot, canWrite, versionKey, startWork, enableAutomation, pauseAutomation, performAction, requestConfirmation }: {
+function ConsolePanel({ snapshot, canWrite, versionKey, saveConnection, startWork, enableAutomation, pauseAutomation, performAction, requestConfirmation }: {
   snapshot: CompetitionSnapshot; canWrite: boolean; versionKey: string;
+  saveConnection(server: string): Promise<void>;
   startWork(): Promise<void>; enableAutomation(): Promise<void>; pauseAutomation(): Promise<void>;
   performAction(action: CompetitionAction): Promise<void>;
   requestConfirmation(kind: ConfirmationKind, target: string, requestPayload?: unknown): Promise<ConfirmationSummary>;
 }) {
   const runtime = snapshot.runtime;
+  const savedServer = snapshot.connectionSettings?.server ?? snapshot.config.server;
+  const serverKey = `${snapshot.competition.id}:${savedServer}`;
+  const [serverDraft, setServerDraft] = useState({ key: serverKey, value: savedServer });
+  const [connectionSaving, setConnectionSaving] = useState(false);
+  const [connectionError, setConnectionError] = useState("");
+  const connectionSaveInFlight = useRef(false);
+  const addressLocked = snapshot.connectionSettings?.locked ?? Boolean(runtime.workConnection);
+  const server = !addressLocked && serverDraft.key === serverKey ? serverDraft.value : savedServer;
+  const serverDirty = server.trim() !== savedServer;
   const [channel, setChannel] = useState<NotificationChannel>("notice");
   const [notification, setNotification] = useState("比赛流程通知");
   const [participantId, setParticipantId] = useState(snapshot.config.participants[0]?.id ?? "");
@@ -754,20 +771,32 @@ function ConsolePanel({ snapshot, canWrite, versionKey, startWork, enableAutomat
   return <section className="grid two">
     <div className="panel"><h2>裁判操作</h2>
       <div className="button-row action-row">
+        {snapshot.competition.mode === "work" && <div className="connection-settings">
+          <label>服务器地址<input value={server} disabled={!canWrite || addressLocked || connectionSaving} onChange={event => setServerDraft({ key: serverKey, value: event.target.value })} /></label>
+          {!addressLocked && <button disabled={!canWrite || connectionSaving || !serverDirty || !server.trim()} onClick={() => {
+            if (connectionSaveInFlight.current) return;
+            connectionSaveInFlight.current = true; setConnectionSaving(true); setConnectionError("");
+            void saveConnection(server).catch(error => setConnectionError(error instanceof Error ? error.message : "地址保存失败")).finally(() => { connectionSaveInFlight.current = false; setConnectionSaving(false); });
+          }}>保存地址</button>}
+          <small>{addressLocked ? "手动断开后可修改地址" : serverDirty ? "请先保存地址，再连接服务器" : "发布前可连接服务器查看玩家；发布后才能启动自动化"}</small>
+          {connectionError && <small role="alert">{connectionError}</small>}
+        </div>}
         {snapshot.competition.mode === "test"
           ? confirmedAction(availabilityFor(runtime, "restart-work")?.label ?? "模拟恢复连接", "restart-work", "high-risk", snapshot.competition.id,
             (confirmation) => ({ type: "restart-work", confirmationToken: confirmation.token, impactHash: confirmation.impactHash }))
           : startConnection?.enabled
-            ? <ActionButton runtime={runtime} action="start-work" canWrite={canWrite}
+            ? <ActionButton runtime={runtime} action="start-work" canWrite={canWrite && !serverDirty && !connectionSaving}
               onClick={() => void startWork()}>{startConnection.label}</ActionButton>
             : workConnection
             ? <>
+              {confirmedAction("手动断开", "disconnect-work", "high-risk", snapshot.competition.id,
+                confirmation => ({ type: "disconnect-work", confirmationToken: confirmation.token, impactHash: confirmation.impactHash }), undefined, false, undefined, lifecycleVersionKey)}
               {confirmedAction("软重新连接", "reconnect-work", "high-risk", snapshot.competition.id,
                 (confirmation) => ({ type: "reconnect-work", confirmationToken: confirmation.token, impactHash: confirmation.impactHash }), undefined, false, undefined, lifecycleVersionKey)}
               {confirmedAction("重启 MockClient", "restart-work", "high-risk", snapshot.competition.id,
                 (confirmation) => ({ type: "restart-work", confirmationToken: confirmation.token, impactHash: confirmation.impactHash }), undefined, false, undefined, lifecycleVersionKey)}
             </>
-            : <ActionButton runtime={runtime} action="start-work" canWrite={canWrite}
+            : <ActionButton runtime={runtime} action="start-work" canWrite={canWrite && !serverDirty && !connectionSaving}
               onClick={() => void startWork()}>{startConnection?.label ?? "连接比赛服务器"}</ActionButton>}
         <ActionButton runtime={runtime} action="enable-automation" canWrite={canWrite} onClick={() => void enableAutomation()}>{availabilityFor(runtime, "enable-automation")?.label ?? "启动自动化"}</ActionButton>
         <ActionButton runtime={runtime} action="pause-automation" canWrite={canWrite} className="secondary" onClick={() => void pauseAutomation()}>暂停自动化</ActionButton>
@@ -1016,7 +1045,6 @@ function ConfigPanel({ snapshot, canWrite, saving, saveDraft, publish }: {
   return <section className="grid two">
     <div className="panel"><h2>基本信息</h2>
       <label>比赛名称<input defaultValue={config.name} disabled={!editable} onBlur={(event) => { if (event.target.value !== config.name) void saveDraft({ name: event.target.value }); }} /></label>
-      <label>服务器<input defaultValue={config.server} disabled={!editable} onBlur={(event) => { if (event.target.value !== config.server) void saveDraft({ server: event.target.value }); }} /></label>
       <label>服务器控制身份<input value="ContestConsole" disabled /></label>
       <p className="muted">MockClient 固定以 *ContestConsole 旁观登录，避免服务器权限因名称变化失效。参赛者会从 login、disconnect 和定期 list 自动登记，无需发布前名单。</p>
       <label className="score-policy-row">启用起跑保护<input aria-label="启用起跑保护" type="checkbox" checked={startProtectionEnabled} disabled={!editable || startProtectionSaving}

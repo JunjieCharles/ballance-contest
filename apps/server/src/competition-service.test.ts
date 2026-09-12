@@ -85,6 +85,7 @@ describe("CompetitionService dynamic participants", () => {
   it("keeps work automation on the fixed Ready cadence", async () => {
     const service = new CompetitionService();
     const record = service.create({ name: "Realtime work", mode: "work", idempotencyKey: "realtime-work" });
+    service.publish(record.id, 0, "publish-realtime-work");
     let now = 0;
     const controller = new CompetitionController({
       competitionId: record.id,
