@@ -729,11 +729,11 @@ describe("CompetitionController", () => {
     const correction = controller.drainActions();
     expect(correction.map((candidate) => candidate.kind)).toEqual(["bulletin", "announce", "notice"]);
     expect(correction.find((candidate) => candidate.kind === "announce")?.message)
-      .toBe("由于玩家 p1 起跑保护期掉线，发令流程已中止，本关从 T-60 重新准备。");
+      .toBe("由于玩家 p1 起跑保护期掉线，发令流程已中止，本关将在一分钟后重新发令，请做好准备。");
     expect(correction.find((candidate) => candidate.kind === "notice")?.message)
       .toBe("第一关 即将在 1 分钟后发令，请提前做好重启游戏等准备，避免影响发令流程。\n本关起跑保护已被使用，后续不再延时。");
     expect(correction.find((candidate) => candidate.kind === "bulletin")?.message)
-      .toBe("第一关 将在 08:01 发令\n由于玩家 p1 起跑保护期掉线，发令流程已中止，本关从 T-60 重新准备。\n本关起跑保护已被使用，后续不再延时。");
+      .toBe("第一关 将在 08:01 发令\n由于玩家 p1 起跑保护期掉线，发令流程已中止，本关将在一分钟后重新发令，请做好准备。\n本关起跑保护已被使用，后续不再延时。");
     for (const item of correction) controller.acknowledgeAction(item.id, "acknowledged");
 
     clock.set(10_000);
@@ -793,12 +793,12 @@ describe("CompetitionController", () => {
     const correction = controller.drainActions();
     expect(correction.map((candidate) => candidate.kind)).toEqual(["bulletin", "announce", "notice"]);
     expect(correction.find((candidate) => candidate.kind === "announce")?.message)
-      .toBe("由于玩家 p2 起跑保护期掉线，当前尝试及成绩已作废，本关从 T-60 重新准备。");
+      .toBe("由于玩家 p2 起跑保护期掉线，当前尝试及成绩已作废，本关将在一分钟后重新发令，请做好准备。");
     expect(correction.find((candidate) => candidate.kind === "notice")?.message)
       .toBe("第一关 即将在 1 分钟后发令，请提前做好重启游戏等准备，避免影响发令流程。\n本关起跑保护已被使用，后续不再延时。");
     const correctionBulletins = correction.filter((candidate) => candidate.kind === "bulletin");
     expect(correctionBulletins.find((candidate) => candidate.message?.includes("起跑保护"))?.message)
-      .toBe("第一关 将在 08:01 发令\n由于玩家 p2 起跑保护期掉线，当前尝试及成绩已作废，本关从 T-60 重新准备。\n本关起跑保护已被使用，后续不再延时。");
+      .toBe("第一关 将在 08:01 发令\n由于玩家 p2 起跑保护期掉线，当前尝试及成绩已作废，本关将在一分钟后重新发令，请做好准备。\n本关起跑保护已被使用，后续不再延时。");
     for (const item of correction) controller.acknowledgeAction(item.id, "acknowledged");
 
     controller.manualCheatOff();

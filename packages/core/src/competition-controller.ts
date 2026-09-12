@@ -1442,8 +1442,8 @@ export class CompetitionController {
     this.cheatOffActionId = undefined;
     this.goActionId = undefined;
     const protectionMessage = postGo
-      ? `由于玩家 ${participantId} 起跑保护期掉线，当前尝试及成绩已作废，本关从 T-60 重新准备。`
-      : `由于玩家 ${participantId} 起跑保护期掉线，发令流程已中止，本关从 T-60 重新准备。`;
+      ? `由于玩家 ${participantId} 起跑保护期掉线，当前尝试及成绩已作废，本关将在一分钟后重新发令，请做好准备。`
+      : `由于玩家 ${participantId} 起跑保护期掉线，发令流程已中止，本关将在一分钟后重新发令，请做好准备。`;
     this.planReady(this.stageIndex, plannedReadyAtMs, protectionMessage);
     this.queueActionForStage("announce", stage, protectionMessage);
     this.queueDueReadyNotice();
