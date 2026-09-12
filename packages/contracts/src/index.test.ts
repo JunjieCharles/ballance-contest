@@ -79,6 +79,7 @@ describe("competition configuration", () => {
     const config = createDefaultCompetitionConfig("Small Contest");
     expect(validateCompetitionConfigForPublish(config)).toEqual([]);
     expect(config.flow.startProtectionEnabled).toBe(true);
+    expect(config.flow.protectionWindowMs).toBe(10_000);
     expect(config.scoring).toMatchObject({ contestType: "small", minimumScoringPlace: 12, points: { length: 12 } });
     expect(config.stages.every((stage) => stage.minimumScoringPlace === 12 && stage.scoring.length === 12)).toBe(true);
     expect(validateCompetitionConfigForPublish({

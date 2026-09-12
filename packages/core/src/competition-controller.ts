@@ -221,7 +221,7 @@ const defaults = (participantCount: number): AutomationPolicy => ({
   preStartWaitLimitMs: 5 * 60_000,
   intermissionMs: 3 * 60_000,
   startProtectionEnabled: true,
-  protectionWindowMs: 15_000,
+  protectionWindowMs: 10_000,
   groupDisconnectThreshold: Math.max(2, Math.ceil(participantCount * 0.2)),
   preStartTimeoutPolicy: "allow-late"
 });

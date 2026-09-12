@@ -615,7 +615,7 @@ export const defaultFlowPolicy = (): FlowPolicy => ({
   reconnectStableMs: 15_000,
   readyBufferMs: 30_000,
   startProtectionEnabled: true,
-  protectionWindowMs: 15_000,
+  protectionWindowMs: 10_000,
   intermissionMs: 3 * 60_000,
   groupDisconnectThreshold: 2
 });

@@ -1028,7 +1028,7 @@ function ConfigPanel({ snapshot, canWrite, saving, saveDraft, publish }: {
           catch { setStartProtectionEnabled(config.flow.startProtectionEnabled); }
           finally { setStartProtectionSaving(false); }
         }} /><span>{startProtectionSaving ? "保存中…" : startProtectionEnabled ? "已启用（默认）" : "未启用"}</span></label>
-      <p className="muted">启用后，每关从第一条 Ready 到 Go 后 15 秒可自动使用一次保护；发布后仍可在控制台手动标记本关已使用或重置为未使用。</p>
+      <p className="muted">启用后，每关从第一条 Ready 到 Go 后 {config.flow.protectionWindowMs / 1_000} 秒可自动使用一次保护；发布后仍可在控制台手动标记本关已使用或重置为未使用。</p>
       <div className={publishIssues.length ? "validation-summary invalid" : "validation-summary valid"}><strong>发布检查</strong>{publishIssues.length ? <ul>{publishIssues.map((issue) => <li key={issue}>{issue}</li>)}</ul> : <span>配置完整，可以发布。</span>}</div>
       <button disabled={!editable || publishIssues.length > 0} onClick={() => void publish()}>发布比赛</button>
     </div>

@@ -15,7 +15,7 @@ const configuration = (overrides: Partial<AutomationConfiguration> = {}): Automa
     { id: "s1", map: "1", displayName: "第一关", mode: "sr", timeLimitMs: 20_000, minimumScoringPlace: 3 },
     { id: "s2", map: "2", displayName: "第二关", mode: "hs", timeLimitMs: 20_000, minimumScoringPlace: 3 }
   ],
-  policy: { announcementLeadMs: 0, readyBufferMs: 1_000, reconnectStableMs: 15_000, intermissionMs: 3_000, protectionWindowMs: 15_000 },
+  policy: { announcementLeadMs: 0, readyBufferMs: 1_000, reconnectStableMs: 15_000, intermissionMs: 3_000, protectionWindowMs: 10_000 },
   confirmationSecret: "test-only-secret",
   ...overrides
 });
@@ -299,7 +299,7 @@ describe("CompetitionController", () => {
         readyBufferMs: 1_000,
         reconnectStableMs: 15_000,
         intermissionMs: 120_000,
-        protectionWindowMs: 15_000
+        protectionWindowMs: 10_000
       }
     }), clock);
     connectAll(controller);
@@ -351,7 +351,7 @@ describe("CompetitionController", () => {
         readyBufferMs: 1_000,
         reconnectStableMs: 15_000,
         intermissionMs: 120_000,
-        protectionWindowMs: 15_000
+        protectionWindowMs: 10_000
       }
     }), clock);
     connectAll(controller);
@@ -377,7 +377,7 @@ describe("CompetitionController", () => {
           readyBufferMs: 1_000,
           reconnectStableMs: 15_000,
           intermissionMs: 120_000,
-          protectionWindowMs: 15_000
+          protectionWindowMs: 10_000
         }
       }), clock);
       connectAll(controller);
@@ -438,7 +438,7 @@ describe("CompetitionController", () => {
         readyBufferMs: 1_000,
         reconnectStableMs: 15_000,
         intermissionMs: 30_000,
-        protectionWindowMs: 15_000
+        protectionWindowMs: 10_000
       }
     }), clock);
     connectAll(controller, ["p1"]);
@@ -479,7 +479,7 @@ describe("CompetitionController", () => {
         readyBufferMs: 1_000,
         reconnectStableMs: 15_000,
         intermissionMs: 120_000,
-        protectionWindowMs: 15_000
+        protectionWindowMs: 10_000
       }
     }), clock);
     connectAll(controller);
@@ -514,7 +514,7 @@ describe("CompetitionController", () => {
           readyBufferMs: 1_000,
           reconnectStableMs: 15_000,
           intermissionMs: 120_000,
-          protectionWindowMs: 15_000
+          protectionWindowMs: 10_000
         }
       }), clock);
       connectAll(controller);
@@ -560,7 +560,7 @@ describe("CompetitionController", () => {
         readyBufferMs: 1_000,
         reconnectStableMs: 15_000,
         intermissionMs: 120_000,
-        protectionWindowMs: 15_000
+        protectionWindowMs: 10_000
       }
     }), clock);
     connectAll(controller);
@@ -756,6 +756,22 @@ describe("CompetitionController", () => {
     expect(snapshot.incidents.filter((incident) => incident.type === "protected-crash")).toHaveLength(1);
   });
 
+  it.each([9_999, 10_000, 10_001, 15_000])("limits default post-Go protection to ten seconds (elapsed %i ms)", (elapsedMs) => {
+    const clock = new FakeClock();
+    const controller = new CompetitionController(configuration({ policy: {} }), clock);
+    connectAll(controller);
+    enterRunning(controller, clock);
+    const goAtMs = controller.snapshot().attempts[0]!.goAtMs;
+    clock.advance(elapsedMs);
+    controller.observeConnection("p1", false);
+    const snapshot = controller.snapshot();
+    const protectedCrash = elapsedMs <= 10_000;
+    expect(snapshot.phase).toBe(protectedCrash ? "restart-preparing" : "running");
+    expect(snapshot.startProtectionUsedStageIds).toEqual(protectedCrash ? ["s1"] : []);
+    expect(snapshot.attempts[0]).toMatchObject({ voided: protectedCrash, intakeOpen: !protectedCrash });
+    expect(snapshot.plannedReadyAtMs).toBe(protectedCrash ? goAtMs + elapsedMs + 120_000 : undefined);
+  });
+
   it("voids a protected post-Go attempt and uses a map-scoped manual re-launch", () => {
     const clock = new FakeClock();
     const controller = new CompetitionController(configuration(), clock);
@@ -824,7 +840,7 @@ describe("CompetitionController", () => {
 
   it("can disable protection by policy and manually toggle the current stage usage", () => {
     const disabledClock = new FakeClock();
-    const disabled = new CompetitionController(configuration({ policy: { announcementLeadMs: 0, readyBufferMs: 1_000, reconnectStableMs: 15_000, intermissionMs: 3_000, protectionWindowMs: 15_000, startProtectionEnabled: false } }), disabledClock);
+    const disabled = new CompetitionController(configuration({ policy: { announcementLeadMs: 0, readyBufferMs: 1_000, reconnectStableMs: 15_000, intermissionMs: 3_000, protectionWindowMs: 10_000, startProtectionEnabled: false } }), disabledClock);
     connectAll(disabled);
     enterRunning(disabled, disabledClock);
     disabledClock.advance(5_000);
@@ -1434,7 +1450,7 @@ describe("CompetitionController", () => {
           readyBufferMs: 1_000,
           reconnectStableMs: 15_000,
           intermissionMs: 120_000,
-          protectionWindowMs: 15_000
+          protectionWindowMs: 10_000
         }
       }), clock);
       connectAll(controller);
@@ -1524,7 +1540,7 @@ describe("CompetitionController", () => {
         readyBufferMs: 1_000,
         reconnectStableMs: 15_000,
         intermissionMs: 120_000,
-        protectionWindowMs: 15_000
+        protectionWindowMs: 10_000
       }
     }), clock);
     connectAll(controller);
@@ -1567,7 +1583,7 @@ describe("CompetitionController", () => {
         readyBufferMs: 1_000,
         reconnectStableMs: 15_000,
         intermissionMs: 120_000,
-        protectionWindowMs: 15_000
+        protectionWindowMs: 10_000
       },
       initialSnapshot: controller.snapshot()
     }), clock);
