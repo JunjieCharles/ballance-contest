@@ -549,7 +549,7 @@ export type ScoreboardAdjudicationInput =
 export type ScoreboardOverrideInput = ScoreboardAdjudicationInput;
 
 export type NotificationChannel = "bulletin" | "notice" | "announce" | "s";
-export type AttemptOrigin = "authoritative-go" | "referee-marked-started";
+export type AttemptOrigin = "authoritative-go" | "referee-marked-started" | "command-sent";
 
 export type CompetitionAction =
   | { type: "notification"; channel: NotificationChannel; text: string }

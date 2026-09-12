@@ -57,8 +57,9 @@ const cleanNotificationText = (text: string): string => {
 
 const escapePattern = (text: string): string => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
+const protocolBody = (line: string): string => line.replace(/^\[\d{2}-\d{2} \d{2}:\d{2}:\d{2}\]\s?/, "");
 const refereeEchoConnectionId = (line: string): string | undefined =>
-  /\[(\d+),\s*\*ContestConsole\]:/.exec(line)?.[1];
+  /^\[(\d+),\s*\*ContestConsole\]: (?:Level[\s_]+\d+\*?|[0-9a-f]+\.\.|"[^"]+")(?: <(?:SR|HS)>)? - (?:Get ready|3|2|1|Go!)$/i.exec(protocolBody(line))?.[1];
 
 const isContestRefereeEcho = (line: string, expectedConnectionId?: string): boolean => {
   const connectionId = refereeEchoConnectionId(line);
@@ -90,7 +91,7 @@ const mapEchoMatches = (line: string, map: string, mapName: string | undefined, 
 
 const PERMISSION_DENIED_TEXT = "Action failed: you don't have the permission to run this action.";
 
-export const isPermissionDeniedLine = (line: string): boolean => line.includes(PERMISSION_DENIED_TEXT);
+export const isPermissionDeniedLine = (line: string): boolean => protocolBody(line) === PERMISSION_DENIED_TEXT;
 
 const encode = (
   action: CommandAction,
@@ -124,8 +125,8 @@ const encode = (
           command: `s ${text}`,
           acknowledge: (line) => {
             const expected = refereeConnectionId();
-            return expected !== undefined && (line.endsWith(`[${expected}, *ContestConsole]: ${text}`)
-              || line.endsWith(`(${expected}, *ContestConsole): ${text}`));
+            return expected !== undefined && (protocolBody(line) === `[${expected}, *ContestConsole]: ${text}`
+              || protocolBody(line) === `(${expected}, *ContestConsole): ${text}`);
           }
         };
       }
@@ -134,8 +135,8 @@ const encode = (
       return {
         command: `${action.channel} ${text}`,
         acknowledge: (line) => {
-          if (action.channel === "bulletin") return line.endsWith(`[${label}] *ContestConsole: ${text}`);
-          const match = new RegExp(`\\[${label}\\] \\(\\d+, \\*ContestConsole\\): (.*)$`).exec(line);
+          if (action.channel === "bulletin") return protocolBody(line) === `[${label}] *ContestConsole: ${text}`;
+          const match = new RegExp(`^\\[${label}\\] \\(\\d+, \\*ContestConsole\\): (.*)$`).exec(protocolBody(line));
           const expected = refereeConnectionId();
           return expected !== undefined && match?.[1] === text && match[0].includes(`(${expected}, *ContestConsole)`);
         }
@@ -148,7 +149,7 @@ const encode = (
     case "cheat-off": return {
       command: "cheat off",
       acknowledge: (line) => {
-        const connectionId = /\(#?(\d+),\s*\*ContestConsole\) toggled cheat off globally!$/.exec(line)?.[1];
+        const connectionId = /^\(#?(\d+),\s*\*ContestConsole\) toggled cheat off globally!$/.exec(protocolBody(line))?.[1];
         const expected = refereeConnectionId();
         return expected !== undefined && connectionId === expected;
       }
@@ -174,11 +175,11 @@ const encode = (
     case "kick": {
       const playerName = cleanText(action.playerName);
       const reason = cleanText(action.reason);
-      const disconnected = new RegExp(`${escapePattern(playerName)} \\(#[0-9]+\\) disconnected\\.$`);
+      const disconnected = new RegExp(`^${escapePattern(playerName)} \\(#[0-9]+\\) disconnected\\.$`);
       const selfKicked = `The host hath bidden us farewell.  (1101: Kicked by *ContestConsole (${reason}).)`;
       return {
         command: `kick ${playerName} ${reason}`,
-        acknowledge: (line) => disconnected.test(line) || playerName === "*ContestConsole" && line.endsWith(selfKicked)
+        acknowledge: (line) => disconnected.test(protocolBody(line)) || playerName === "*ContestConsole" && protocolBody(line) === selfKicked
       };
     }
     case "raw": {
@@ -201,6 +202,7 @@ interface CommandTask {
   timeout?: ReturnType<typeof setTimeout>;
   settleAfterWriteTimeout?: ReturnType<typeof setTimeout>;
   onWriteStart?: (record: CommandRecord) => void;
+  onWritten?: (record: CommandRecord) => void;
   resolveResult: (record: CommandRecord) => void;
   finishTurn?: () => void;
 }
@@ -345,7 +347,7 @@ export class CommandQueue {
     return selected;
   }
 
-  public enqueue(action: CommandAction, idempotencyKey: string, onWriteStart?: (record: CommandRecord) => void): Promise<CommandRecord> {
+  public enqueue(action: CommandAction, idempotencyKey: string, onWriteStart?: (record: CommandRecord) => void, onWritten?: (record: CommandRecord) => void): Promise<CommandRecord> {
     const old = this.records.get(idempotencyKey);
     if (old) return Promise.resolve(old);
     const encoded = encode(action, () => this.refereeConnectionId);
@@ -374,6 +376,7 @@ export class CommandQueue {
         writeStarted: false,
         settled: false,
         ...(onWriteStart === undefined ? {} : { onWriteStart }),
+        ...(onWritten === undefined ? {} : { onWritten }),
         resolveResult: resolve
       };
       this.tasks.set(record.id, task);
@@ -431,11 +434,12 @@ export class CommandQueue {
       try {
         write = transport.write(task.encoded.command);
       } catch {
-        if (!task.settled && task.generation === this.connectionGeneration) this.settleTask(task, this.timeoutStatus(task));
+        if (!task.settled && task.generation === this.connectionGeneration) this.settleTask(task, this.timeoutStatus(task), "MockClient stdin 写入失败");
         return;
       }
       void write.then(() => {
         if (task.settled || task.generation !== this.connectionGeneration) return;
+        task.onWritten?.(task.record);
         if (task.encoded.acknowledgeAfterWriteMs !== undefined) {
           task.settleAfterWriteTimeout = setTimeout(() => {
             if (task.settled || task.generation !== this.connectionGeneration) return;
@@ -445,7 +449,7 @@ export class CommandQueue {
         }
       }, () => {
         if (task.settled || task.generation !== this.connectionGeneration) return;
-        this.settleTask(task, this.timeoutStatus(task));
+        this.settleTask(task, this.timeoutStatus(task), "MockClient stdin 写入失败");
       });
     });
   }

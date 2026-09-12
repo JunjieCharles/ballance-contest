@@ -7,7 +7,7 @@ import type {
 } from "./command-queue.js";
 
 export interface CommandQueuePort {
-  enqueue(action: CommandAction, idempotencyKey: string, onWriteStart?: (record: CommandRecord) => void): Promise<CommandRecord>;
+  enqueue(action: CommandAction, idempotencyKey: string, onWriteStart?: (record: CommandRecord) => void, onWritten?: (record: CommandRecord) => void): Promise<CommandRecord>;
   cancelWhere?(predicate: (record: Readonly<CommandRecord>) => boolean): readonly CommandRecord[];
   previewCancelWhere?(predicate: (record: Readonly<CommandRecord>) => boolean): readonly CommandCancellationPreview[];
   applyCancellationPreview?(previews: readonly CommandCancellationPreview[], notify?: boolean): readonly CommandRecord[];
@@ -32,7 +32,8 @@ const toCommand = (action: AutomationAction): CommandAction => {
 export class WorkAutomationRuntime {
   private readonly supersededActionKeys = new Set<string>();
 
-  public constructor(private readonly controller: CompetitionController, private readonly commands: CommandQueuePort | CommandQueue) {}
+  public constructor(private readonly controller: CompetitionController, private readonly commands: CommandQueuePort | CommandQueue,
+    private readonly onProgress?: () => void) {}
 
   public supersedeActions(idempotencyKeys: readonly string[]): readonly CommandRecord[] {
     for (const idempotencyKey of idempotencyKeys) this.supersededActionKeys.add(idempotencyKey);
@@ -87,7 +88,8 @@ export class WorkAutomationRuntime {
         this.reconcileSupersededAction(action.idempotencyKey);
         continue;
       }
-      const record = await this.commands.enqueue(toCommand(action), action.idempotencyKey);
+      const record = await this.commands.enqueue(toCommand(action), action.idempotencyKey, undefined,
+        () => { this.controller.observeActionWritten(action.id); this.onProgress?.(); });
       records.push(record);
       if (this.supersededActionKeys.has(action.idempotencyKey)) {
         this.reconcileSupersededAction(action.idempotencyKey, record);

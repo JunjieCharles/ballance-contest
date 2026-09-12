@@ -2,7 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import type { AttentionItem, CommandRecordView, RawClientLogLine, RefereeActionId } from "@ballance/contracts";
 import type { AutomationAction, AutomationSnapshot } from "@ballance/core";
 import type { CommandRecord } from "./command-queue.js";
-import { isPermissionDeniedLine, requiresExplicitCommandResolution } from "./command-queue.js";
+import { isPermissionDeniedLine } from "./command-queue.js";
 import type { EventJournal } from "./event-journal.js";
 import { commandView } from "./runtime-shared.js";
 import type { OpenedDatabase } from "./storage/database.js";
@@ -176,8 +176,8 @@ export class CompetitionAuditService {
     this.memoryCommands.set(competitionId, memory);
     if (record.status === "uncertain" || record.status === "failed" || record.status === "timed_out") {
       const permissionDenied = Boolean(record.responseLine && isPermissionDeniedLine(record.responseLine));
-      const blocksFlow = permissionDenied || requiresExplicitCommandResolution(record.action)
-        && (record.status === "failed" || record.status === "uncertain" || ["ready", "cheat-off", "go"].includes(record.action.type));
+      const transportFailed = record.responseLine === "MockClient stdin 写入失败";
+      const blocksFlow = permissionDenied || transportFailed;
       this.appendAttention(competitionId, {
         id: `command:${record.id}:${record.status}`,
         category: "command",
@@ -185,7 +185,8 @@ export class CompetitionAuditService {
         title: permissionDenied ? "ContestConsole 权限不足" : record.status === "uncertain" ? "命令结果待核实" : record.status === "timed_out" ? "命令等待回显超时" : "命令发送失败",
         message: permissionDenied
           ? `${record.command} 被服务器拒绝；自动化已阻断，请修复 ContestConsole 权限后重新核对。`
-          : `${record.command}；不会自动重试，请结合服务器现场和原始日志核对。`,
+          : transportFailed ? `${record.command} 写入 MockClient 失败；请恢复连接后重新启动起跑流程。`
+          : `${record.command} 未获得服务器确认；自动化继续，不会自动重发。如现场未起跑，请使用重赛本关或强制重置。`,
         occurredAt: record.updatedAt
       });
     }

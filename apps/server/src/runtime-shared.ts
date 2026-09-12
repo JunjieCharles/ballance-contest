@@ -112,7 +112,7 @@ export const automationView = (
   availableActions,
   attentionItems,
   scoreEditPermissions: [],
-  unconfirmedAutomationActions: snapshot?.actions
+  unconfirmedAutomationActions: mode === "work" ? [] : snapshot?.actions
     .filter(isUnresolvedAutomationAction)
     .map((action) => ({ id: action.id, kind: action.kind, stageId: action.stageId, status: action.status })) ?? [],
   unconfirmedCommands,

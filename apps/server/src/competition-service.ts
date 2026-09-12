@@ -617,7 +617,7 @@ export class CompetitionService {
     const controllerSnapshot = competition.mode === "work"
       ? this.runtimeAutomationSnapshot(competitionId)
       : controller?.snapshot();
-    const unresolved = controllerSnapshot?.actions.filter(isUnresolvedAutomationAction) ?? [];
+    const unresolved = competition.mode === "work" ? [] : controllerSnapshot?.actions.filter(isUnresolvedAutomationAction) ?? [];
     if (unresolved.length > 0) {
       throw new ServiceError("ACTION_UNAVAILABLE", "请先逐条确认已执行或执行重发，再恢复自动化", 409, { actionIds: unresolved.map((action) => action.id) });
     }
@@ -822,6 +822,7 @@ export class CompetitionService {
       ? this.observationGapsFor(competitionId).find((gap) => gap.id === input.gapId)
       : undefined;
     if (input.kind === "automation-command-resolution") {
+      if (competition.mode === "work") throw new ServiceError("CONFIRMATION_UNAVAILABLE", "回显缺失无需确认；现场未起跑时请重赛本关或强制重置", 409);
       if (!unresolvedAutomationAction || !input.resolution || input.resolution === "dismiss-failed" || input.resolution === "continue" || target !== unresolvedAutomationAction.id) {
         throw new ServiceError("CONFIRMATION_UNAVAILABLE", "目标流程命令已变化或不再需要处置", 409);
       }
@@ -2202,6 +2203,7 @@ export class CompetitionService {
         ...action,
         createdAtMs: action.createdAtMs + delta,
         ...(action.notBeforeMs === undefined ? {} : { notBeforeMs: action.notBeforeMs + delta }),
+        ...(action.writtenAtMs === undefined ? {} : { writtenAtMs: action.writtenAtMs + delta }),
         ...(action.acknowledgedAtMs === undefined ? {} : { acknowledgedAtMs: action.acknowledgedAtMs + delta })
       }))
     };
@@ -2579,7 +2581,7 @@ export class CompetitionService {
       const stored = JSON.parse(item.payload) as CommandRecord;
       const matchingAction = recoveredAutomation?.actions.find((action) => action.idempotencyKey === stored.idempotencyKey && action.kind === "go");
       const authoritativeAttempt = matchingAction && recoveredAutomation?.attempts.find((attempt) =>
-        attempt.stageId === matchingAction.stageId && !attempt.voided && attempt.goAtMs >= matchingAction.createdAtMs);
+        attempt.stageId === matchingAction.stageId && !attempt.voided && attempt.origin !== "command-sent" && attempt.goAtMs >= matchingAction.createdAtMs);
       if (stored.action.type === "go" && recoveredAutomation && matchingAction && authoritativeAttempt) {
         const acknowledged: CommandRecord = {
           ...stored,
@@ -2612,7 +2614,7 @@ export class CompetitionService {
       this.appendAttention(competitionId, {
         id: `recovered-command:${item.id}`,
         category: "command",
-        severity: "critical",
+        severity: "warning",
         title: "命令结果待核实",
         message: `${recovered.command}；不会自动重试，请裁判核对现场。`,
         occurredAt: recovered.updatedAt
@@ -2623,7 +2625,7 @@ export class CompetitionService {
         ?? Math.max(0, ...recoveredAutomation.actions.map((action) => action.acknowledgedAtMs ?? action.createdAtMs));
       recoveredAutomation = {
         ...recoveredAutomation,
-        actions: recoveredAutomation.actions.map((action) => action.status !== "pending"
+        actions: recoveredAutomation.actions.map((action) => action.writtenAtMs !== undefined || action.status !== "pending"
           || action.notBeforeMs !== undefined && action.undelivered
             && !row<{ id: string }>(this.options.database, "SELECT id FROM command_audits WHERE competition_id=? AND idempotency_key=?", competitionId, action.idempotencyKey)
           ? action
@@ -2870,7 +2872,7 @@ export class CompetitionService {
     const hasBlockingIssue = hasObservationGaps || blockers.some((blocker) => blocker.severity === "critical" || blocker.code === "PARTICIPANT_OFFLINE");
     const hasReadyFlowBlockingIssue = hasObservationGaps || blockers.some((blocker) => blocker.code !== "PARTICIPANT_CHEAT" && (blocker.severity === "critical" || blocker.code === "PARTICIPANT_OFFLINE"));
     const hasResumeBlockingIssue = hasObservationGaps || blockers.some((blocker) => blocker.severity === "critical" && blocker.code !== "INCIDENT_OPEN");
-    const hasUnconfirmedAutomationActions = snapshot?.actions.some(isUnresolvedAutomationAction) ?? false;
+    const hasUnconfirmedAutomationActions = competition.mode !== "work" && (snapshot?.actions.some(isUnresolvedAutomationAction) ?? false);
     const hasUnconfirmedCommands = this.unconfirmedCommandsFor(competitionId, snapshot).length > 0;
     const hasOpenServerIncident = (snapshot?.incidents as readonly { type?: string; status?: string }[] | undefined)
       ?.some((incident) => incident.type === "server-disconnect" && incident.status === "open") ?? false;
@@ -2888,8 +2890,8 @@ export class CompetitionService {
     const openAttempt = snapshot?.attempts.findLast((attempt) => attempt.intakeOpen && !attempt.voided);
     const commandTargetStageId = snapshot?.plannedReadyStageId ?? snapshot?.currentStageId;
     const targetStageActions = snapshot?.actions.filter((action) => action.stageId === commandTargetStageId) ?? [];
-    const previousGoIndex = targetStageActions.findLastIndex((action) => action.kind === "go" && (action.status === "acknowledged" || action.status === "referee-confirmed"));
-    const cheatOffConfirmed = targetStageActions.slice(previousGoIndex + 1).some((action) => action.kind === "cheat-off" && action.status === "acknowledged");
+    const previousGoIndex = targetStageActions.findLastIndex((action) => action.kind === "go" && (action.status === "acknowledged" || action.status === "sent-unconfirmed" || action.status === "referee-confirmed"));
+    const cheatOffConfirmed = targetStageActions.slice(previousGoIndex + 1).some((action) => action.kind === "cheat-off" && (action.status === "acknowledged" || action.status === "sent-unconfirmed"));
     const hasPendingCommands = snapshot?.actions.some((action) => action.status === "pending") ?? false;
     const effectivePhase = (phase === "paused" || phase === "incident") && snapshot?.pausedFromPhase
       ? snapshot.pausedFromPhase
@@ -3103,6 +3105,7 @@ export class CompetitionService {
   }
 
   private unconfirmedCommandsFor(competitionId: string, snapshot?: AutomationSnapshot): RuntimeSnapshot["unconfirmedCommands"] {
+    if (this.get(competitionId).mode === "work") return [];
     const automation = snapshot ?? this.getPayload(competitionId).work?.automation;
     const automationCommandKeys = new Set(automation?.actions.map((action) => action.idempotencyKey) ?? []);
     const resolvedCommandIds = new Set(this.getPayload(competitionId).resolvedCommandIds ?? []);

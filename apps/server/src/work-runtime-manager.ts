@@ -346,6 +346,7 @@ export class WorkRuntimeManager {
       : undefined;
     const controller = new CompetitionController({
       competitionId,
+      nonBlockingCommands: true,
       participants: definition.players.map((player) => player.id),
       dynamicParticipants: true,
       stages: definition.stages.map((stage) => {
@@ -370,7 +371,13 @@ export class WorkRuntimeManager {
     const commands = new CommandQueue(
       transport,
       this.dependencies.commandTimeoutMs ?? ((action) => action.type === "go" ? 15_000 : 10_000),
-      (record) => this.host.recordCommand(competitionId, record)
+      (record) => {
+        this.host.recordCommand(competitionId, record);
+        if (record.responseLine === "MockClient stdin 写入失败" && !runtime.disposed) {
+          if (runtime.client) this.handleUnexpectedDisconnect(runtime, record.responseLine);
+          else runtime.controller.observeServerDisconnect(record.responseLine);
+        }
+      }
     );
     const engine = new CompetitionEngine(definition);
     const restoredEngine = initialSnapshot ? this.host.restoredEngineSnapshot(competitionId, initialSnapshot) : undefined;
@@ -385,7 +392,7 @@ export class WorkRuntimeManager {
       engine,
       commands,
       commandObservationGeneration: commands.generation,
-      runtime: new WorkAutomationRuntime(controller, commands),
+      runtime: new WorkAutomationRuntime(controller, commands, () => this.saveSnapshot(runtime)),
       connection: transport instanceof ManagedMockClient
         ? {
             status: "connecting",
@@ -442,7 +449,7 @@ export class WorkRuntimeManager {
     }
     runtime.controller = prepared.controller;
     runtime.engine = prepared.engine;
-    runtime.runtime = new WorkAutomationRuntime(runtime.controller, runtime.commands);
+    runtime.runtime = new WorkAutomationRuntime(runtime.controller, runtime.commands, () => this.saveSnapshot(runtime));
     runtime.participantStageId = runtime.controller.snapshot().currentStageId;
     this.saveSnapshot(runtime);
     if (runtime.connection.status === "healthy") {
@@ -807,7 +814,12 @@ export class WorkRuntimeManager {
   }
 
   public async tickRealtime(runtime: WorkRuntime): Promise<void> {
-    if (runtime.automationDispatching || this.runtimes.get(runtime.competitionId) !== runtime) return;
+    if (runtime.disposed || this.runtimes.get(runtime.competitionId) !== runtime) return;
+    // Waiting for a command echo must not freeze countdown, intake or stage boundaries.
+    if (runtime.automationDispatching) {
+      this.synchronizeStageBoundary(runtime);
+      return;
+    }
     runtime.automationDispatching = true;
     const before = runtime.controller.snapshot().stateVersion;
     try {
@@ -1451,8 +1463,15 @@ export class WorkRuntimeManager {
   }
 
   public mirrorClosedAttempts(runtime: WorkRuntime): boolean {
-    const engineAttempts = runtime.engine.snapshot().attempts;
+    const snapshot = runtime.controller.snapshot();
     let changed = false;
+    for (const attempt of snapshot.attempts) {
+      if (attempt.origin !== "command-sent" || attempt.voided) continue;
+      const origin = snapshot.wallClockOriginMs ?? Date.now() - performance.now();
+      changed = runtime.engine.startSentAttempt({ id: attempt.id, stageId: attempt.stageId, attemptNumber: attempt.attemptNumber,
+        sourceId: `sent-go:${attempt.id}`, goAtMs: origin + attempt.goAtMs, deadlineAtMs: origin + attempt.deadlineAtMs }) || changed;
+    }
+    const engineAttempts = runtime.engine.snapshot().attempts;
     for (const attempt of runtime.controller.snapshot().attempts) {
       if (attempt.voided) continue;
       const engineAttempt = engineAttempts.find((candidate) =>

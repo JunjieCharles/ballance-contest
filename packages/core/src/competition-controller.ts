@@ -50,6 +50,7 @@ export interface AutomationConfiguration {
   startProtectionUsedStageIds?: readonly string[] | undefined;
   initialSnapshot?: AutomationSnapshot | undefined;
   restoreParticipantState?: boolean;
+  nonBlockingCommands?: boolean;
 }
 
 const formatDelay = (milliseconds: number): string => {
@@ -75,9 +76,10 @@ export interface AutomationAction {
   message?: string;
   manual?: boolean;
   acknowledgedAtMs?: number;
+  writtenAtMs?: number;
   isolated?: boolean;
   undelivered?: boolean;
-  status: "pending" | "acknowledged" | "failed" | "uncertain" | "referee-confirmed" | "cancelled";
+  status: "pending" | "acknowledged" | "failed" | "uncertain" | "referee-confirmed" | "cancelled" | "sent-unconfirmed";
 }
 
 export interface AutomationBlocker {
@@ -808,21 +810,49 @@ export class CompetitionController {
     this.settleDueStageClosures(this.clock.now());
   }
 
+  public observeActionWritten(actionId: string): void {
+    if (!this.configuration.nonBlockingCommands) return;
+    const action = this.actions.find((candidate) => candidate.id === actionId);
+    if (!action || action.status !== "pending" || action.isolated || action.writtenAtMs !== undefined) return;
+    action.writtenAtMs = this.clock.now();
+    if (action.kind !== "go") {
+      action.status = "sent-unconfirmed";
+      action.acknowledgedAtMs = action.writtenAtMs;
+      if (action.kind === "cheat-off") {
+        this.lastCheatOffAcknowledgedAtMs = action.writtenAtMs;
+        this.resetAllCheat();
+      }
+    }
+    this.bump();
+  }
+
   public acknowledgeAction(actionId: string, status: "acknowledged" | "failed" | "uncertain" | "cancelled"): void {
     this.settleDueStageClosures(this.clock.now());
     const action = this.actions.find((candidate) => candidate.id === actionId);
-    if (!action || action.status !== "pending") return;
+    if (!action || (action.status !== "pending" && action.status !== "sent-unconfirmed")) return;
+    if (status === "uncertain" && action.writtenAtMs !== undefined) {
+      // The transport succeeded. Missing server evidence is advisory; the
+      // planned countdown and subsequent Ready steps continue without a retry.
+      this.settleWrittenGo(this.clock.now());
+      return;
+    }
     action.status = status;
     if (status !== "acknowledged") {
+      if (this.configuration.nonBlockingCommands && status === "uncertain" && !this.permissionDeniedEvidence) {
+        action.status = "sent-unconfirmed";
+        action.acknowledgedAtMs ??= this.clock.now();
+        this.bump();
+        return;
+      }
       this.automationEnabled = false;
       if (this.phase !== "paused") this.pausedFromPhase = this.phase;
       this.phase = "paused";
       this.bump();
       return;
     }
-    action.acknowledgedAtMs = this.clock.now();
-    this.permissionDeniedEvidence = undefined;
-    if (action.kind === "cheat-off") { this.lastCheatOffAcknowledgedAtMs = this.clock.now(); this.resetAllCheat(); }
+    action.acknowledgedAtMs ??= this.clock.now();
+    // A successful unrelated command cannot clear a real permission failure.
+    if (action.kind === "cheat-off" && action.writtenAtMs === undefined) { this.lastCheatOffAcknowledgedAtMs = this.clock.now(); this.resetAllCheat(); }
     if (action.kind === "go" && action.stageId === this.commandTargetStage.id) this.startAttemptForStage(action.stageId);
     this.bump();
   }
@@ -1286,6 +1316,7 @@ export class CompetitionController {
   }
 
   private settleDueStageClosures(now: number): void {
+    this.settleWrittenGo(now);
     const attempt = this.currentAttempt;
     const boundaryAtMs = this.plannedReadyAtMs !== undefined
       && this.plannedReadyStageIndex !== undefined
@@ -1304,6 +1335,16 @@ export class CompetitionController {
     } else {
       this.enterPlannedStagePreparationIfDue(now);
     }
+  }
+
+  private settleWrittenGo(now: number): void {
+    const action = this.actions.findLast((candidate) => candidate.kind === "go"
+      && candidate.status === "pending" && candidate.writtenAtMs !== undefined && !candidate.isolated);
+    if (!action || action.stageId !== this.commandTargetStage.id || now < action.writtenAtMs! + 3_000) return;
+    action.status = "sent-unconfirmed";
+    action.acknowledgedAtMs = action.writtenAtMs! + 3_000;
+    this.startAttemptForStage(action.stageId, { origin: "command-sent", startedAtMs: action.acknowledgedAtMs });
+    this.bump();
   }
 
   private startAttemptForStage(
@@ -1463,7 +1504,7 @@ export class CompetitionController {
 
   private isolateUnfinishedActions(predicate: (action: AutomationAction) => boolean = () => true): void {
     for (const action of this.actions) {
-      if (!predicate(action) || !["pending", "failed", "uncertain"].includes(action.status)) continue;
+      if (!predicate(action) || !["pending", "failed", "uncertain", "sent-unconfirmed"].includes(action.status)) continue;
       this.undeliveredActionIds.delete(action.id);
       action.undelivered = false;
       action.isolated = true;
@@ -1568,7 +1609,7 @@ export class CompetitionController {
 
   private isAcknowledged(actionId: string | undefined): boolean {
     const status = actionId === undefined ? undefined : this.actions.find((action) => action.id === actionId)?.status;
-    return status === "acknowledged" || status === "referee-confirmed";
+    return status === "acknowledged" || status === "referee-confirmed" || status === "sent-unconfirmed";
   }
 
   private actionAcknowledgedAt(actionId: string | undefined): number | undefined {
@@ -1590,7 +1631,7 @@ export class CompetitionController {
   private startBlockers(): AutomationBlocker[] {
     const blockers: AutomationBlocker[] = [];
     if (this.permissionDeniedEvidence) blockers.push({ code: "PERMISSION_DENIED", severity: "critical", autoRecoverable: false, suggestion: "ContestConsole 权限不足；请在服务器修复权限后重新启动工作运行" });
-    if (this.actions.some((action) => !action.isolated && (action.status === "failed"
+    if (!this.configuration.nonBlockingCommands && this.actions.some((action) => !action.isolated && (action.status === "failed"
       || action.status === "uncertain" && ["ready", "cheat-off", "go"].includes(action.kind)))) {
       blockers.push({ code: "COMMAND_UNCONFIRMED", severity: "critical", autoRecoverable: false, suggestion: "核对服务器现场与命令审计，禁止自动补发" });
     }

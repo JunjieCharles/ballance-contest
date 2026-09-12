@@ -302,6 +302,18 @@ export class CompetitionEngine {
     attempt.deadlineAtMs = deadlineAtMs;
   }
 
+  public startSentAttempt(input: RefereeMarkedAttemptInput): boolean {
+    if (this.attempts.some((attempt) => attempt.stageId === input.stageId && !attempt.voided)) return false;
+    if (!this.stages.has(input.stageId)) throw new Error("UNKNOWN_STAGE");
+    if (!input.id.trim() || !input.sourceId.trim()) throw new Error("ATTEMPT_ID_REQUIRED");
+    if (input.attemptNumber !== this.attempts.filter((attempt) => attempt.stageId === input.stageId).length + 1) throw new Error("ATTEMPT_NUMBER_MISMATCH");
+    if (!Number.isFinite(input.goAtMs) || !Number.isFinite(input.deadlineAtMs) || input.deadlineAtMs <= input.goAtMs) throw new Error("INVALID_ATTEMPT_TIMING");
+    this.seenSources.add(input.sourceId);
+    this.openAttempt({ id: input.id, stageId: input.stageId, attemptNumber: input.attemptNumber,
+      origin: "command-sent", goSourceId: input.sourceId, goAtMs: input.goAtMs, deadlineAtMs: input.deadlineAtMs });
+    return true;
+  }
+
   public closeAttempt(stageId: string, attemptNumber: number): void {
     const attempt = this.attempts.find((candidate) =>
       candidate.stageId === stageId && candidate.attemptNumber === attemptNumber && !candidate.voided);

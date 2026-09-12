@@ -98,7 +98,7 @@ describe("CompetitionService dynamic participants", () => {
       competitionId: record.id,
       controller,
       engine: {
-        snapshot: () => ({ currentScoreboard: [], scoreboardVersions: [] }),
+        snapshot: () => ({ attempts: [], currentScoreboard: [], scoreboardVersions: [] }),
         apply: () => undefined
       },
       runtime: {
@@ -1058,10 +1058,10 @@ describe("CompetitionService dynamic participants", () => {
 
     const restored = new CompetitionService(undefined, { database, dataRoot }).snapshot(record.id);
     expect(restored.runtime.commands).toContainEqual(expect.objectContaining({ id: "sent-command", status: "uncertain" }));
-    expect(restored.runtime.unconfirmedCommands).toContainEqual(expect.objectContaining({ id: "sent-command", status: "uncertain" }));
-    expect(restored.runtime.blockers).toContainEqual(expect.objectContaining({ code: "COMMAND_UNCONFIRMED", severity: "critical" }));
+    expect(restored.runtime.unconfirmedCommands).toEqual([]);
+    expect(restored.runtime.blockers.some(item => item.code === "COMMAND_UNCONFIRMED")).toBe(false);
     expect(restored.runtime.observationGaps).toEqual([]);
-    expect(restored.runtime.attentionItems).toContainEqual(expect.objectContaining({ title: "命令结果待核实", severity: "critical" }));
+    expect(restored.runtime.attentionItems).toContainEqual(expect.objectContaining({ title: "命令结果待核实", severity: "warning" }));
     expect(restored.runtime.automationEnabled).toBe(false);
   });
 
@@ -2624,7 +2624,7 @@ describe("CompetitionService dynamic participants", () => {
     ]));
   });
 
-  it("persists per-command resolution for non-automation real commands without rewriting the originals", async () => {
+  it("keeps missing replies advisory across service recreation without retries or rewriting original audits", async () => {
     dataRoot = mkdtempSync(join(tmpdir(), "ballance-real-command-resolution-"));
     database = openDatabase(join(dataRoot, "console.sqlite"));
     let service = new CompetitionService(undefined, { database, dataRoot });
@@ -2659,73 +2659,12 @@ describe("CompetitionService dynamic participants", () => {
         .run(command.id, record.id, command.idempotencyKey, "raw", command.status, JSON.stringify(command), now, now);
     }
 
-    let snapshot = service.snapshot(record.id);
-    expect(snapshot.runtime.unconfirmedCommands).toEqual(expect.arrayContaining([
-      expect.objectContaining({ id: originals[0]?.id, status: "uncertain" }),
-      expect.objectContaining({ id: originals[1]?.id, status: "uncertain" }),
-      expect.objectContaining({ id: originals[2]?.id, status: "failed" })
-    ]));
-    expect(snapshot.runtime.blockers).toContainEqual(expect.objectContaining({ code: "COMMAND_UNCONFIRMED", severity: "critical" }));
-    expect(snapshot.runtime.availableActions).toContainEqual(expect.objectContaining({ action: "enable-automation", enabled: false }));
-
-    const confirmed = service.createConfirmation(record.id, {
-      kind: "command-resolution",
-      target: originals[0]!.id,
-      commandId: originals[0]!.id,
-      resolution: "confirm-executed"
-    });
-    await service.performAction(record.id, {
-      expectedStateVersion: snapshot.competition.stateVersion,
-      idempotencyKey: "confirm-real-command",
-      action: { type: "resolve-command", commandId: originals[0]?.id as string, resolution: "confirm-executed", confirmationToken: confirmed.token, impactHash: confirmed.impactHash }
-    });
-
-    snapshot = service.snapshot(record.id);
-    const resent = service.createConfirmation(record.id, {
-      kind: "command-resolution",
-      target: originals[1]!.id,
-      commandId: originals[1]!.id,
-      resolution: "resend"
-    });
-    const resendResult = await service.performAction(record.id, {
-      expectedStateVersion: snapshot.competition.stateVersion,
-      idempotencyKey: "resend-real-command",
-      action: { type: "resolve-command", commandId: originals[1]?.id as string, resolution: "resend", confirmationToken: resent.token, impactHash: resent.impactHash }
-    });
-    expect(resendResult).toMatchObject({ status: "failed", command: "version" });
-    expect(writes).toEqual(["version"]);
-    snapshot = service.snapshot(record.id);
-    const failedResend = snapshot.runtime.unconfirmedCommands.find((command) => command.command === "version" && command.id !== originals[1]?.id);
-    expect(failedResend).toMatchObject({ status: "failed" });
-    const dismissResend = service.createConfirmation(record.id, {
-      kind: "command-resolution",
-      target: failedResend!.id,
-      commandId: failedResend!.id,
-      resolution: "dismiss-failed"
-    });
-    await service.performAction(record.id, {
-      expectedStateVersion: snapshot.competition.stateVersion,
-      idempotencyKey: "dismiss-failed-resend",
-      action: { type: "resolve-command", commandId: failedResend!.id, resolution: "dismiss-failed", confirmationToken: dismissResend.token, impactHash: dismissResend.impactHash }
-    });
-    snapshot = service.snapshot(record.id);
-    expect(() => service.createConfirmation(record.id, {
-      kind: "command-resolution",
-      target: originals[2]!.id,
-      commandId: originals[2]!.id,
-      resolution: "confirm-executed"
-    })).toThrow(/处置方式/);
-    const dismissed = service.createConfirmation(record.id, {
-      kind: "command-resolution",
-      target: originals[2]!.id,
-      commandId: originals[2]!.id,
-      resolution: "dismiss-failed"
-    });
-    await service.performAction(record.id, {
-      expectedStateVersion: snapshot.competition.stateVersion,
-      idempotencyKey: "dismiss-failed-real-command",
-      action: { type: "resolve-command", commandId: originals[2]!.id, resolution: "dismiss-failed", confirmationToken: dismissed.token, impactHash: dismissed.impactHash }
-    });
+    const snapshot = service.snapshot(record.id);
+    expect(snapshot.runtime.unconfirmedCommands).toEqual([]);
+    expect(snapshot.runtime.blockers.some(item => item.code === "COMMAND_UNCONFIRMED")).toBe(false);
+    expect(writes).toEqual([]);
+    expect(() => service.createConfirmation(record.id, { kind: "command-resolution", target: originals[0]!.id,
+      commandId: originals[0]!.id, resolution: "confirm-executed" })).toThrow();
     for (const original of originals) {
       expect(database.sqlite.prepare("SELECT status FROM command_audits WHERE id=?").get(original.id)).toMatchObject({ status: original.status });
     }
@@ -2772,7 +2711,7 @@ describe("CompetitionService dynamic participants", () => {
       .run(unresolved.id, record.id, unresolved.idempotencyKey, "raw", unresolved.status, JSON.stringify(unresolved), now, now);
 
     let snapshot = service.snapshot(record.id);
-    expect(snapshot.runtime.unconfirmedCommands).toContainEqual(expect.objectContaining({ id: unresolved.id }));
+    expect(snapshot.runtime.unconfirmedCommands).toEqual([]);
     expect(snapshot.runtime.availableActions).toContainEqual(expect.objectContaining({ action: "restart-stage", enabled: true }));
     const stageId = snapshot.runtime.currentStageId;
     if (!stageId) throw new Error("missing current stage");
@@ -2786,7 +2725,6 @@ describe("CompetitionService dynamic participants", () => {
     snapshot = service.snapshot(record.id);
     expect(snapshot.runtime.phase).toBe("ready");
     expect(snapshot.runtime.unconfirmedCommands).toEqual([]);
-    expect(snapshot.runtime.attentionItems).toContainEqual(expect.objectContaining({ title: "未决真实命令已由强制重赛隔离" }));
     expect(database.sqlite.prepare("SELECT status FROM command_audits WHERE id=?").get(unresolved.id)).toMatchObject({ status: "uncertain" });
     manager.ingestLine(runtime, "[07-04 10:00:01] [7, *ContestConsole]: Level 01 - Go!");
     snapshot = service.snapshot(record.id);
@@ -2829,7 +2767,7 @@ describe("CompetitionService dynamic participants", () => {
     expect(writes).toEqual([]);
   });
 
-  it("keeps failed read-only list reconciliation non-blocking", async () => {
+  it("treats a rejected stdin write as a transport failure even for read-only commands", async () => {
     const service = new CompetitionService();
     const record = service.create({ name: "Read-only list failure", mode: "work", idempotencyKey: "read-only-list-failure" });
     service.publish(record.id, 0, "publish-read-only-list-failure");
@@ -2844,11 +2782,11 @@ describe("CompetitionService dynamic participants", () => {
     const snapshot = service.snapshot(record.id);
     expect(snapshot.runtime.unconfirmedCommands).toEqual([]);
     expect(snapshot.runtime.blockers.some((blocker) => blocker.code === "COMMAND_UNCONFIRMED")).toBe(false);
-    expect(snapshot.runtime.attentionItems).toContainEqual(expect.objectContaining({ category: "command", severity: "warning" }));
+    expect(snapshot.runtime.attentionItems).toContainEqual(expect.objectContaining({ category: "command", severity: "critical" }));
     await service.close();
   });
 
-  it("surfaces every rejected flow-changing stdin write for individual referee resolution", async () => {
+  it("blocks on rejected stdin writes with connection recovery instead of command confirmation", async () => {
     const service = new CompetitionService();
     const record = service.create({ name: "Rejected live writes", mode: "work", idempotencyKey: "rejected-live-writes" });
     service.publish(record.id, 0, "publish-rejected-live-writes");
@@ -2867,14 +2805,12 @@ describe("CompetitionService dynamic participants", () => {
     expect(results.map((result) => result.status)).toEqual(["uncertain", "uncertain", "uncertain", "uncertain"]);
 
     const snapshot = service.snapshot(record.id);
-    expect(snapshot.runtime.unconfirmedCommands.map((command) => command.actionType)).toEqual(expect.arrayContaining([
-      "ready", "cheat-off", "set-map", "set-official-map"
-    ]));
-    expect(snapshot.runtime.blockers).toContainEqual(expect.objectContaining({ code: "COMMAND_UNCONFIRMED", severity: "critical" }));
+    expect(snapshot.runtime.unconfirmedCommands).toEqual([]);
+    expect(snapshot.runtime.blockers.some(item => item.code === "INCIDENT_OPEN")).toBe(true);
     await service.close();
   });
 
-  it("writes a new audited command when a work-mode referee explicitly resends", async () => {
+  it("does not require referee confirmation or resend after missing work command replies", async () => {
     const service = new CompetitionService();
     const record = service.create({ name: "Work resend", mode: "work", idempotencyKey: "work-resend" });
     service.publish(record.id, 0, "publish-work-resend");
@@ -2898,26 +2834,12 @@ describe("CompetitionService dynamic participants", () => {
     const ready = due.find((action) => action.kind === "ready");
     for (const action of due.filter((candidate) => candidate.id !== ready?.id)) runtime.controller.acknowledgeAction(action.id, "acknowledged");
     runtime.controller.acknowledgeAction(ready!.id, "uncertain");
-    const confirmation = service.createConfirmation(record.id, {
-      kind: "automation-command-resolution",
-      target: ready!.id,
-      actionId: ready!.id,
-      resolution: "resend"
-    });
-    const result = await service.performAction(record.id, {
-      expectedStateVersion: 1,
-      idempotencyKey: "work-ready-resend",
-      action: {
-        type: "resolve-automation-command",
-        actionId: ready!.id,
-        resolution: "resend",
-        confirmationToken: confirmation.token,
-        impactHash: confirmation.impactHash
-      }
-    });
-    expect(result).toMatchObject({ status: "acknowledged", command: "countdown level 1 sr 4" });
-    expect(writes).toHaveLength(1);
-    expect(runtime.controller.snapshot().actions.find((action) => action.id === ready!.id)?.status).toBe("acknowledged");
+    expect(() => service.createConfirmation(record.id, {
+      kind: "automation-command-resolution", target: ready!.id, actionId: ready!.id, resolution: "resend"
+    })).toThrow();
+    expect(writes).toEqual([]);
+    expect(runtime.controller.snapshot().actions.find(action => action.id === ready!.id)?.status).toBe("sent-unconfirmed");
+    await service.close();
   });
 
   it("binds an idempotency key to one normalized action payload", async () => {
