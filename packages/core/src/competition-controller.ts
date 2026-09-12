@@ -229,7 +229,6 @@ const defaults = (participantCount: number): AutomationPolicy => ({
 const READY_STEP_MS = 5_000;
 const CHEAT_CONFIRMATION_BUFFER_MS = 10_000;
 const READY_NOTICE_LEAD_MS = 60_000;
-const START_PROTECTION_DELAY_MS = 2 * 60_000;
 const START_PROTECTION_USED_SUFFIX = "\n本关起跑保护已被使用，后续不再延时。";
 
 const formatUtc8Time = (epochMs: number): string => {
@@ -1409,11 +1408,8 @@ export class CompetitionController {
     const now = this.clock.now();
     const attempt = this.currentAttempt;
     const postGo = Boolean(attempt?.intakeOpen && now <= attempt.goAtMs + this.policy.protectionWindowMs);
-    const plannedReadyAtMs = now + START_PROTECTION_DELAY_MS;
+    const plannedReadyAtMs = now + READY_NOTICE_LEAD_MS;
     const stage = this.stage;
-    const name = stage.displayName ?? `${stage.mode.toUpperCase()}${stage.map}`;
-    const readyTime = formatUtc8Time(this.wallClockOriginMs + plannedReadyAtMs);
-    const eventText = "掉线";
     this.startProtectionUsedStageIds.add(stage.id);
     this.cancelPendingLaunchActions(stage.id);
     this.incidents.push({
@@ -1445,14 +1441,12 @@ export class CompetitionController {
     this.readyAnnouncementActionId = undefined;
     this.cheatOffActionId = undefined;
     this.goActionId = undefined;
-    const message = postGo
-      ? `${name}：玩家 ${participantId} 在起跑保护期${eventText}，当前尝试及成绩已作废，第一条 Ready 改至 ${readyTime}。`
-      : `${name}：玩家 ${participantId} 在起跑敏感期${eventText}，发令流程已中止，第一条 Ready 改至 ${readyTime}。`;
     const protectionMessage = postGo
-      ? `由于玩家 ${participantId} 起跑保护期${eventText}，本关重赛`
-      : `由于玩家 ${participantId} 起跑保护期${eventText}，发令时间延迟`;
-    this.queueActionForStage(postGo ? "announce" : "notice", stage, message);
+      ? `由于玩家 ${participantId} 起跑保护期掉线，当前尝试及成绩已作废，本关从 T-60 重新准备。`
+      : `由于玩家 ${participantId} 起跑保护期掉线，发令流程已中止，本关从 T-60 重新准备。`;
     this.planReady(this.stageIndex, plannedReadyAtMs, protectionMessage);
+    this.queueActionForStage("announce", stage, protectionMessage);
+    this.queueDueReadyNotice();
   }
 
   private cancelPendingLaunchActions(stageId: string): void {

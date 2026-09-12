@@ -707,7 +707,7 @@ describe("CompetitionController", () => {
     expect(controller.snapshot().attempts[0]?.results.some((result) => result.playerId === "p5")).toBe(false);
   });
 
-  it("uses pre-Go protection once, keeps the full two-minute delay, and emits exact newline suffixes", () => {
+  it("uses pre-Go protection once and separates the protection announcement from the T-60 notice", () => {
     const clock = new FakeClock();
     const controller = new CompetitionController(configuration(), clock);
     connectAll(controller);
@@ -721,32 +721,31 @@ describe("CompetitionController", () => {
     let snapshot = controller.snapshot();
     expect(snapshot).toMatchObject({
       phase: "restart-preparing",
-      plannedReadyAtMs: 120_000,
+      plannedReadyAtMs: 60_000,
       startProtectionUsedStageIds: ["s1"],
       attempts: []
     });
     expect(snapshot.actions.find((candidate) => candidate.kind === "ready")?.status).toBe("cancelled");
     const correction = controller.drainActions();
+    expect(correction.map((candidate) => candidate.kind)).toEqual(["bulletin", "announce", "notice"]);
+    expect(correction.find((candidate) => candidate.kind === "announce")?.message)
+      .toBe("由于玩家 p1 起跑保护期掉线，发令流程已中止，本关从 T-60 重新准备。");
     expect(correction.find((candidate) => candidate.kind === "notice")?.message)
-      .toBe("第一关：玩家 p1 在起跑敏感期掉线，发令流程已中止，第一条 Ready 改至 08:02。");
+      .toBe("第一关 即将在 1 分钟后发令，请提前做好重启游戏等准备，避免影响发令流程。\n本关起跑保护已被使用，后续不再延时。");
     expect(correction.find((candidate) => candidate.kind === "bulletin")?.message)
-      .toBe("第一关 将在 08:02 发令\n由于玩家 p1 起跑保护期掉线，发令时间延迟\n本关起跑保护已被使用，后续不再延时。");
+      .toBe("第一关 将在 08:01 发令\n由于玩家 p1 起跑保护期掉线，发令流程已中止，本关从 T-60 重新准备。\n本关起跑保护已被使用，后续不再延时。");
     for (const item of correction) controller.acknowledgeAction(item.id, "acknowledged");
 
     clock.set(10_000);
     controller.observeConnection("p1", true);
-    clock.set(60_000);
     controller.tick();
-    const notice = action(controller, "notice");
-    expect(notice.message).toBe("第一关 即将在 1 分钟后发令，请提前做好重启游戏等准备，避免影响发令流程。\n本关起跑保护已被使用，后续不再延时。");
-    expect(notice.message).toContain("\n");
-    expect(notice.message).not.toContain("\\n");
-    controller.acknowledgeAction(notice.id, "acknowledged");
+    expect(controller.drainActions()).toEqual([]);
 
-    clock.set(119_999);
+    clock.set(59_999);
     controller.tick();
-    expect(controller.snapshot()).toMatchObject({ phase: "restart-preparing", plannedReadyAtMs: 120_000 });
-    clock.set(120_000);
+    expect(controller.snapshot()).toMatchObject({ phase: "restart-preparing", plannedReadyAtMs: 60_000 });
+    expect(controller.drainActions()).toEqual([]);
+    clock.set(60_000);
     controller.tick();
     expect(controller.snapshot().phase).toBe("ready");
     controller.observeConnection("p2", false);
@@ -769,7 +768,7 @@ describe("CompetitionController", () => {
     expect(snapshot.phase).toBe(protectedCrash ? "restart-preparing" : "running");
     expect(snapshot.startProtectionUsedStageIds).toEqual(protectedCrash ? ["s1"] : []);
     expect(snapshot.attempts[0]).toMatchObject({ voided: protectedCrash, intakeOpen: !protectedCrash });
-    expect(snapshot.plannedReadyAtMs).toBe(protectedCrash ? goAtMs + elapsedMs + 120_000 : undefined);
+    expect(snapshot.plannedReadyAtMs).toBe(protectedCrash ? goAtMs + elapsedMs + 60_000 : undefined);
   });
 
   it("voids a protected post-Go attempt and uses a map-scoped manual re-launch", () => {
@@ -778,6 +777,7 @@ describe("CompetitionController", () => {
     connectAll(controller);
     enterRunning(controller, clock);
     controller.recordResult({ stageId: "s1", playerId: "p1", status: "finished", sourceId: "finish-before-crash" });
+    for (const item of controller.drainActions()) controller.acknowledgeAction(item.id, "acknowledged");
 
     clock.advance(5_000);
     controller.observeCrash("p2", "p2 was kicked by the server (fatal error) and crashed subsequently.");
@@ -785,17 +785,20 @@ describe("CompetitionController", () => {
     let snapshot = controller.snapshot();
     expect(snapshot).toMatchObject({
       phase: "restart-preparing",
-      plannedReadyAtMs: 155_000,
+      plannedReadyAtMs: 95_000,
       attempts: [{ attemptNumber: 1, intakeOpen: false, voided: true }]
     });
     expect(snapshot.attempts[0]?.results).toEqual([expect.objectContaining({ sourceId: "finish-before-crash" })]);
     expect(snapshot.attempts[0]?.results.some((result) => result.status === "dnf")).toBe(false);
     const correction = controller.drainActions();
+    expect(correction.map((candidate) => candidate.kind)).toEqual(["bulletin", "announce", "notice"]);
     expect(correction.find((candidate) => candidate.kind === "announce")?.message)
-      .toBe("第一关：玩家 p2 在起跑保护期掉线，当前尝试及成绩已作废，第一条 Ready 改至 08:02。");
+      .toBe("由于玩家 p2 起跑保护期掉线，当前尝试及成绩已作废，本关从 T-60 重新准备。");
+    expect(correction.find((candidate) => candidate.kind === "notice")?.message)
+      .toBe("第一关 即将在 1 分钟后发令，请提前做好重启游戏等准备，避免影响发令流程。\n本关起跑保护已被使用，后续不再延时。");
     const correctionBulletins = correction.filter((candidate) => candidate.kind === "bulletin");
     expect(correctionBulletins.find((candidate) => candidate.message?.includes("起跑保护"))?.message)
-      .toBe("第一关 将在 08:02 发令\n由于玩家 p2 起跑保护期掉线，本关重赛\n本关起跑保护已被使用，后续不再延时。");
+      .toBe("第一关 将在 08:01 发令\n由于玩家 p2 起跑保护期掉线，当前尝试及成绩已作废，本关从 T-60 重新准备。\n本关起跑保护已被使用，后续不再延时。");
     for (const item of correction) controller.acknowledgeAction(item.id, "acknowledged");
 
     controller.manualCheatOff();
