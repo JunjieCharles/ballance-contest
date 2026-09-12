@@ -667,6 +667,7 @@ export function App() {
             <div><span>本关 Ready（UTC+8）</span><strong>{formatUtc8DateTime(runtime.currentStageReadyAt)}</strong></div>
             <div><span>{hasCurrentActiveAttempt(runtime) ? "本关起跑（UTC+8）" : "预计起跑（UTC+8）"}</span><strong>{formatUtc8DateTime(runtime.plannedStageStartAt)}</strong></div>
             <div><span>本关最晚结束（UTC+8）</span><strong>{formatUtc8DateTime(runtime.stageDeadlineAt)}</strong></div>
+            <div><span>下一关 T-60（UTC+8）</span><strong>{formatUtc8DateTime(runtime.nextStagePreparationAt)}</strong></div>
             <div><span>下一关 Ready（UTC+8）</span><strong>{formatUtc8DateTime(runtime.nextStageReadyAt)}</strong></div>
             <div><span>自动化 / 倒数</span><strong>{runtime.automationEnabled ? "启用" : "暂停"}{runtime.countdownValue ? ` · ${runtime.countdownValue}` : ""}</strong></div>
           </section>
@@ -760,7 +761,7 @@ function ConsolePanel({ snapshot, canWrite, versionKey, saveConnection, startWor
       intent: actionId as ConfirmationIntent,
       stageId: targetStageId ?? runtime.currentStageId,
       ...(actionId === "delay-ready" || actionId === "extend-stage-deadline" ? { milliseconds: 60_000 } : {}),
-      ...(actionId === "reschedule" ? { plannedReadyAt: utc8InputToIso(scheduleAt) } : {}),
+      ...(actionId === "reschedule" ? { preparationAt: utc8InputToIso(scheduleAt) } : {}),
       ...(actionId === "reschedule-stage-deadline" ? { deadlineAt: utc8InputToIso(scheduleAt) } : {}),
       ...(actionId === "raw-command" ? { command: rawCommand.trim() } : {})
     };
@@ -830,9 +831,9 @@ function ConsolePanel({ snapshot, canWrite, versionKey, saveConnection, startWor
         {confirmedAction("Ready 延后 1 分钟", "delay-ready", "manual-action", snapshot.competition.id, (confirmation) => ({ type: "delay-ready", milliseconds: 60_000, confirmationToken: confirmation.token, impactHash: confirmation.impactHash }))}
         {confirmedAction("本关时限延长 1 分钟", "extend-stage-deadline", "manual-action", snapshot.competition.id, (confirmation) => ({ type: "extend-stage-deadline", milliseconds: 60_000, confirmationToken: confirmation.token, impactHash: confirmation.impactHash }))}
       </div>
-      <h3>改期（UTC+8）</h3>
+      <h3>改期（UTC+8）</h3><p className="muted">T-60 改期设置准备阶段的开始时间，第一条 Ready 在该时间后 60 秒发送。</p>
       <div className="schedule-editor"><input aria-label="改期时间（UTC+8）" type="datetime-local" value={scheduleAt} onChange={(event) => setScheduleAt(event.target.value)} />
-        {confirmedAction("Ready 改期", "reschedule", "manual-action", snapshot.competition.id, (confirmation) => ({ type: "reschedule", plannedReadyAt: utc8InputToIso(scheduleAt), confirmationToken: confirmation.token, impactHash: confirmation.impactHash }), undefined, false, undefined, `${versionKey}:${scheduleAt}`)}
+        {confirmedAction("T-60 改期", "reschedule", "manual-action", snapshot.competition.id, (confirmation) => ({ type: "reschedule", preparationAt: utc8InputToIso(scheduleAt), confirmationToken: confirmation.token, impactHash: confirmation.impactHash }), undefined, false, undefined, `${versionKey}:${scheduleAt}`)}
         {confirmedAction("关卡时限改期", "reschedule-stage-deadline", "manual-action", snapshot.competition.id, (confirmation) => ({ type: "reschedule-stage-deadline", deadlineAt: utc8InputToIso(scheduleAt), confirmationToken: confirmation.token, impactHash: confirmation.impactHash }), undefined, false, undefined, `${versionKey}:${scheduleAt}`)}
       </div>
     </div>

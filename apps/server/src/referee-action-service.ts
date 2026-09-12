@@ -305,9 +305,11 @@ export class RefereeActionService {
         break;
       }
       case "reschedule": {
-        const target = Date.parse(action.plannedReadyAt);
-        if (!Number.isFinite(target)) throw new ServiceError("VALIDATION_FAILED", "Ready 改期时间无效", 400);
-        controller().reschedule(this.wallTimeToRuntimeMs(competitionId, target));
+        const target = Date.parse(action.preparationAt);
+        if (!Number.isFinite(target)) throw new ServiceError("VALIDATION_FAILED", "T-60 改期时间无效", 400);
+        const preparationAt = this.wallTimeToRuntimeMs(competitionId, target);
+        if (preparationAt < (controller().snapshot().clockNowMs ?? 0)) throw new ServiceError("VALIDATION_FAILED", "T-60 改期时间不能早于比赛当前时间", 400);
+        controller().reschedule(preparationAt + 60_000);
         break;
       }
       case "reschedule-stage-deadline": {

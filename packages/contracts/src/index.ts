@@ -344,6 +344,7 @@ export interface RuntimeSnapshot {
   plannedReadyAt?: string;
   currentStageReadyAt?: string;
   nextStageReadyAt?: string;
+  nextStagePreparationAt?: string;
   startProtectionEnabled: boolean;
   startProtectionUsed: boolean;
   plannedStageStartAt?: string;
@@ -560,7 +561,7 @@ export type CompetitionAction =
   | { type: "ready"; confirmationToken: string; impactHash: string }
   | { type: "cheat-off" }
   | { type: "manual-go"; confirmationToken: string; impactHash: string }
-  | { type: "reschedule"; plannedReadyAt: string; confirmationToken: string; impactHash: string }
+  | { type: "reschedule"; preparationAt: string; confirmationToken: string; impactHash: string }
   | { type: "reschedule-stage-deadline"; deadlineAt: string; confirmationToken: string; impactHash: string }
   | { type: "delay-ready"; milliseconds: number; confirmationToken: string; impactHash: string }
   | { type: "extend-stage-deadline"; milliseconds: number; confirmationToken: string; impactHash: string }

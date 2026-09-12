@@ -124,7 +124,7 @@ const stageBoundActionForIntent = (intent: ConfirmationIntent | undefined): Refe
 
 interface ConfirmationBindingInput {
   milliseconds?: number;
-  plannedReadyAt?: string;
+  preparationAt?: string;
   deadlineAt?: string;
   command?: string;
   playerId?: string;
@@ -141,7 +141,7 @@ const confirmationInputBinding = (intent: ConfirmationIntent | undefined, input:
     case "extend-stage-deadline":
       return JSON.stringify({ milliseconds: input.milliseconds });
     case "reschedule":
-      return JSON.stringify({ plannedReadyAt: input.plannedReadyAt });
+      return JSON.stringify({ preparationAt: input.preparationAt });
     case "reschedule-stage-deadline":
       return JSON.stringify({ deadlineAt: input.deadlineAt });
     case "raw-command":
@@ -707,7 +707,7 @@ export class CompetitionService {
       commandId?: string;
       gapId?: string;
       milliseconds?: number;
-      plannedReadyAt?: string;
+      preparationAt?: string;
       deadlineAt?: string;
       command?: string;
       resolution?: "confirm-executed" | "dismiss-failed" | "resend" | "continue";
@@ -806,7 +806,7 @@ export class CompetitionService {
       rankPolicy: input.rankPolicy,
       points: input.points,
       milliseconds: input.milliseconds,
-      plannedReadyAt: input.plannedReadyAt,
+      preparationAt: input.preparationAt,
       deadlineAt: input.deadlineAt,
       command: input.command,
       runtimeStageImpact
@@ -1053,8 +1053,8 @@ export class CompetitionService {
           };
         case "reschedule":
           return {
-            title: `把下一次 Ready 改到 ${formatConfirmationDateTime(input.plannedReadyAt)}？`,
-            consequences: ["更新 Ready 计划，并发送新的发令时间公告。"],
+            title: `把下一次 T-60 改到 ${formatConfirmationDateTime(input.preparationAt)}？`,
+            consequences: ["从指定时间进入准备阶段，60 秒后发送第一条 Ready，并更新发令时间公告。"],
             irreversible: false
           };
         case "reschedule-stage-deadline":
@@ -2997,8 +2997,8 @@ export class CompetitionService {
       descriptor("delay-ready", "Ready 延后 1 分钟", "将下一次已安排的 Ready 时间顺延 1 分钟。", refereeActionsUnlocked && snapshot?.plannedReadyAtMs !== undefined && ["preparing", "pre-start-wait", "tail-intake", "restart-preparing"].includes(phase),
         !refereeActionsUnlocked ? "请先发布比赛配置" : "当前没有可延后的 Ready 计划",
         snapshot?.plannedReadyStageId),
-      descriptor("reschedule", "Ready 改期", "把下一次 Ready 改到指定时间，不改变本关时限。", refereeActionsUnlocked && snapshot?.plannedReadyAtMs !== undefined && ["preparing", "pre-start-wait", "tail-intake", "restart-preparing"].includes(phase),
-        !refereeActionsUnlocked ? "请先发布比赛配置" : "当前没有可改期的 Ready 计划",
+      descriptor("reschedule", "T-60 改期", "把准备边界改到指定时间，60 秒后发送第一条 Ready，不改变本关时限。", refereeActionsUnlocked && snapshot?.plannedReadyAtMs !== undefined && ["preparing", "pre-start-wait", "tail-intake", "restart-preparing"].includes(phase),
+        !refereeActionsUnlocked ? "请先发布比赛配置" : "当前没有可改期的 T-60 计划",
         snapshot?.plannedReadyStageId),
       descriptor("extend-stage-deadline", "本关时限延长 1 分钟", "立即把当前关卡最晚结束时间顺延 1 分钟。", refereeActionsUnlocked && Boolean(openAttempt) && ["running", "tail-intake"].includes(phase),
         !refereeActionsUnlocked ? "请先发布比赛配置" : "当前没有开放的成绩接收窗口",

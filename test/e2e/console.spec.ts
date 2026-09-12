@@ -1154,8 +1154,8 @@ test("shows disabled reasons, shared scheduling controls and automatic review co
   await page.getByRole("button", { name: "控制台", exact: true }).click();
   await expect(page.getByRole("button", { name: "重赛本关" })).toBeEnabled();
   await expect(page.getByLabel("改期时间（UTC+8）")).toBeVisible();
-  await expect(page.getByRole("button", { name: "Ready 改期" })).toBeDisabled();
-  await expect(page.getByText("当前没有可改期的 Ready 计划")).toBeVisible();
+  await expect(page.getByRole("button", { name: "T-60 改期" })).toBeDisabled();
+  await expect(page.getByText("当前没有可改期的 T-60 计划")).toBeVisible();
   await expect(page.getByRole("button", { name: "关卡时限改期" })).toBeDisabled();
   await expect(page.getByText("当前没有开放的成绩接收窗口").first()).toBeVisible();
   await expect(page.getByRole("button", { name: "进入 Ready+发令流程" })).toBeEnabled();
@@ -1183,6 +1183,27 @@ test("shows disabled reasons, shared scheduling controls and automatic review co
   await page.getByRole("button", { name: "启动自动化" }).click();
   await expect(page.getByText("本关 Ready（UTC+8）").locator("..")).not.toContainText("未设置");
   await expect(page.getByText("下一关 Ready（UTC+8）").locator("..")).toContainText("未设置");
+  await expect(page.getByText("下一关 T-60（UTC+8）").locator("..")).toContainText("未设置");
+  const beforeReschedule = (await selectedCompetitionSnapshot(page, name)).snapshot;
+  const preparationMs = Math.ceil((Date.parse(beforeReschedule.runtime.plannedReadyAt!) + 60_000) / 60_000) * 60_000;
+  const utc8Value = new Date(preparationMs + 8 * 3_600_000).toISOString().slice(0, 16);
+  await page.getByLabel("改期时间（UTC+8）").fill(utc8Value);
+  const reschedule = page.locator(".confirm-action").filter({ has: page.getByRole("button", { name: "T-60 改期", exact: true }) });
+  await reschedule.getByRole("button", { name: "T-60 改期", exact: true }).click();
+  await expect(reschedule).toContainText("从指定时间进入准备阶段，60 秒后发送第一条 Ready");
+  await reschedule.getByRole("button", { name: "确认", exact: true }).click();
+  await expect.poll(async () => (await selectedCompetitionSnapshot(page, name)).snapshot.runtime.plannedReadyAt).toBe(new Date(preparationMs + 60_000).toISOString());
+  let planned = (await selectedCompetitionSnapshot(page, name)).snapshot;
+  await accelerateActiveTestRun(page, name, planned.runtime.plannedReadyAtMs! - planned.runtime.virtualNowMs! + 35_000);
+  for (let step = 0; step < 40; step++) {
+    planned = (await selectedCompetitionSnapshot(page, name)).snapshot;
+    if (planned.runtime.nextStagePreparationAt) break;
+    await accelerateActiveTestRun(page, name, 15_000);
+  }
+  expect(planned.runtime.nextStagePreparationAt).toBeDefined();
+  expect(Date.parse(planned.runtime.nextStageReadyAt!) - Date.parse(planned.runtime.nextStagePreparationAt!)).toBe(60_000);
+  const expectedPreparation = new Intl.DateTimeFormat("zh-CN", { timeZone: "Asia/Shanghai", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false }).format(new Date(planned.runtime.nextStagePreparationAt!));
+  await expect(page.getByText("下一关 T-60（UTC+8）").locator("..")).toContainText(expectedPreparation);
   await accelerateActiveTestRun(page, name);
   await expect(page.getByText("阶段", { exact: true }).locator("..")).toContainText("比赛复核");
   await page.getByRole("button", { name: "归档", exact: true }).click();

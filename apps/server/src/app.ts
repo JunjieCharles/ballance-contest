@@ -193,7 +193,7 @@ export const buildApp = async (options: BuildAppOptions): Promise<FastifyInstanc
     commandId?: string;
     gapId?: string;
     milliseconds?: number;
-    plannedReadyAt?: string;
+    preparationAt?: string;
     deadlineAt?: string;
     command?: string;
     resolution?: "confirm-executed" | "dismiss-failed" | "resend" | "continue";

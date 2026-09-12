@@ -25,7 +25,7 @@ it.each(["work", "test"] as const)("finishes %s with closed scoring windows and 
       const { runId } = service.createTestRunFromScenario(id, "normal-player-roster");
       service.startTestAutomation(id, runId, 0); service.advanceTestAutomation(id, runId, 40_000);
     }
-    expect(service.snapshot(id).runtime.attempts.some(attempt => attempt.intakeOpen)).toBe(true);
+    expect(service.snapshot(id).runtime.attempts).toContainEqual(expect.objectContaining({ intakeOpen: true }));
     const audit = (service as unknown as { auditService: CompetitionAuditService }).auditService;
     for (let index = 0; index < 151; index++) {
       const at = new Date().toISOString();
@@ -37,13 +37,13 @@ it.each(["work", "test"] as const)("finishes %s with closed scoring windows and 
     await service.finishCompetition(id, { expectedStateVersion: service.snapshot(id).competition.stateVersion, idempotencyKey: "finish",
       confirmationToken: confirmation.token, impactHash: confirmation.impactHash });
     expect(service.snapshot(id).runtime).toMatchObject({ phase: "review", automationEnabled: false });
-    expect(service.snapshot(id).runtime.attempts.every(attempt => !attempt.intakeOpen)).toBe(true);
+    expect(service.snapshot(id).runtime.attempts).not.toContainEqual(expect.objectContaining({ intakeOpen: true }));
     await service.close(); database.close(); database = openDatabase(path);
     service = new CompetitionService(undefined, { database, dataRoot });
     const snapshot = service.snapshot(id);
     expect(snapshot.competition.status).toBe("finished");
     expect(snapshot.runtime.phase).toBe("review");
-    expect(snapshot.runtime.attempts.every(attempt => !attempt.intakeOpen)).toBe(true);
+    expect(snapshot.runtime.attempts).not.toContainEqual(expect.objectContaining({ intakeOpen: true }));
     const evidence = service.archiveEvidence(id);
     expect(evidence.mockClientVersion).toBe(mode === "work" ? "3.6.8-fixture" : "test-double");
     expect((evidence.records["audit/commands.json"] as unknown[]).length).toBeGreaterThanOrEqual(151);

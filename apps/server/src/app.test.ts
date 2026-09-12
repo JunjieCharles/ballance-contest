@@ -146,7 +146,14 @@ describe("local API", () => {
     expect((await act(2, { type: "extend-stage-deadline", milliseconds: 60_000 }, "extend-deadline")).statusCode).toBe(200);
     const readyTarget = new Date(Date.parse(before.plannedReadyAt) + 120_000).toISOString();
     const deadlineTarget = new Date(Date.parse(before.stageDeadlineAt) + 180_000).toISOString();
-    expect((await act(3, { type: "reschedule", plannedReadyAt: readyTarget }, "reschedule-ready")).statusCode).toBe(200);
+    const preparationTarget = new Date(Date.parse(readyTarget) - 60_000).toISOString();
+    const staleScheduleConfirmation = await app.inject({ method: "POST", url: `/api/v1/competitions/${competitionId}/confirmations`, headers: auth(token),
+      payload: { kind: "manual-action", intent: "reschedule", target: competitionId, preparationAt: preparationTarget } });
+    const staleSchedule = staleScheduleConfirmation.json<{ data: { token: string; impactHash: string } }>().data;
+    const changedSchedule = await app.inject({ method: "POST", url: `/api/v1/competitions/${competitionId}/actions`, headers: auth(token),
+      payload: { expectedStateVersion: 3, idempotencyKey: "changed-t60", action: { type: "reschedule", preparationAt: readyTarget, confirmationToken: staleSchedule.token, impactHash: staleSchedule.impactHash } } });
+    expect(changedSchedule.statusCode).toBe(409);
+    expect((await act(3, { type: "reschedule", preparationAt: preparationTarget }, "reschedule-preparation")).statusCode).toBe(200);
     expect((await act(4, { type: "reschedule-stage-deadline", deadlineAt: deadlineTarget }, "reschedule-deadline")).statusCode).toBe(200);
     const afterResponse = await app.inject({ method: "GET", url: `/api/v1/competitions/${competitionId}/snapshot`, headers: auth(token) });
     const after = afterResponse.json<{
@@ -162,6 +169,7 @@ describe("local API", () => {
       };
     }>().data.runtime;
     expect(after.plannedReadyAt).toBe(readyTarget);
+    expect(afterResponse.json<{ data: { runtime: { nextStagePreparationAt: string } } }>().data.runtime.nextStagePreparationAt).toBe(preparationTarget);
     expect(after.stageDeadlineAt).toBe(deadlineTarget);
     expect(after.attentionItems.some((item) => item.title === "赛程计划已更新")).toBe(true);
     await app.close();
@@ -196,6 +204,7 @@ describe("local API", () => {
       pausedFromPhase: "tail-intake",
       currentStageId: "s1",
       plannedReadyAt: readyTarget,
+      nextStagePreparationAt: preparationTarget,
       plannedReadyAtMs: after.plannedReadyAtMs,
       plannedReadyStageId: after.plannedReadyStageId,
       stageDeadlineAt: deadlineTarget,
