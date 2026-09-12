@@ -567,6 +567,16 @@ export class TestRuntimeManager {
     }
   }
 
+  public finishCompetition(competitionId: string): void {
+    const runtime = this.activeRuntime(competitionId);
+    if (!runtime) return;
+    this.stopRealtime(runtime.id);
+    runtime.automation.finish();
+    delete runtime.pendingCountdown;
+    this.mirrorClosedAttempts(runtime);
+    this.persistRuntime(runtime);
+  }
+
   public close(): void {
     for (const runId of this.realtimeTimers.keys()) this.stopRealtime(runId);
   }
@@ -679,7 +689,7 @@ export class TestRuntimeManager {
       ...this.host.storedScoreboardVersions(competitionId).map((version) => version.version)
     );
     runtime.engine.setNextScoreboardVersion(highestScoreboardVersion + 1);
-    runtime.automation.pause();
+    if (runtime.automation.snapshot().phase !== "review") runtime.automation.pause();
     delete runtime.pendingCountdown;
     return runtime;
   }

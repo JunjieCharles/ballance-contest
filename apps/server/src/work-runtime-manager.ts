@@ -982,6 +982,12 @@ export class WorkRuntimeManager {
     if (settled.controllerChanged) this.recordStageBoundary(runtime, settled.before, settled.after);
   }
 
+  public persistFinishedRuntime(runtime: WorkRuntime): void {
+    runtime.controller.finish();
+    this.mirrorClosedAttempts(runtime);
+    this.persistSnapshot(runtime, runtime.controller.snapshot());
+  }
+
   private persistSnapshot(runtime: WorkRuntime, automation: AutomationSnapshot): void {
     this.synchronizeParticipantStageStatuses(runtime, automation.currentStageId);
     const payload = this.host.getPayload(runtime.competitionId);

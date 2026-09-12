@@ -20,8 +20,9 @@ export class CompetitionAuditService {
     private readonly journal: EventJournal
   ) {}
 
-  public rawClientLogs(competitionId: string, limit: number): readonly RawClientLogLine[] {
-    const boundedLimit = Math.min(1_000, Math.max(1, Math.trunc(limit)));
+  public rawClientLogs(competitionId: string, limit: number, complete = false): readonly RawClientLogLine[] {
+    const boundedLimit = complete ? -1 : Math.min(1_000, Math.max(1, Math.trunc(limit)));
+    if (!this.database && complete) return [...(this.rawLogs.get(competitionId) ?? [])];
     if (!this.database) return (this.rawLogs.get(competitionId) ?? []).slice(-boundedLimit);
     return rows<{ source_id: string; source_file: string; occurred_at: string; raw_line: string }>(
       this.database,
@@ -87,12 +88,12 @@ export class CompetitionAuditService {
     if (inserted) this.journal.append({ type: "flow.attention", competitionId, data: item });
   }
 
-  public attentionItems(competitionId: string, snapshot?: AutomationSnapshot): AttentionItem[] {
+  public attentionItems(competitionId: string, snapshot?: AutomationSnapshot, complete = false): AttentionItem[] {
     const stored = this.database
       ? rows<{ id: string; category: AttentionItem["category"]; severity: AttentionItem["severity"]; title: string; message: string; occurred_at: string; stage_id: string | null; participant_ids: string | null; action: RefereeActionId | null }>(
         this.database,
-        "SELECT id,category,severity,title,message,occurred_at,stage_id,participant_ids,action FROM attention_items WHERE competition_id=? ORDER BY occurred_at DESC LIMIT 100",
-        competitionId
+        "SELECT id,category,severity,title,message,occurred_at,stage_id,participant_ids,action FROM attention_items WHERE competition_id=? ORDER BY occurred_at DESC LIMIT ?",
+        competitionId, complete ? -1 : 100
       ).map((item) => ({
         id: item.id, category: item.category, severity: item.severity, title: item.title, message: item.message, occurredAt: item.occurred_at,
         ...(item.stage_id ? { stageId: item.stage_id } : {}),
@@ -133,7 +134,7 @@ export class CompetitionAuditService {
     ];
     return [...dynamic, ...stored]
       .sort((left, right) => Date.parse(right.occurredAt) - Date.parse(left.occurredAt) || left.id.localeCompare(right.id))
-      .slice(0, 100);
+      .slice(0, complete ? undefined : 100);
   }
 
   public recordAutomationAttention(competitionId: string, action: AutomationAction): void {
@@ -198,9 +199,9 @@ export class CompetitionAuditService {
       .run(record.id, competitionId, idempotencyKey, record.actionType, record.status, JSON.stringify(record), record.createdAt, record.updatedAt);
   }
 
-  public commandHistory(competitionId: string): CommandRecordView[] {
-    if (!this.database) return [...(this.memoryCommands.get(competitionId)?.values() ?? [])].reverse().slice(0, 50).map(commandView);
-    return rows<{ payload: string }>(this.database, "SELECT payload FROM command_audits WHERE competition_id=? ORDER BY created_at DESC LIMIT 50", competitionId).map((item) => {
+  public commandHistory(competitionId: string, complete = false): CommandRecordView[] {
+    if (!this.database) return [...(this.memoryCommands.get(competitionId)?.values() ?? [])].reverse().slice(0, complete ? undefined : 50).map(commandView);
+    return rows<{ payload: string }>(this.database, "SELECT payload FROM command_audits WHERE competition_id=? ORDER BY created_at DESC LIMIT ?", competitionId, complete ? -1 : 50).map((item) => {
       const stored = JSON.parse(item.payload) as CommandRecord | CommandRecordView;
       return "action" in stored ? commandView(stored) : stored;
     });

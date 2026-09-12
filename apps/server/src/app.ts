@@ -304,10 +304,9 @@ export const buildApp = async (options: BuildAppOptions): Promise<FastifyInstanc
         "events/standard-events.json": fixed.definition.events,
         "results/scoreboard.json": fixed.scoreboard,
         "runtime/automation.json": fixed.automation,
-        "audit/commands.json": fixed.automation.actions,
+        "audit/automation-actions.json": fixed.automation.actions,
         "audit/incidents.json": fixed.automation.incidents,
-        "audit/attention-items.json": service.snapshot(fixed.competition.id).runtime.attentionItems,
-        "audit/overrides.json": []
+        ...service.archiveEvidence(fixed.competition.id).records
       },
       exports
     });
@@ -332,6 +331,8 @@ export const buildApp = async (options: BuildAppOptions): Promise<FastifyInstanc
     service.assertArchiveAvailable(request.params.competitionId);
     const competition = service.get(request.params.competitionId);
     const snapshot = service.snapshot(request.params.competitionId);
+    const evidence = service.archiveEvidence(competition.id);
+    const logPath = join(dataRoot, "work", competition.id, "logs", "mockclient.log");
     const fixed = service.getLatestScoreboard(request.params.competitionId);
     const generatedAt = new Date().toISOString();
     const exports = createScoreboardExports({
@@ -343,15 +344,14 @@ export const buildApp = async (options: BuildAppOptions): Promise<FastifyInstanc
       dataRoot, sourceRoot: dataRoot,
       competition: { id: competition.id, name: competition.name, mode: competition.mode, timezone: snapshot.config.timezone },
       version: request.body.version, generatedAt, applicationVersion: APPLICATION_VERSION, parserVersion: "1",
-      mockClientVersion: competition.mode === "test" ? "test-double" : "managed-mockclient",
-      sourceFiles: [],
+      mockClientVersion: evidence.mockClientVersion,
+      sourceFiles: competition.mode === "work" && existsSync(logPath) ? [{ sourcePath: logPath, archivePath: "logs/mockclient.log", kind: "log" }] : [],
       records: {
         "config/config.json": snapshot.config,
         "runtime/snapshot.json": snapshot.runtime,
         "results/scoreboard.json": fixed,
-        "audit/commands.json": snapshot.runtime.commands,
         "audit/incidents.json": snapshot.runtime.incidents,
-        "audit/attention-items.json": snapshot.runtime.attentionItems
+        ...evidence.records
       },
       exports
     });

@@ -810,6 +810,16 @@ export class CompetitionController {
     this.settleDueStageClosures(this.clock.now());
   }
 
+  public finish(): void {
+    for (const attempt of this.attempts) if (attempt.intakeOpen) this.closeIntake(attempt);
+    this.isolateUnfinishedActions();
+    this.clearLaunchCycleState();
+    this.automationEnabled = false;
+    this.phase = "review";
+    this.pausedFromPhase = undefined;
+    this.bump();
+  }
+
   public observeActionWritten(actionId: string): void {
     if (!this.configuration.nonBlockingCommands) return;
     const action = this.actions.find((candidate) => candidate.id === actionId);

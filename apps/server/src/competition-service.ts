@@ -1871,6 +1871,24 @@ export class CompetitionService {
     this.assertActionAvailable(competitionId, "archive", this.runtimeAutomationSnapshot(competitionId));
   }
 
+  public archiveEvidence(competitionId: string): { mockClientVersion: string; records: Record<string, unknown> } {
+    const competition = this.get(competitionId);
+    const payload = this.getPayload(competitionId);
+    const commands = this.options.database
+      ? (this.options.database.sqlite.prepare("SELECT payload FROM command_audits WHERE competition_id=? ORDER BY created_at,rowid").all(competitionId) as Array<{ payload: string }>).map(row => JSON.parse(row.payload) as unknown)
+      : this.auditService.checkpointCommandMemory(competitionId);
+    return {
+      mockClientVersion: competition.mode === "test" ? "test-double" : payload.work?.mockClientVersion ?? "unknown",
+      records: {
+        "config/published.json": this.snapshot(competitionId).publishedConfig,
+        "audit/commands.json": commands,
+        "audit/attention-items.json": this.auditService.attentionItems(competitionId, undefined, true),
+        "logs/raw-events.json": this.auditService.rawClientLogs(competitionId, 0, true),
+        "runtime/persisted.json": payload
+      }
+    };
+  }
+
   public async finishCompetition(competitionId: string, input: {
     expectedStateVersion: number;
     idempotencyKey: string;
@@ -1886,8 +1904,11 @@ export class CompetitionService {
     this.assertActionAvailable(competitionId, "finish", this.runtimeAutomationSnapshot(competitionId));
     this.consumeConfirmation(competitionId, "high-risk", input.confirmationToken, input.impactHash, competitionId, input.confirmationIntent ?? "finish");
     const runtime = this.workRuntimeManager.get(competitionId);
+    if (runtime?.client) this.workRuntimeManager.flushStageRecoveryEvidence(runtime);
     runtime?.controller.pause();
     await this.workRuntimeManager.remove(competitionId);
+    if (runtime) this.workRuntimeManager.persistFinishedRuntime(runtime);
+    this.testRuntimeManager.finishCompetition(competitionId);
     this.testRuntimeManager.removeCompetition(competitionId);
     const updated = { ...current, status: "finished" as const, stateVersion: current.stateVersion + 1, updatedAt: new Date().toISOString() };
     this.competitions.set(competitionId, updated);
