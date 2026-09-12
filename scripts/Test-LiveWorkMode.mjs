@@ -2,6 +2,7 @@ import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { performance } from "node:perf_hooks";
+import { createHash } from "node:crypto";
 import { CommandQueue } from "../apps/server/dist/command-queue.js";
 import { ManagedMockClient, readMockClientVersion } from "../apps/server/dist/mock-client.js";
 import { DEFAULT_RECOVERY_COOLDOWN_MS } from "../apps/server/dist/work-runtime-manager.js";
@@ -21,7 +22,10 @@ const selectedServers = [...new Set((configuredServers ? configuredServers.split
 const requireDualGate = process.argv.includes("--require-dual");
 const servers = requireDualGate ? requiredServers : selectedServers;
 const runRecoveryGate = requireDualGate && process.env.BALLANCE_ALLOW_LIVE_RECOVERY === "1";
-const customMapHash = process.env.BALLANCE_LIVE_CUSTOM_MAP_HASH ?? "e90b2f535c8bf881e9cb83129fba241d";
+// The documentation's e90b... example is official Level 02, whose existing
+// server name can take precedence. Use a dedicated synthetic protocol map.
+const customMapHash = process.env.BALLANCE_LIVE_CUSTOM_MAP_HASH
+  ?? createHash("md5").update("ContestConsole independent protocol probe map v1").digest("hex");
 const probeName = "ContestConsole";
 const loginRejectionObservationMs = 1_000;
 const recoveryReleaseLimitMs = 60_000;

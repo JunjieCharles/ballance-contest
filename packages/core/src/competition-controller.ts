@@ -67,6 +67,7 @@ export interface AutomationAction {
   kind: AutomationActionKind;
   idempotencyKey: string;
   createdAtMs: number;
+  notBeforeMs?: number;
   stageId: string;
   map: string;
   mapName?: string;
@@ -1162,7 +1163,7 @@ export class CompetitionController {
   public drainActions(predicate: (action: AutomationAction) => boolean = () => true): readonly AutomationAction[] {
     this.settleDueStageClosures(this.clock.now());
     const result = this.actions.filter((action) => {
-      if (!this.undeliveredActionIds.has(action.id) || !predicate(action)) return false;
+      if (!this.undeliveredActionIds.has(action.id) || (action.notBeforeMs !== undefined && this.clock.now() < action.notBeforeMs) || !predicate(action)) return false;
       this.undeliveredActionIds.delete(action.id);
       action.undelivered = false;
       return true;
@@ -1342,7 +1343,8 @@ export class CompetitionController {
     }
     if (options.announceStart ?? true) {
       const stageName = this.stage.displayName ?? `${this.stage.mode.toUpperCase()}${this.stage.map}`;
-      this.queueActionForStage("bulletin", this.stage, `${stageName}已起跑`, false);
+      const bulletin = this.queueActionForStage("bulletin", this.stage, `${stageName}已起跑`, false);
+      bulletin.notBeforeMs = now + 1_000;
     }
     return attempt;
   }
@@ -1452,7 +1454,7 @@ export class CompetitionController {
   private cancelPendingLaunchActions(stageId: string): void {
     for (const action of this.actions) {
       if (action.stageId !== stageId || action.status !== "pending"
-        || !["ready", "announce", "cheat-off", "go"].includes(action.kind)) continue;
+        || !(["ready", "announce", "cheat-off", "go"].includes(action.kind) || action.kind === "bulletin" && action.notBeforeMs !== undefined)) continue;
       action.status = "cancelled";
       this.undeliveredActionIds.delete(action.id);
       action.undelivered = false;

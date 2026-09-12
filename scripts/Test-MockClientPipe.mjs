@@ -45,7 +45,9 @@ const waitForLine = (lines, predicate, timeoutMs, startIndex = 0) => new Promise
 const port = await reservePort();
 const serverOutput = [];
 const server = spawn(join(serverDirectory, "BallanceMMOServer.exe"), ["-p", String(port), "-l", join(temporary, "server.log")], {
-  cwd: temporary, shell: false, windowsHide: true, stdio: ["ignore", "pipe", "pipe"]
+  // The server interprets stdin EOF as "stop". Keep its input pipe open for
+  // the complete client handshake and restart sequence.
+  cwd: temporary, shell: false, windowsHide: true, stdio: ["pipe", "pipe", "pipe"]
 });
 for (const stream of [server.stdout, server.stderr]) stream.on("data", (chunk) => serverOutput.push(chunk.toString("utf8")));
 let client;

@@ -2033,6 +2033,37 @@ describe("CompetitionService dynamic participants", () => {
     await service.close();
   });
 
+  it("persists and relocates the delayed launch Bulletin with its authoritative Go across service recreation", async () => {
+    dataRoot = mkdtempSync(join(tmpdir(), "ballance-delayed-bulletin-recovery-"));
+    database = openDatabase(join(dataRoot, "console.sqlite"));
+    let service = new CompetitionService(undefined, { database, dataRoot });
+    const record = service.create({ name: "Delayed launch notice", mode: "work", idempotencyKey: "delayed-launch" });
+    service.publish(record.id, 0, "publish-delayed-launch");
+    const manager = workRuntimeManager(service);
+    const runtime = manager.makeRuntime(record.id, service.snapshot(record.id).config, { write: async () => undefined });
+    manager.register(record.id, runtime);
+    runtime.controller.observeAuthoritativeGo();
+    manager.saveSnapshot(runtime);
+    const original = runtime.controller.snapshot();
+    const bulletin = original.actions.find(item => item.notBeforeMs !== undefined)!;
+    expect(bulletin.notBeforeMs! - original.attempts[0]!.goAtMs).toBeCloseTo(1_000, 4);
+    await service.close();
+    database.close();
+    database = openDatabase(join(dataRoot, "console.sqlite"));
+    service = new CompetitionService(undefined, { database, dataRoot });
+    const restored = workRuntimeManager(service).makeRuntime(record.id, service.snapshot(record.id).config, { write: async () => undefined });
+    workRuntimeManager(service).register(record.id, restored);
+    const state = restored.controller.snapshot();
+    const pending = state.actions.find(item => item.id === bulletin.id)!;
+    expect(pending).toMatchObject({ status: "pending", undelivered: true });
+    expect(pending.notBeforeMs! - state.attempts[0]!.goAtMs).toBeCloseTo(1_000, 4);
+    expect(state.wallClockOriginMs! + pending.notBeforeMs!).toBeCloseTo(original.wallClockOriginMs! + bulletin.notBeforeMs!, 2);
+    expect(restored.controller.drainDispatchableActions()).toEqual([]);
+    restored.controller.observeAuthoritativeGo();
+    expect(restored.controller.snapshot().actions.filter(item => item.notBeforeMs !== undefined)).toHaveLength(1);
+    await service.close();
+  });
+
   it("rolls back a failed stage-recovery transaction, restores its confirmation, and replays the durable receipt after restart", async () => {
     dataRoot = mkdtempSync(join(tmpdir(), "ballance-stage-recovery-uow-"));
     database = openDatabase(join(dataRoot, "console.sqlite"));

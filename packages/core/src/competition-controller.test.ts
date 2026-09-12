@@ -1057,6 +1057,32 @@ describe("CompetitionController", () => {
     expect(controller.snapshot().attempts).toHaveLength(1);
     expect(controller.snapshot().phase).toBe("running");
     expect(controller.snapshot().actions.filter((item) => item.kind === "bulletin" && item.message === "第一关已起跑")).toHaveLength(1);
+    expect(controller.drainActions()).toEqual([]);
+    clock.advance(999);
+    expect(controller.drainActions()).toEqual([]);
+    const checkpoint = controller.checkpoint();
+    const restored = new CompetitionController(configuration({ initialSnapshot: checkpoint.snapshot }), clock);
+    expect(restored.drainActions()).toEqual([]);
+    clock.advance(1);
+    expect(restored.drainActions()).toEqual([
+      expect.objectContaining({ kind: "bulletin", message: "第一关已起跑", createdAtMs: 0, notBeforeMs: 1_000 })
+    ]);
+    restored.observeAuthoritativeGo("s1");
+    expect(restored.drainActions()).toEqual([]);
+  });
+
+  it("cancels an undelivered launch Bulletin when protection voids the attempt during its one-second delay", () => {
+    const clock = new FakeClock();
+    const controller = new CompetitionController(configuration(), clock);
+    connectAll(controller);
+    controller.enable(60_000);
+    controller.drainActions();
+    controller.observeAuthoritativeGo("s1");
+    clock.advance(500);
+    controller.observeConnection("p1", false);
+    clock.advance(500);
+    expect(controller.drainActions().some(item => item.message === "第一关已起跑")).toBe(false);
+    expect(controller.snapshot().attempts[0]?.voided).toBe(true);
   });
 
   it("blocks overdue actions after a detected sleep or clock discontinuity", () => {
@@ -1263,6 +1289,7 @@ describe("CompetitionController", () => {
     connectAll(controller);
     enterRunning(controller, clock);
     controller.recordResult({ stageId: "s1", playerId: "p1", status: "finished", sourceId: "old-score" });
+    clock.advance(1_000);
     const oldBulletin = action(controller, "bulletin");
     controller.acknowledgeAction(oldBulletin.id, "failed");
     controller.observePermissionDenied("permission denied");

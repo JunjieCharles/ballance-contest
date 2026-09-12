@@ -2201,6 +2201,7 @@ export class CompetitionService {
       actions: stored.actions.map((action) => ({
         ...action,
         createdAtMs: action.createdAtMs + delta,
+        ...(action.notBeforeMs === undefined ? {} : { notBeforeMs: action.notBeforeMs + delta }),
         ...(action.acknowledgedAtMs === undefined ? {} : { acknowledgedAtMs: action.acknowledgedAtMs + delta })
       }))
     };
@@ -2623,6 +2624,8 @@ export class CompetitionService {
       recoveredAutomation = {
         ...recoveredAutomation,
         actions: recoveredAutomation.actions.map((action) => action.status !== "pending"
+          || action.notBeforeMs !== undefined && action.undelivered
+            && !row<{ id: string }>(this.options.database, "SELECT id FROM command_audits WHERE competition_id=? AND idempotency_key=?", competitionId, action.idempotencyKey)
           ? action
           : ["ready", "cheat-off", "go"].includes(action.kind)
             ? { ...action, status: "uncertain" as const }
