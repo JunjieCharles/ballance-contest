@@ -1477,6 +1477,9 @@ export class WorkRuntimeManager {
       changed = runtime.engine.startSentAttempt({ id: attempt.id, stageId: attempt.stageId, attemptNumber: attempt.attemptNumber,
         sourceId: `sent-go:${attempt.id}`, goAtMs: origin + attempt.goAtMs, deadlineAtMs: origin + attempt.deadlineAtMs }) || changed;
     }
+    // Sent Go can create exclusions before any server Go reaches ingestion.
+    // Mirror them before accepting the first finish or closing the new window.
+    if (changed) this.mirrorSystemResults(runtime);
     const engineAttempts = runtime.engine.snapshot().attempts;
     for (const attempt of runtime.controller.snapshot().attempts) {
       if (attempt.voided) continue;

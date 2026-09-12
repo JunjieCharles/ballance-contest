@@ -13,6 +13,7 @@ it("starts and scores a sent Go without echo, deduplicates late Go and restores 
   const path = join(dataRoot, "console.sqlite");
   let database = openDatabase(path);
   let service = new CompetitionService(undefined, { database, dataRoot });
+  let restoreClock: (() => void) | undefined;
   try {
     const { id } = service.create({ name: "Sent Go", mode: "work", idempotencyKey: "create" });
     service.publish(id, 0, "publish");
@@ -20,6 +21,8 @@ it("starts and scores a sent Go without echo, deduplicates late Go and restores 
     let runtime = manager.makeRuntime(id, service.snapshot(id).config, { write: async () => {} });
     manager.register(id, runtime);
     let now = performance.now();
+    const clock = vi.spyOn(performance, "now").mockImplementation(() => now);
+    restoreClock = () => clock.mockRestore();
     const controller = runtime.controller;
     (controller as unknown as { clock: { now: () => number } }).clock.now = () => now;
     const writes: string[] = [];
@@ -33,14 +36,18 @@ it("starts and scores a sent Go without echo, deduplicates late Go and restores 
     const go = dispatch.dispatch();
     await vi.waitFor(() => expect(controller.snapshot().actions.at(-1)?.writtenAtMs).toBeDefined());
     const sentAt = controller.snapshot().actions.at(-1)!.writtenAtMs!;
+    controller.registerParticipant("Bob");
+    controller.observeCheat("Bob", true);
     now = sentAt + 2_999; manager.synchronizeStageBoundary(runtime);
     expect(controller.snapshot().attempts).toEqual([]);
     now = sentAt + 3_000; manager.synchronizeStageBoundary(runtime);
     expect(controller.snapshot().attempts[0]).toMatchObject({ origin: "command-sent", goAtMs: now, intakeOpen: true });
     const attempt = runtime.engine.snapshot().attempts[0]!;
     expect(attempt).toMatchObject({ origin: "command-sent", id: controller.snapshot().attempts[0]!.id });
-    runtime.engine.apply({ type: "finish", stageId: attempt.stageId, playerId: "Alice", sourceId: "finish",
-      atMs: attempt.goAtMs + 1_000, score: 100, elapsedMs: 1_000 });
+    expect(runtime.engine.snapshot().currentScoreboard.find(entry => entry.playerId === "Bob")?.stages[attempt.stageId]).toMatchObject({ status: "excluded", points: 0 });
+    now += 2_000;
+    const finishTime = new Date(attempt.goAtMs + 2_000 + 8 * 3_600_000).toISOString();
+    manager.ingestLine(runtime, `[${finishTime.slice(5, 10)} ${finishTime.slice(11, 19)}] (#11, Alice) finished Level 01 in 1st place (score: 100; real time: 0:00:02.000).`);
     expect(runtime.engine.snapshot().currentScoreboard.find(entry => entry.playerId === "Alice")?.stages[attempt.stageId]?.points).toBeGreaterThan(0);
     now += 5_000; controller.observeAuthoritativeGo(); manager.synchronizeStageBoundary(runtime);
     expect(runtime.engine.snapshot().attempts).toHaveLength(1);
@@ -57,7 +64,7 @@ it("starts and scores a sent Go without echo, deduplicates late Go and restores 
     expect(runtime.engine.snapshot().attempts).toHaveLength(1);
     expect(runtime.engine.snapshot().attempts[0]).toMatchObject({ id: attempt.id, origin: "command-sent", goAtMs: attempt.goAtMs });
     expect(runtime.engine.snapshot().currentScoreboard.find(entry => entry.playerId === "Alice")?.stages[attempt.stageId]?.points).toBeGreaterThan(0);
-  } finally { await service.close(); database.close(); rmSync(dataRoot, { recursive: true, force: true }); }
+  } finally { restoreClock?.(); await service.close(); database.close(); rmSync(dataRoot, { recursive: true, force: true }); }
 });
 
 it("does not acknowledge Go or deny permission from quoted player chat", async () => {
