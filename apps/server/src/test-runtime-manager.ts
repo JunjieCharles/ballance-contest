@@ -1096,13 +1096,16 @@ export class TestRuntimeManager {
   private mirrorClosedAttempts(runtime: TestRuntime): void {
     const engineAttempts = runtime.engine.snapshot().attempts;
     for (const attempt of runtime.automation.snapshot().attempts) {
-      if (attempt.intakeOpen || attempt.voided) continue;
+      if (attempt.voided) continue;
       const engineAttempt = engineAttempts.find((candidate) =>
         candidate.stageId === attempt.stageId
         && candidate.attemptNumber === attempt.attemptNumber
         && candidate.open
         && !candidate.voided);
-      if (engineAttempt) runtime.engine.closeAttempt(attempt.stageId, attempt.attemptNumber);
+      if (!engineAttempt) continue;
+      runtime.engine.updateAttemptDeadline(attempt.stageId, attempt.attemptNumber,
+        engineAttempt.goAtMs + (attempt.deadlineAtMs - attempt.goAtMs));
+      if (!attempt.intakeOpen) runtime.engine.closeAttempt(attempt.stageId, attempt.attemptNumber);
     }
   }
 

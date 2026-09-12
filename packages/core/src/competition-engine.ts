@@ -294,6 +294,14 @@ export class CompetitionEngine {
     this.createScoreboardVersion(stageId, sourceId);
   }
 
+  public updateAttemptDeadline(stageId: string, attemptNumber: number, deadlineAtMs: number): void {
+    const attempt = this.attempts.find((candidate) =>
+      candidate.stageId === stageId && candidate.attemptNumber === attemptNumber && !candidate.voided);
+    if (!attempt) throw new Error("ATTEMPT_NOT_FOUND");
+    if (!Number.isFinite(deadlineAtMs) || deadlineAtMs <= attempt.goAtMs) throw new Error("INVALID_ATTEMPT_TIMING");
+    attempt.deadlineAtMs = deadlineAtMs;
+  }
+
   public closeAttempt(stageId: string, attemptNumber: number): void {
     const attempt = this.attempts.find((candidate) =>
       candidate.stageId === stageId && candidate.attemptNumber === attemptNumber && !candidate.voided);

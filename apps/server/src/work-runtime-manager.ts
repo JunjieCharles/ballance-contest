@@ -1454,13 +1454,19 @@ export class WorkRuntimeManager {
     const engineAttempts = runtime.engine.snapshot().attempts;
     let changed = false;
     for (const attempt of runtime.controller.snapshot().attempts) {
-      if (attempt.intakeOpen || attempt.voided) continue;
+      if (attempt.voided) continue;
       const engineAttempt = engineAttempts.find((candidate) =>
         candidate.stageId === attempt.stageId
         && candidate.attemptNumber === attempt.attemptNumber
         && candidate.open
         && !candidate.voided);
       if (!engineAttempt) continue;
+      const deadlineAtMs = engineAttempt.goAtMs + (attempt.deadlineAtMs - attempt.goAtMs);
+      if (engineAttempt.deadlineAtMs !== deadlineAtMs) {
+        runtime.engine.updateAttemptDeadline(attempt.stageId, attempt.attemptNumber, deadlineAtMs);
+        changed = true;
+      }
+      if (attempt.intakeOpen) continue;
       runtime.engine.closeAttempt(attempt.stageId, attempt.attemptNumber);
       changed = true;
     }
