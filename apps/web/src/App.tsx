@@ -158,6 +158,7 @@ interface ConfirmButtonProps {
   requestPayload?: unknown;
   disabled?: boolean;
   disabledReason?: string | undefined;
+  description?: string | undefined;
   className?: string | undefined;
   requestConfirmation(kind: ConfirmationKind, target: string, requestPayload?: unknown): Promise<ConfirmationSummary>;
   onConfirm(confirmation: ConfirmationSummary): Promise<void>;
@@ -175,6 +176,7 @@ function ConfirmButtonState({
   requestPayload,
   disabled,
   disabledReason,
+  description,
   className,
   requestConfirmation,
   onConfirm
@@ -222,6 +224,7 @@ function ConfirmButtonState({
   };
   return <div className="confirm-action" data-version={versionKey}>
     <button aria-label={busy && !confirmation ? label : undefined} className={className} disabled={disabled || busy} title={disabledReason} onClick={() => void prepare()}>{busy && !confirmation ? "准备中…" : label}</button>
+    {description && <small className="action-effect">{description}</small>}
     {disabled && disabledReason && <small className="disabled-reason">{disabledReason}</small>}
     {confirmation && <div className="inline-confirm" role="group" aria-label={`${label}确认`}>
       {(() => {
@@ -767,6 +770,7 @@ function ConsolePanel({ snapshot, canWrite, versionKey, saveConnection, startWor
       ...(actionId === "raw-command" ? { command: rawCommand.trim() } : {})
     };
     return <ConfirmButton label={label} kind={kind} target={confirmationTarget} versionKey={confirmationVersionKey} className={className}
+      description={["mark-stage-started", "restart-stage", "force-reset-stage", "force-next-stage"].includes(actionId) ? availability?.effect : undefined}
       disabled={!canWrite || !availability?.enabled || extraDisabled} disabledReason={!canWrite ? "实时连接或控制权不可用" : extraDisabled ? extraReason : availability?.disabledReason}
       requestPayload={confirmationPayload} requestConfirmation={requestConfirmation} onConfirm={(confirmation) => performAction(build(confirmation))} />;
   };
@@ -815,16 +819,16 @@ function ConsolePanel({ snapshot, canWrite, versionKey, saveConnection, startWor
         <ActionButton runtime={runtime} action="cheat-off" canWrite={canWrite} onClick={() => void performAction({ type: "cheat-off" })}>关闭 cheat</ActionButton>
         {confirmedAction("手动发令", "manual-go", "manual-go", snapshot.competition.id, (confirmation) => ({ type: "manual-go", confirmationToken: confirmation.token, impactHash: confirmation.impactHash }))}
         {confirmedAction("提前结束本关", "end-stage", "manual-action", snapshot.competition.id, (confirmation) => ({ type: "end-stage", confirmationToken: confirmation.token, impactHash: confirmation.impactHash }), "danger")}
-        {confirmedAction("重赛本关", "restart-stage", "restart-stage", availabilityFor(runtime, "restart-stage")?.targetStageId ?? snapshot.competition.id, (confirmation) => ({ type: "restart-stage", stageId: availabilityFor(runtime, "restart-stage")?.targetStageId ?? "", confirmationToken: confirmation.token, impactHash: confirmation.impactHash }), "danger")}
         {confirmedAction(runtime.startProtectionUsed ? "将起跑保护重置为未使用" : "将起跑保护标记为已使用", "set-start-protection", "manual-action", `${snapshot.competition.id}:start-protection:${runtime.currentStageId}:${!runtime.startProtectionUsed}`, (confirmation) => ({ type: "set-start-protection", used: !runtime.startProtectionUsed, confirmationToken: confirmation.token, impactHash: confirmation.impactHash }), runtime.startProtectionUsed ? undefined : "danger", false, undefined, `${snapshot.competition.stateVersion}:${runtime.currentStageId}:${runtime.startProtectionUsed}`)}
       </div>
-      <h3>现场关卡恢复</h3>
-      <div className="button-row action-row">
-        {confirmedAction(availabilityFor(runtime, "mark-stage-started")?.label ?? "手动标记当前关已起跑", "mark-stage-started", "manual-action", snapshot.competition.id,
+      <h3 id="现场恢复">现场恢复</h3>
+      <div className="button-row action-row" role="group" aria-labelledby="现场恢复">
+        {confirmedAction(availabilityFor(runtime, "mark-stage-started")?.label ?? "标记本关已起跑", "mark-stage-started", "manual-action", snapshot.competition.id,
           (confirmation) => ({ type: "mark-stage-started", stageId: availabilityFor(runtime, "mark-stage-started")?.targetStageId ?? "", confirmationToken: confirmation.token, impactHash: confirmation.impactHash }), "danger")}
-        {confirmedAction(availabilityFor(runtime, "force-reset-stage")?.label ?? "强制重置本关（T-60）", "force-reset-stage", "manual-action", snapshot.competition.id,
+        {confirmedAction("重置本关到 Ready", "restart-stage", "restart-stage", availabilityFor(runtime, "restart-stage")?.targetStageId ?? snapshot.competition.id, (confirmation) => ({ type: "restart-stage", stageId: availabilityFor(runtime, "restart-stage")?.targetStageId ?? "", confirmationToken: confirmation.token, impactHash: confirmation.impactHash }), "danger")}
+        {confirmedAction(availabilityFor(runtime, "force-reset-stage")?.label ?? "重置本关到 T-60", "force-reset-stage", "manual-action", snapshot.competition.id,
           (confirmation) => ({ type: "force-reset-stage", stageId: availabilityFor(runtime, "force-reset-stage")?.targetStageId ?? "", confirmationToken: confirmation.token, impactHash: confirmation.impactHash }), "danger")}
-        {confirmedAction(availabilityFor(runtime, "force-next-stage")?.label ?? "强制进入下一关", "force-next-stage", "manual-action", snapshot.competition.id,
+        {confirmedAction(availabilityFor(runtime, "force-next-stage")?.label ?? "进入下一关 T-60", "force-next-stage", "manual-action", snapshot.competition.id,
           (confirmation) => ({ type: "force-next-stage", stageId: availabilityFor(runtime, "force-next-stage")?.targetStageId ?? "", confirmationToken: confirmation.token, impactHash: confirmation.impactHash }), "danger")}
       </div>
       <h3>相对延时</h3>
@@ -862,7 +866,7 @@ function ConsolePanel({ snapshot, canWrite, versionKey, saveConnection, startWor
             onConfirm={(confirmation) => performAction({ type: "resolve-command", commandId: command.id, resolution: "resend", confirmationToken: confirmation.token, impactHash: confirmation.impactHash })} />
         </div>)}</section>}
       {runtime.observationGaps.length > 0 && <section className="unconfirmed-command-panel critical"><h3>服务中断观察缺口</h3>
-        <p className="muted">这些事项无法从日志或排行榜可靠补回。核对现场后可确认带缺口继续；当前尝试不可信时请使用“重赛本关”。</p>
+        <p className="muted">这些事项无法从日志或排行榜可靠补回。核对现场后可确认带缺口继续；当前尝试不可信时请使用“重置本关到 Ready”。</p>
         {runtime.observationGaps.map((gap) => <div className="unconfirmed-command-row" key={gap.id}>
           <div><strong>{gap.code}</strong><small>{gap.detail}</small></div>
           <ConfirmButton key={`gap-continue:${gap.id}`} label="确认带缺口继续" kind="observation-gap-resolution" target={gap.id} versionKey={versionKey}

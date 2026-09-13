@@ -79,7 +79,7 @@ export class RefereeActionService {
               stageId: action.stageId,
               impactHash: action.impactHash,
               token: confirmation.runtimeToken,
-              reason: "裁判重赛本关",
+              reason: "裁判重置本关到 Ready",
               sourceId
             }
           );
@@ -90,7 +90,7 @@ export class RefereeActionService {
             stageId: action.stageId,
             impactHash: action.impactHash,
             token: confirmation.runtimeToken,
-            reason: "裁判重赛本关",
+            reason: "裁判重置本关到 Ready",
             sourceId
           }, workOptions);
         }
@@ -98,7 +98,7 @@ export class RefereeActionService {
           id: sourceId,
           category: "flow",
           severity: "critical",
-          title: "裁判已强制重赛本关",
+          title: "裁判已重置本关到 Ready",
           message: controlledAttempt
             ? `第 ${controlledAttempt.attemptNumber} 次尝试已作废并退出榜单；旧流程阻断已隔离，原始证据保留，当前关已重新进入 Ready。`
             : "本关尚未 Go；旧流程阻断已隔离，原始证据保留，当前关已重新进入 Ready。",
@@ -169,7 +169,7 @@ export class RefereeActionService {
           id: sourceId,
           category: "flow",
           severity: "critical",
-          title: "裁判已强制重置本关",
+          title: "裁判已重置本关到 T-60",
           message: result.voidedAttempts.length > 0
             ? `${result.voidedAttempts.length} 个有效尝试和本关有效成绩已作废；本关已从当前时刻重新进入 T-60 准备，旧证据与榜单版本永久保留。`
             : "本关尚无有效尝试；已取消旧计划并从当前时刻重新进入 T-60 准备，旧证据永久保留。",
@@ -214,7 +214,7 @@ export class RefereeActionService {
           id: sourceId,
           category: "flow",
           severity: "critical",
-          title: "裁判已强制进入下一关",
+          title: "裁判已进入下一关 T-60",
           message: `${result.fromStageId} 的成绩窗口已关闭且已有成绩保留；当前关已原子切换为 ${result.toStageId}，并从当前时刻进入 T-60 准备。`,
           occurredAt: new Date().toISOString(),
           stageId: result.toStageId
@@ -345,7 +345,7 @@ export class RefereeActionService {
             stageId: action.stageId,
             impactHash: action.impactHash,
             token: confirmation.runtimeToken,
-            reason: "裁判重赛本关",
+            reason: "裁判重置本关到 Ready",
             sourceId
           });
         } else {
@@ -355,7 +355,7 @@ export class RefereeActionService {
             stageId: action.stageId,
             impactHash: action.impactHash,
             token: confirmation.runtimeToken,
-            reason: "裁判重赛本关",
+            reason: "裁判重置本关到 Ready",
             sourceId
           });
         }
@@ -363,7 +363,7 @@ export class RefereeActionService {
           id: sourceId,
           category: "flow",
           severity: "critical",
-          title: "裁判已强制重赛本关",
+          title: "裁判已重置本关到 Ready",
           message: controlledAttempt
             ? `第 ${controlledAttempt.attemptNumber} 次尝试已作废并退出榜单；旧流程阻断已隔离，原始证据保留，当前关已重新进入 Ready。`
             : "本关尚未 Go；旧流程阻断已隔离，原始证据保留，当前关已重新进入 Ready。",
@@ -425,7 +425,7 @@ export class RefereeActionService {
           id: sourceId,
           category: "flow",
           severity: "critical",
-          title: "裁判已强制重置本关",
+          title: "裁判已重置本关到 T-60",
           message: result.voidedAttempts.length > 0
             ? `${result.voidedAttempts.length} 个有效尝试和本关有效成绩已作废；本关已从当前时刻重新进入 T-60 准备，旧证据与榜单版本永久保留。`
             : "本关尚无有效尝试；已取消旧计划并从当前时刻重新进入 T-60 准备，旧证据永久保留。",
@@ -465,7 +465,7 @@ export class RefereeActionService {
           id: sourceId,
           category: "flow",
           severity: "critical",
-          title: "裁判已强制进入下一关",
+          title: "裁判已进入下一关 T-60",
           message: `${result.fromStageId} 的成绩窗口已关闭且已有成绩保留；当前关已原子切换为 ${result.toStageId}，并从当前时刻进入 T-60 准备。`,
           occurredAt: new Date().toISOString(),
           stageId: result.toStageId

@@ -822,7 +822,7 @@ export class CompetitionService {
       ? this.observationGapsFor(competitionId).find((gap) => gap.id === input.gapId)
       : undefined;
     if (input.kind === "automation-command-resolution") {
-      if (competition.mode === "work") throw new ServiceError("CONFIRMATION_UNAVAILABLE", "回显缺失无需确认；现场未起跑时请重赛本关或强制重置", 409);
+      if (competition.mode === "work") throw new ServiceError("CONFIRMATION_UNAVAILABLE", "回显缺失无需确认；现场未起跑时请“重置本关到 Ready”或“重置本关到 T-60”", 409);
       if (!unresolvedAutomationAction || !input.resolution || input.resolution === "dismiss-failed" || input.resolution === "continue" || target !== unresolvedAutomationAction.id) {
         throw new ServiceError("CONFIRMATION_UNAVAILABLE", "目标流程命令已变化或不再需要处置", 409);
       }
@@ -944,6 +944,8 @@ export class CompetitionService {
     const displayStageId = stageBoundAction ? target : input.stageId ?? runtimeSnapshot?.currentStageId;
     const displayStage = displayConfig.stages.find((stage) => stage.id === displayStageId);
     const displayStageName = displayStage ? stageDisplayName(displayStage) : displayStageId ?? "本关";
+    const currentDisplayStage = displayConfig.stages.find(stage => stage.id === runtimeSnapshot?.currentStageId);
+    const currentStageName = currentDisplayStage ? stageDisplayName(currentDisplayStage) : "本关";
     const displayPlayerName = scorePreview?.affectedPlayers.find((player) => player.playerId === input.playerId)?.displayName
       ?? displayConfig.participants.find((player) => player.id === input.playerId)?.displayName
       ?? input.playerId
@@ -1001,11 +1003,11 @@ export class CompetitionService {
           };
         case "restart-stage":
           return {
-            title: `强制重赛 ${displayStageName}？`,
+            title: `将 ${displayStageName} 重置到 Ready？`,
             consequences: [
               "立即把当前关重置到 Ready；已有尝试和本次成绩将作废，尚未 Go 时不会补造尝试。",
               "当前流程命令、事故、权限提示、未决真实命令和观察缺口将不再阻断新周期，原始证据与审计永久保留。",
-              "系统会立即发送新的第一条 Ready；真实连接或权限仍不可用时，新命令可能再次失败。"
+              "立即开始 Ready 和自动发令流程，不再等待一分钟；真实连接或权限仍不可用时，新命令可能再次失败。"
             ],
             irreversible: true
           };
@@ -1013,7 +1015,7 @@ export class CompetitionService {
           return {
             title: `把 ${displayStageName} 标记为已起跑？`,
             consequences: [
-              "以确认成功时刻作为本关 goAt，并从该时刻开始计算关卡时限。",
+              "从确认成功时刻开始计算本关时限。",
               "不会向比赛服务器发送命令，也不会回补标记前发生的完赛、DNF、Warning 或 [CHEAT] 证据。",
               "自动化保持暂停；本关成绩接收窗口和关卡时限继续运行。"
             ],
@@ -1021,20 +1023,20 @@ export class CompetitionService {
           };
         case "force-reset-stage":
           return {
-            title: `强制重置 ${displayStageName} 并从 T-60 重新准备？`,
+            title: `将 ${displayStageName} 重置到 T-60？`,
             consequences: [
               "本关当前有效尝试和成绩将作废并退出有效榜单，原始证据与旧榜单版本永久保留。",
-              "取消下一关计划和旧发令周期，从现在开始重新安排本关 Bulletin、Notice 与 1 分钟后的第一条 Ready。",
+              "取消下一关计划和旧发令周期，立即开始本关准备，60 秒后发送第一条 Ready，再继续自动发令。",
               "旧周期阻断不再阻止新周期；真实连接或权限仍不可用时，新命令可能再次失败。"
             ],
             irreversible: true
           };
         case "force-next-stage":
           return {
-            title: `强制进入 ${displayStageName} 的 T-60 准备阶段？`,
+            title: `进入下一关 T-60（${currentStageName} → ${displayStageName}）？`,
             consequences: [
               "立即关闭上一关成绩窗口但保留已有尝试和成绩；上一关随即开放人工修订。",
-              `当前关卡立即切换为 ${displayStageName}，并从现在开始安排 Bulletin、Notice 与 1 分钟后的第一条 Ready。`,
+              `当前关卡立即切换为 ${displayStageName}，60 秒后发送该关第一条 Ready，再继续自动发令。`,
               "上一关迟到的 Ready、Go、完赛和违规证据只保留日志，不再改变新关状态。"
             ],
             irreversible: true
@@ -1153,13 +1155,13 @@ export class CompetitionService {
       if (input.kind === "observation-gap-resolution") {
         return {
           title: "确认带观察缺口继续比赛？",
-          consequences: ["记录裁判已核对该缺口，但不会补造未观察到的成绩或事件。", "自动化仍保持暂停；如果当前尝试不可信，应改用重赛本关。"],
+          consequences: ["记录裁判已核对该缺口，但不会补造未观察到的成绩或事件。", "自动化仍保持暂停；如果当前尝试不可信，应改用重置本关到 Ready。"],
           irreversible: false
         };
       }
       if (input.kind === "restart-stage") {
         return {
-          title: `强制重赛 ${displayStageName}？`,
+          title: `将 ${displayStageName} 重置到 Ready？`,
           consequences: [
             "立即把当前关重置到 Ready；已有尝试和本次成绩将作废，尚未 Go 时不会补造尝试。",
             "当前阻断不再阻止新周期，原始证据与审计永久保留。",
@@ -2026,7 +2028,7 @@ export class CompetitionService {
         category: "incident",
         severity: "critical",
         title: "服务中断产生观察缺口",
-        message: `${detail} 请核对现场后确认继续，或重赛本关。`,
+        message: `${detail} 请核对现场后确认继续，或重置本关到 Ready。`,
         occurredAt: createdAt
       });
     }
@@ -3009,11 +3011,11 @@ export class CompetitionService {
       descriptor("end-stage", "提前结束本关", "关闭成绩窗口；未完成选手不补造 DNF，裁判需要 DNF 时应在成绩页修订。", refereeActionsUnlocked && Boolean(openAttempt) && resultIntakeEffective,
         !refereeActionsUnlocked ? "请先发布比赛配置" : "当前没有可结束的开放关卡",
         openAttempt?.stageId),
-      descriptor("restart-stage", "重赛本关", "强制隔离当前阻断并立即把当前关重置到 Ready；已有尝试作废，所有原始证据与审计保留。",
+      descriptor("restart-stage", "重置本关到 Ready", "清除本关有效成绩，立即开始 Ready 和自动发令流程。",
         competition.status === "published" && hasRuntime && Boolean(snapshot?.currentStageId),
         competition.status !== "published" ? "只有已发布且未结束的比赛可以重赛" : !hasRuntime ? "请先建立比赛连接或创建测试运行" : "当前运行没有可重置的关卡",
         snapshot?.currentStageId),
-      descriptor("mark-stage-started", "手动标记当前关已起跑", "不发送服务器命令；以确认成功时刻创建本关尝试并开始关卡时限，自动化保持暂停。",
+      descriptor("mark-stage-started", "标记本关已起跑", "不发送命令，从确认时刻开始计时，自动化保持暂停。",
         competition.status === "published" && hasRuntime && Boolean(snapshot?.currentStageId) && markStartedReady && !hasCurrentNonVoidedAttempt,
         competition.status !== "published"
           ? "只有已发布且未结束的比赛可以标记起跑"
@@ -3025,14 +3027,14 @@ export class CompetitionService {
                 ? "当前关已存在非作废尝试，不能重复标记起跑"
                 : "当前运行没有可标记的关卡",
         snapshot?.currentStageId),
-      descriptor("force-reset-stage", "强制重置本关（T-60）", "作废本关有效尝试与成绩，隔离旧周期阻断，并从现在起重新规划本关 1 分钟准备流程。",
+      descriptor("force-reset-stage", "重置本关到 T-60", "清除本关有效成绩，准备 60 秒后开始 Ready 和自动发令流程。",
         competition.status === "published" && hasRuntime && Boolean(snapshot?.currentStageId),
         competition.status !== "published" ? "只有已发布且未结束的比赛可以强制重置" : !hasRuntime ? "请先建立比赛连接或创建测试运行" : "当前运行没有可重置的关卡",
         snapshot?.currentStageId),
-      descriptor("force-next-stage", "强制进入下一关", "保留本关尝试与成绩但立即关闭窗口，原子切换到下一关并从现在起规划 1 分钟准备流程。",
+      descriptor("force-next-stage", "进入下一关 T-60", "保留本关成绩并关闭接收，切换到下一关，准备 60 秒后开始 Ready。",
         competition.status === "published" && hasRuntime && nextStageId !== undefined,
         competition.status !== "published"
-          ? "只有已发布且未结束的比赛可以强制进入下一关"
+          ? "只有已发布且未结束的比赛可以进入下一关 T-60"
           : !hasRuntime
             ? "请先建立比赛连接或创建测试运行"
             : nextStageId === undefined

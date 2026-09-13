@@ -103,7 +103,7 @@ export const automationView = (
     ...(unconfirmedCommands.length > 0 && !snapshot?.blockers.some((blocker) => blocker.code === "COMMAND_UNCONFIRMED")
       ? [{ code: "COMMAND_UNCONFIRMED", severity: "critical" as const, autoRecoverable: false, suggestion: "逐条处置失败或结果不确定的真实命令" }]
       : []),
-    ...(observationGaps.length > 0 ? [{ code: "OBSERVATION_GAP", severity: "critical" as const, autoRecoverable: false, suggestion: "逐条核对观察缺口，选择确认继续或重赛本关" }] : [])
+    ...(observationGaps.length > 0 ? [{ code: "OBSERVATION_GAP", severity: "critical" as const, autoRecoverable: false, suggestion: "逐条核对观察缺口，选择确认继续或重置本关到 Ready" }] : [])
   ],
   waitingParticipants: snapshot?.waitingParticipants ?? [],
   attempts: snapshot?.attempts ?? [],

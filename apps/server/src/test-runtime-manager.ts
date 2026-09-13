@@ -450,7 +450,7 @@ export class TestRuntimeManager {
     delete runtime.pendingCountdown;
     const after = runtime.automation.snapshot();
     if (result.previousStageId !== fromStageId || result.targetStageId !== after.currentStageId) {
-      throw new ServiceError("STATE_CONFLICT", "强制进入下一关后关卡边界未推进", 409);
+      throw new ServiceError("STATE_CONFLICT", "进入下一关 T-60后关卡边界未推进", 409);
     }
     this.resetStageCycleAuxiliary(runtime, after.currentStageId);
     this.resetParticipantStageStatuses(runtime, after.currentStageId);

@@ -187,7 +187,7 @@ export class CompetitionAuditService {
         message: permissionDenied
           ? `${record.command} 被服务器拒绝；自动化已阻断，请修复 ContestConsole 权限后重新核对。`
           : transportFailed ? `${record.command} 写入 MockClient 失败；请恢复连接后重新启动起跑流程。`
-          : `${record.command} 未获得服务器确认；自动化继续，不会自动重发。如现场未起跑，请使用重赛本关或强制重置。`,
+          : `${record.command} 未获得服务器确认；自动化继续，不会自动重发。如现场未起跑，请使用“重置本关到 Ready”或“重置本关到 T-60”。`,
         occurredAt: record.updatedAt
       });
     }
