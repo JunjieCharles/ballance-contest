@@ -201,7 +201,7 @@ describe("CompetitionService dynamic participants", () => {
     expect(service.snapshot(record.id).currentScoreboard).toMatchObject([{
       playerId: "Silent_Snow",
       displayName: "渴望新地图",
-      points: 20
+      points: 15
     }]);
     manager.beginListReconciliation(runtime);
     manager.ingestLine(runtime, "[06-30 12:00:03] 0 player(s) online:");
@@ -320,7 +320,7 @@ describe("CompetitionService dynamic participants", () => {
     manager.ingestLine(runtime, `[07-01 19:30:20] (#11, Alpha) finished ${prefix}.. in 1st place (score: 100; real time: 00:00:04.000).`);
 
     expect(service.snapshot(record.id).currentScoreboard.find((entry) => entry.playerId === "Alpha")?.stages["sr-1"])
-      .toMatchObject({ status: "finished", score: 100, points: 20 });
+      .toMatchObject({ status: "finished", score: 100, points: 15 });
   });
 
   it("attributes the live official hash HS marker to an HS stage and result", () => {
@@ -402,7 +402,7 @@ describe("CompetitionService dynamic participants", () => {
     const snapshot = service.snapshot(record.id);
     expect(snapshot.currentScoreboard.find((entry) => entry.playerId === "Cheater")?.stages["sr-1"]).toMatchObject({ status: "excluded", points: 0, finishSourceId: expect.any(String) });
     expect(snapshot.currentScoreboard.find((entry) => entry.playerId === "Warned")?.stages["sr-1"]).toMatchObject({ status: "excluded", points: 0, finishSourceId: expect.any(String) });
-    expect(snapshot.currentScoreboard.find((entry) => entry.playerId === "Valid")?.stages["sr-1"]).toMatchObject({ status: "finished", place: 1, points: 20 });
+    expect(snapshot.currentScoreboard.find((entry) => entry.playerId === "Valid")?.stages["sr-1"]).toMatchObject({ status: "finished", place: 1, points: 15 });
     expect(service.getRawClientLogs(record.id).some((line) => line.rawLine.includes("did not finish"))).toBe(false);
     expect(snapshot.runtime.attentionItems.filter((item) => item.title === "违规成绩已排除")).toHaveLength(2);
     expect(runtime.engine.snapshot().anomalies.filter((item) => item.code === "duplicate-event" || item.code === "post-completion-result")).toHaveLength(0);
@@ -623,7 +623,7 @@ describe("CompetitionService dynamic participants", () => {
     ]);
     const snapshot = service.snapshot(record.id);
     expect(snapshot.currentScoreboard.find((entry) => entry.playerId === "Cheater")?.stages["sr-1"]).toMatchObject({ status: "excluded", points: 0 });
-    expect(snapshot.currentScoreboard.find((entry) => entry.playerId === "Valid")?.stages["sr-1"]).toMatchObject({ status: "finished", place: 1, points: 20 });
+    expect(snapshot.currentScoreboard.find((entry) => entry.playerId === "Valid")?.stages["sr-1"]).toMatchObject({ status: "finished", place: 1, points: 15 });
   });
 
   it("ignores next-stage practice while the previous result window is still open", () => {
@@ -646,7 +646,7 @@ describe("CompetitionService dynamic participants", () => {
 
     const snapshot = service.snapshot(record.id);
     const player = snapshot.currentScoreboard.find((entry) => entry.playerId === "Practicing");
-    expect(player?.stages["sr-1"]).toMatchObject({ status: "finished", place: 1, points: 20 });
+    expect(player?.stages["sr-1"]).toMatchObject({ status: "finished", place: 1, points: 15 });
     expect(player?.stages["sr-2"]).toBeUndefined();
     expect(snapshot.runtime.attentionItems.filter((item) => item.title === "违规成绩已排除")).toHaveLength(0);
     expect(snapshot.runtime.blockers.some((blocker) => blocker.code === "PARTICIPANT_CHEAT")).toBe(false);
@@ -1318,7 +1318,7 @@ describe("CompetitionService dynamic participants", () => {
     manager.ingestLine(runtime, "[07-03 01:00:01] [7, *ContestConsole]: Level 01 - Go!");
     manager.ingestLine(runtime, "[07-03 01:00:02] (#41, Runner) finished Level 01 in 1st place (score: 100; real time: 00:00:01.000).");
     expect(service.snapshot(record.id).runtime.phase).toBe("running");
-    expect(service.snapshot(record.id).currentScoreboard).toContainEqual(expect.objectContaining({ playerId: "Runner", points: 20 }));
+    expect(service.snapshot(record.id).currentScoreboard).toContainEqual(expect.objectContaining({ playerId: "Runner", points: 15 }));
     await service.close();
 
     service = new CompetitionService(undefined, { database, dataRoot });
@@ -1333,7 +1333,7 @@ describe("CompetitionService dynamic participants", () => {
     snapshot = service.snapshot(record.id);
     expect(snapshot.runtime).toMatchObject({ phase: "paused", pausedFromPhase: "running" });
     expect(snapshot.runtime.attempts).toContainEqual(expect.objectContaining({ stageId: "sr-1", intakeOpen: true }));
-    expect(snapshot.currentScoreboard).toContainEqual(expect.objectContaining({ playerId: "Runner", points: 20 }));
+    expect(snapshot.currentScoreboard).toContainEqual(expect.objectContaining({ playerId: "Runner", points: 15 }));
 
     const gap = snapshot.runtime.observationGaps[0];
     if (!gap) throw new Error("missing recovery observation gap");
@@ -1356,7 +1356,7 @@ describe("CompetitionService dynamic participants", () => {
       idempotencyKey: "resume-after-observation-gap"
     });
     expect(service.snapshot(record.id).runtime).toMatchObject({ phase: "running", automationEnabled: true });
-    expect(service.snapshot(record.id).currentScoreboard).toContainEqual(expect.objectContaining({ playerId: "Runner", points: 20 }));
+    expect(service.snapshot(record.id).currentScoreboard).toContainEqual(expect.objectContaining({ playerId: "Runner", points: 15 }));
     await service.close();
   });
 

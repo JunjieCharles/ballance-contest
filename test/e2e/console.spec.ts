@@ -215,6 +215,20 @@ test("edits per-stage scoring and replaces the stage draft through inline confir
   const name = `E2E 单关配置 ${testInfo.project.name}`;
   await createCompetition(page, name, "test");
   await expect(page.getByText("配置完整，可以发布。")).toBeVisible();
+  for (const [label, type, points] of [
+    ["中型赛事预设", "medium", [20, 15, 12, 10, 8, 6, 5, 4, 3, 2, 1, 1]],
+    ["小型赛事预设", "small", [15, 12, 10, 8, 6, 5, 4, 3, 2, 1]]
+  ] as const) {
+    await page.getByRole("button", { name: label, exact: true }).click();
+    const confirmation = page.locator(".inline-confirm").filter({ hasText: `用${label}覆盖当前计分` });
+    await confirmation.getByRole("button", { name: "确认", exact: true }).click();
+    await expect.poll(async () => (await selectedCompetitionSnapshot(page, name)).snapshot.config.contestType).toBe(type);
+    await page.reload();
+    await expect(page.getByLabel("第 1 名计分")).toHaveValue(String(points[0]));
+    const saved = (await selectedCompetitionSnapshot(page, name)).snapshot.config;
+    expect(saved.scoring.points).toEqual(points);
+    expect(saved.stages.every(stage => JSON.stringify(stage.scoring) === JSON.stringify(points) && stage.minimumScoringPlace === points.length)).toBe(true);
+  }
   const protectionToggle = page.getByLabel("启用起跑保护");
   await expect(protectionToggle).toBeChecked();
   await protectionToggle.uncheck();

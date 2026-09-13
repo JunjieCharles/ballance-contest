@@ -80,8 +80,8 @@ describe("competition configuration", () => {
     expect(validateCompetitionConfigForPublish(config)).toEqual([]);
     expect(config.flow.startProtectionEnabled).toBe(true);
     expect(config.flow.protectionWindowMs).toBe(10_000);
-    expect(config.scoring).toMatchObject({ contestType: "small", minimumScoringPlace: 12, points: { length: 12 } });
-    expect(config.stages.every((stage) => stage.minimumScoringPlace === 12 && stage.scoring.length === 12)).toBe(true);
+    expect(config.scoring).toMatchObject({ contestType: "small", minimumScoringPlace: 10, points: [15, 12, 10, 8, 6, 5, 4, 3, 2, 1] });
+    expect(config.stages.every((stage) => stage.minimumScoringPlace === 10 && stage.scoring.length === 10)).toBe(true);
     expect(validateCompetitionConfigForPublish({
       ...config,
       refereeName: "",

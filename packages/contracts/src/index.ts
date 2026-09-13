@@ -75,7 +75,7 @@ export type CompetitionLifecycleStatus =
   | "archived"
   | "paused";
 
-export type ContestType = "small" | "large" | "custom";
+export type ContestType = "small" | "medium" | "large" | "custom";
 
 export interface ParticipantView {
   id: string;
@@ -600,7 +600,8 @@ export type CompetitionAction =
   | { type: "kick"; playerName: string; confirmationToken: string; impactHash: string }
   | { type: "raw-command"; command: string; confirmationToken: string; impactHash: string };
 
-export const SMALL_SCORING = [20, 15, 12, 10, 8, 6, 5, 4, 3, 2, 1, 1] as const;
+export const SMALL_SCORING = [15, 12, 10, 8, 6, 5, 4, 3, 2, 1] as const;
+export const MEDIUM_SCORING = [20, 15, 12, 10, 8, 6, 5, 4, 3, 2, 1, 1] as const;
 export const LARGE_SCORING = [30, 24, 21, 18, 16, 14, 12, 10, 8, 6, 5, 4, 3, 2, 1] as const;
 
 export const minimumScoringPlaceFor = (points: readonly number[]): number => {
