@@ -35,6 +35,7 @@
 
 ## Windows 与便携包
 
+- 发布版本应同步根目录和各 workspace 的 package.json、package-lock.json、APPLICATION_VERSION 与 README；浏览器版本断言引用应用版本常量，不能固定旧版本字符串。发布前核对包内 manifest 与健康接口的版本一致。
 - 正式服务固定绑定 `127.0.0.1:38623`，不要静默切换随机端口。
 - `Start-ContestConsole.cmd` 应自动替换已确认属于本项目的旧实例，并结束其进程树，避免遗留 MockClient 或旧窗口。
 - 未知程序占用端口时不得误杀；必须显示 PID、命令信息和可理解的失败原因。

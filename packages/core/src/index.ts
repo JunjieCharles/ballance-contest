@@ -1,4 +1,4 @@
-export const APPLICATION_VERSION = "0.1.0-dev";
+export const APPLICATION_VERSION = "0.3.0";
 export * from "./domain.js";
 export * from "./events.js";
 export * from "./log-parser.js";

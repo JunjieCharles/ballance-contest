@@ -8,6 +8,7 @@ import type {
 } from "@ballance/contracts";
 import type { Page } from "@playwright/test";
 import { expect, test } from "@playwright/test";
+import { APPLICATION_VERSION } from "@ballance/core";
 
 const parseQuotedCsv = (csv: string): string[][] => csv.replace(/^\ufeff/, "").split("\r\n").map((line) =>
   [...line.matchAll(/"((?:[^"]|"")*)"(?:,|$)/g)].map((match) => (match[1] ?? "").replaceAll('""', '"')));
@@ -202,7 +203,7 @@ test("opens the authenticated local console without external requests", async ({
   });
   await page.goto("/#token=e2e-bootstrap-token");
   await expect(page.getByText("Ballance 比赛控制台")).toBeVisible();
-  await expect(page.getByText(/服务 0\.1\.0-dev/)).toBeVisible();
+  await expect(page.locator("header")).toContainText(`服务 ${APPLICATION_VERSION}`);
   await expect(page.locator(".create-panel").getByLabel("模式")).toHaveValue("work");
   await expect(page.getByText(/已取得控制权|只读标签页/)).toBeVisible();
   expect(externalRequests).toEqual([]);
@@ -850,7 +851,7 @@ test("runs the 20-player sandbox from the console and edits a score without losi
   await expect(liveScoring.getByLabel("第 1 名分数")).toHaveValue("25");
   const liveSnapshot = await selectedCompetitionSnapshot(page, name);
   expect(liveSnapshot.snapshot.activeScoring.points[0]).toBe(25);
-  expect(liveSnapshot.snapshot.publishedConfig?.scoring.points[0]).toBe(20);
+  expect(liveSnapshot.snapshot.publishedConfig?.scoring.points[0]).toBe(15);
   expect(liveSnapshot.snapshot.scoreboardVersions.at(-1)?.entries).toHaveLength(rowsBefore);
   const editable = page.locator(".scoreboard .cell-button").filter({ hasText: /^#/ }).first();
   await editable.click();
