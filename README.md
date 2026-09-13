@@ -372,6 +372,7 @@ test/            夹具、单元、集成、浏览器和非功能测试
 
 ## 相关文档
 
+- [开发与验证指南](docs/development-guide.md)
 - [开发进展与发布前清单](docs/development-progress.md)
 - [比赛通用规则](docs/rule.md)
 - [前端需求](docs/contest-console-frontend-requirements.md)
