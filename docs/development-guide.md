@@ -4,6 +4,7 @@
 
 ## 工具链与测试隔离
 
+- npm 默认用户缓存目录不可写时，仅为当前命令设置 `npm_config_cache` 到工作区 `.runtime/npm-cache` 后重试；不要修改全局 npm 配置或为缓存写入扩大用户目录权限。
 - E2E 使用独立 `BALLANCE_DATA_ROOT`，不得写入 `%LOCALAPPDATA%\BallanceContestConsole` 的用户数据。
 - Playwright 临时产物写入 `.runtime/playwright-results`；不要在根目录保留 `test-results/`。
 - ESLint 必须显式忽略整个 `.runtime/`；Flat Config 不会自动采用 `.gitignore`，否则 release staging、Playwright 或归档分析中的压缩 bundle 会制造大量假 lint 错误。不得为通过 lint 删除用户的忽略产物。
