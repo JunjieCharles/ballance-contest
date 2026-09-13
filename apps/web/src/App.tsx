@@ -823,7 +823,7 @@ function ConsolePanel({ snapshot, canWrite, versionKey, saveConnection, startWor
       </div>
       <h3 id="现场恢复">现场恢复</h3>
       <div className="button-row action-row" role="group" aria-labelledby="现场恢复">
-        {confirmedAction(availabilityFor(runtime, "mark-stage-started")?.label ?? "标记本关已起跑", "mark-stage-started", "manual-action", snapshot.competition.id,
+        {confirmedAction(availabilityFor(runtime, "mark-stage-started")?.label ?? "设为本关已起跑", "mark-stage-started", "manual-action", snapshot.competition.id,
           (confirmation) => ({ type: "mark-stage-started", stageId: availabilityFor(runtime, "mark-stage-started")?.targetStageId ?? "", confirmationToken: confirmation.token, impactHash: confirmation.impactHash }), "danger")}
         {confirmedAction("重置本关到 Ready", "restart-stage", "restart-stage", availabilityFor(runtime, "restart-stage")?.targetStageId ?? snapshot.competition.id, (confirmation) => ({ type: "restart-stage", stageId: availabilityFor(runtime, "restart-stage")?.targetStageId ?? "", confirmationToken: confirmation.token, impactHash: confirmation.impactHash }), "danger")}
         {confirmedAction(availabilityFor(runtime, "force-reset-stage")?.label ?? "重置本关到 T-60", "force-reset-stage", "manual-action", snapshot.competition.id,

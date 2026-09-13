@@ -674,7 +674,7 @@ describe("WorkRuntimeManager connection lifecycle", () => {
       reason: "prepare manager recovery test",
       sourceId: "prepare-manager-recovery-test"
     });
-    const marked = manager.markCurrentReadyStageStarted(runtime, "sr-1");
+    const marked = manager.markCurrentStageStarted(runtime, "sr-1");
     runtime.controller.registerParticipant("ThresholdRunner");
     expect(runtime.controller.recordResult({
       stageId: "sr-1",
@@ -719,7 +719,7 @@ describe("WorkRuntimeManager connection lifecycle", () => {
       reason: "prepare evidence boundary",
       sourceId: "prepare-evidence-boundary"
     });
-    const marked = manager.markCurrentReadyStageStarted(runtime, "sr-1");
+    const marked = manager.markCurrentStageStarted(runtime, "sr-1");
     const engineAttempt = runtime.engine.snapshot().attempts.find((attempt) => attempt.id === marked.id);
     if (!engineAttempt) throw new Error("missing marked engine attempt");
     const timeZone = context.service.snapshot(context.competitionId).config.timezone;
@@ -748,6 +748,22 @@ describe("WorkRuntimeManager connection lifecycle", () => {
       && entry.stages["sr-1"] !== undefined)).toBe(false);
     expect(context.service.journal.after(0)?.filter((event) => event.type === "work.pre-attempt-evidence-ignored").length)
       .toBeGreaterThanOrEqual(5);
+
+    const writesBeforeReset = [...client.writes];
+    const versionsBeforeReset = runtime.engine.snapshot().scoreboardVersions.length;
+    const resetStarted = manager.markCurrentStageStarted(runtime, "sr-1");
+    expect(client.writes).toEqual(writesBeforeReset);
+    expect(runtime.controller.snapshot()).toMatchObject({ phase: "running", automationEnabled: true });
+    expect(runtime.engine.snapshot().attempts).toContainEqual(expect.objectContaining({ id: marked.id, voided: true, open: false }));
+    expect(runtime.engine.snapshot().attempts).toContainEqual(expect.objectContaining({ id: resetStarted.id, attemptNumber: 2, voided: false, open: true }));
+    expect(runtime.engine.snapshot().currentScoreboard.every(entry => entry.stages["sr-1"] === undefined)).toBe(true);
+    expect(runtime.engine.snapshot().scoreboardVersions.length).toBeGreaterThan(versionsBeforeReset);
+    client.emitRawLine(`${mockLogTimestamp(Date.now(), timeZone)} (#46, FreshFinish) finished Level 01 in 1st place (score: 100; real time: 00:00:00.100).`);
+    expect(runtime.engine.snapshot().currentScoreboard).toContainEqual(expect.objectContaining({
+      playerId: "FreshFinish", stages: { "sr-1": expect.objectContaining({ status: "finished", place: 1 }) }
+    }));
+    expect(runtime.controller.snapshot().attempts.find(attempt => attempt.id === resetStarted.id)?.results)
+      .toContainEqual(expect.objectContaining({ playerId: "FreshFinish", status: "finished" }));
   });
 
   it("keeps half-written old results raw-only across mark, reset, restart and force-next boundaries", async () => {
@@ -781,7 +797,7 @@ describe("WorkRuntimeManager connection lifecycle", () => {
     const oldAcrossMark = `${mockLogTimestamp(Date.now() + 10_000, timeZone)} (#51, OldAcrossMark) finished Level 01 in 1st place (score: 999; real time: 00:00:00.001).`;
     let firstAttemptId = "";
     splitAcrossBoundary(oldAcrossMark, () => {
-      firstAttemptId = manager.markCurrentReadyStageStarted(runtime, "sr-1").id;
+      firstAttemptId = manager.markCurrentStageStarted(runtime, "sr-1").id;
     });
     const firstAttemptGoAt = runtime.engine.snapshot().attempts.find((attempt) => attempt.id === firstAttemptId)?.goAtMs;
     client.emitRawLine(`${mockLogTimestamp(firstAttemptGoAt ?? Date.now(), timeZone)} (#52, FreshAfterMark) finished Level 01 in 1st place (score: 100; real time: 00:00:00.002).`);
@@ -799,7 +815,7 @@ describe("WorkRuntimeManager connection lifecycle", () => {
     splitAcrossBoundary(oldAcrossRestart, () => {
       enterReady("sr-1", "prepare-second-half-line-boundary");
     });
-    const secondAttempt = manager.markCurrentReadyStageStarted(runtime, "sr-1");
+    const secondAttempt = manager.markCurrentStageStarted(runtime, "sr-1");
     const secondTimestamp = mockLogTimestamp(
       runtime.engine.snapshot().attempts.find((attempt) => attempt.id === secondAttempt.id)?.goAtMs ?? Date.now(),
       timeZone
@@ -819,7 +835,7 @@ describe("WorkRuntimeManager connection lifecycle", () => {
       phase: "preparing"
     });
     enterReady("sr-2", "prepare-force-next-stage-attempt");
-    const thirdAttempt = manager.markCurrentReadyStageStarted(runtime, "sr-2");
+    const thirdAttempt = manager.markCurrentStageStarted(runtime, "sr-2");
     const thirdTimestamp = mockLogTimestamp(
       runtime.engine.snapshot().attempts.find((attempt) => attempt.id === thirdAttempt.id)?.goAtMs ?? Date.now(),
       timeZone

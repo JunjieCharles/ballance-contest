@@ -1164,7 +1164,7 @@ describe("CompetitionController", () => {
     expect(controller.snapshot().blockers).toContainEqual(expect.objectContaining({ code: "PERMISSION_DENIED", severity: "critical" }));
   });
 
-  it("marks only the current Ready stage as started from the action clock without sending a command", () => {
+  it("sets the current stage as started from the action clock without sending a command", () => {
     const clock = new FakeClock();
     const controller = new CompetitionController(configuration(), clock);
     connectAll(controller);
@@ -1183,7 +1183,7 @@ describe("CompetitionController", () => {
     }
 
     clock.set(4_321);
-    const marked = controller.markCurrentReadyStageStarted({ expectedCurrentStageId: "s1" });
+    const marked = controller.markCurrentStageStarted({ expectedCurrentStageId: "s1" });
     expect(marked).toMatchObject({
       stageId: "s1",
       attemptNumber: 1,
@@ -1195,9 +1195,8 @@ describe("CompetitionController", () => {
     });
     const snapshot = controller.snapshot();
     expect(snapshot).toMatchObject({
-      phase: "paused",
-      pausedFromPhase: "running",
-      automationEnabled: false,
+      phase: "running",
+      automationEnabled: true,
       nextStagePending: false,
       restartPending: false,
       attempts: [expect.objectContaining({ id: marked.id, origin: "referee-marked-started", results: [] })]
@@ -1230,7 +1229,7 @@ describe("CompetitionController", () => {
     });
   });
 
-  it("accepts a paused-from-Ready mark and keeps its deadline active while paused", () => {
+  it("resumes automation from paused Ready and advances at the deadline", () => {
     const clock = new FakeClock();
     const controller = new CompetitionController(configuration(), clock);
     connectAll(controller);
@@ -1242,45 +1241,60 @@ describe("CompetitionController", () => {
     expect(controller.snapshot()).toMatchObject({ phase: "paused", pausedFromPhase: "ready" });
 
     clock.set(1_000);
-    controller.markCurrentReadyStageStarted({ expectedCurrentStageId: "s1" });
+    controller.markCurrentStageStarted({ expectedCurrentStageId: "s1" });
     expect(controller.snapshot()).toMatchObject({
-      phase: "paused",
-      pausedFromPhase: "running",
+      phase: "running",
       attempts: [{ origin: "referee-marked-started", goAtMs: 1_000, deadlineAtMs: 21_000, intakeOpen: true }]
     });
     clock.set(21_000);
     controller.tick();
     expect(controller.snapshot()).toMatchObject({
-      phase: "paused",
-      pausedFromPhase: "preparing",
+      phase: "preparing",
       currentStageId: "s2",
       attempts: [{ intakeOpen: false, intakeClosedAtMs: 21_000 }]
     });
   });
 
-  it("rejects marking outside Ready or when a non-void attempt already exists", () => {
+  it("starts from preparation and resets a scored attempt without reissuing launch commands", () => {
     const clock = new FakeClock();
-    const preparing = new CompetitionController(configuration(), clock);
-    connectAll(preparing);
-    preparing.enable(60_000);
-    expect(() => preparing.markCurrentReadyStageStarted({ expectedCurrentStageId: "s1" })).toThrow("MARK_STAGE_STARTED_NOT_AVAILABLE");
+    const controller = new CompetitionController(configuration(), clock);
+    connectAll(controller);
+    controller.enable(60_000);
+    const first = controller.markCurrentStageStarted({ expectedCurrentStageId: "s1" });
+    controller.recordResult({ stageId: "s1", playerId: "p1", status: "finished", sourceId: "old-result" });
+    clock.advance(1_000);
+    const second = controller.markCurrentStageStarted({ expectedCurrentStageId: "s1" });
+    expect(controller.snapshot()).toMatchObject({ phase: "running", automationEnabled: true, nextStagePending: false });
+    expect(controller.snapshot().attempts).toEqual([
+      expect.objectContaining({ id: first.id, voided: true, intakeOpen: false }),
+      expect.objectContaining({ id: second.id, attemptNumber: 2, goAtMs: 1_000, deadlineAtMs: 21_000, results: [] })
+    ]);
+    expect(controller.drainDispatchableActions()).toEqual([]);
+    expect(() => controller.markCurrentStageStarted({ expectedCurrentStageId: "s2" })).toThrow("ACTION_TARGET_CHANGED");
+  });
 
-    const ready = new CompetitionController(configuration(), clock);
-    connectAll(ready);
-    ready.enable(0);
-    ready.drainActions();
-    ready.tick();
-    ready.drainActions();
-    ready.markCurrentReadyStageStarted({ expectedCurrentStageId: "s1" });
-    const markedSnapshot = { ...ready.snapshot() };
-    delete markedSnapshot.pausedFromPhase;
-    const incompatible = {
-      ...markedSnapshot,
-      phase: "ready" as const,
-      automationEnabled: true
-    };
-    const restored = new CompetitionController(configuration({ initialSnapshot: incompatible }), clock);
-    expect(() => restored.markCurrentReadyStageStarted({ expectedCurrentStageId: "s1" })).toThrow("MARK_STAGE_STARTED_ATTEMPT_EXISTS");
+  it("replaces an authoritative scored attempt and cancels its next-stage plan without launch commands", () => {
+    const clock = new FakeClock();
+    const base = configuration();
+    const controller = new CompetitionController(configuration({
+      stages: base.stages.map(stage => ({ ...stage, timeLimitMs: 200_000 })),
+      policy: { ...base.policy, intermissionMs: 120_000 }
+    }), clock);
+    connectAll(controller);
+    enterRunning(controller, clock);
+    for (const playerId of ["p1", "p2", "p3"]) controller.recordResult({ stageId: "s1", playerId, status: "finished", sourceId: `old-${playerId}` });
+    expect(controller.snapshot()).toMatchObject({ phase: "tail-intake", plannedReadyStageId: "s2" });
+    const old = controller.snapshot().attempts[0]!;
+    controller.pause();
+    const commandCount = controller.snapshot().actions.length;
+    clock.advance(1_000);
+    const current = controller.markCurrentStageStarted({ expectedCurrentStageId: "s1" });
+    expect(controller.snapshot()).toMatchObject({ phase: "running", automationEnabled: true, nextStagePending: false });
+    expect(controller.snapshot().plannedReadyStageId).toBeUndefined();
+    expect(controller.snapshot().attempts[0]).toMatchObject({ id: old.id, origin: "authoritative-go", voided: true });
+    expect(current).toMatchObject({ origin: "referee-marked-started", goAtMs: clock.now(), results: [] });
+    expect(controller.snapshot().actions).toHaveLength(commandCount);
+    expect(controller.drainDispatchableActions()).toEqual([]);
   });
 
   it("force-resets the current stage at T-60, voids scores and isolates old blockers", () => {
@@ -1493,7 +1507,7 @@ describe("CompetitionController", () => {
     };
 
     const operations: Array<(controller: CompetitionController) => unknown> = [
-      (controller) => controller.markCurrentReadyStageStarted({ expectedCurrentStageId: "s1" }),
+      (controller) => controller.markCurrentStageStarted({ expectedCurrentStageId: "s1" }),
       (controller) => controller.forceResetCurrentStage({ expectedCurrentStageId: "s1" }),
       (controller) => controller.forceAdvanceToNextStage({
         expectedCurrentStageId: "s1",
@@ -1578,7 +1592,8 @@ describe("CompetitionController", () => {
     controller.drainActions();
     controller.tick();
     controller.drainActions();
-    controller.markCurrentReadyStageStarted({ expectedCurrentStageId: "s1" });
+    controller.markCurrentStageStarted({ expectedCurrentStageId: "s1" });
+    controller.pause();
     for (const playerId of ["p1", "p2", "p3"]) {
       controller.recordResult({ stageId: "s1", playerId, status: "finished", sourceId: `marked-${playerId}` });
     }

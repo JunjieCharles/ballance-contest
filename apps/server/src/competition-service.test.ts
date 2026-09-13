@@ -1703,7 +1703,7 @@ describe("CompetitionService dynamic participants", () => {
     if (!markedAttempt) throw new Error("missing referee-marked attempt");
     expect(markedAttempt.origin).toBe("referee-marked-started");
     expect(markedAttempt.deadlineAtMs - markedAttempt.goAtMs).toBe(200_000);
-    expect(snapshot.runtime).toMatchObject({ phase: "paused", pausedFromPhase: "running" });
+    expect(snapshot.runtime).toMatchObject({ phase: "running", automationEnabled: true });
     expect(snapshot.runtime.unconfirmedAutomationActions).toEqual([]);
     expect(runtime.automation.snapshot().actions).toContainEqual(expect.objectContaining({
       id: oldReady.id,
@@ -1712,7 +1712,7 @@ describe("CompetitionService dynamic participants", () => {
     }));
     expect(snapshot.runtime.availableActions).toContainEqual(expect.objectContaining({
       action: "mark-stage-started",
-      enabled: false,
+      enabled: true,
       targetStageId: "s1"
     }));
 
@@ -2003,7 +2003,7 @@ describe("CompetitionService dynamic participants", () => {
       token: restart.token,
       reason: "prepare referee-marked attempt"
     });
-    const marked = manager.markCurrentReadyStageStarted(runtime, stageId);
+    const marked = manager.markCurrentStageStarted(runtime, stageId);
     const storedEngineAttempt = runtime.engine.snapshot().attempts.find((attempt) => attempt.id === marked.id);
     if (!storedEngineAttempt) throw new Error("missing stored work engine attempt");
     const persistedGoWallMs = storedEngineAttempt.goAtMs;
@@ -2061,6 +2061,62 @@ describe("CompetitionService dynamic participants", () => {
     expect(restored.controller.drainDispatchableActions()).toEqual([]);
     restored.controller.observeAuthoritativeGo();
     expect(restored.controller.snapshot().actions.filter(item => item.notBeforeMs !== undefined)).toHaveLength(1);
+    await service.close();
+  });
+
+  it("persists a repeated started reset with cleared scores and resumes automatic next-stage planning", async () => {
+    dataRoot = mkdtempSync(join(tmpdir(), "ballance-started-reset-"));
+    const dbPath = join(dataRoot, "console.sqlite");
+    database = openDatabase(dbPath);
+    let service = new CompetitionService(undefined, { database, dataRoot });
+    const record = service.create({ name: "Started reset", mode: "test", idempotencyKey: "started-reset" });
+    service.updateDraft(record.id, {
+      expectedStateVersion: 0, idempotencyKey: "stages",
+      stages: [1, 2].map(level => ({ id: `s${level}`, order: level, label: `SR${level}`, level, mode: "SR" as const,
+        mapKind: "official" as const, timeLimitMs: 200_000, scoring: [20, 15, 12], minimumScoringPlace: 3 }))
+    });
+    service.publish(record.id, 1, "publish");
+    const runId = service.createTestRunFromScenario(record.id, "normal-player-roster").runId;
+    const setStarted = async (key: string) => {
+      const confirmation = service.createConfirmation(record.id, { kind: "manual-action", intent: "mark-stage-started", target: "s1", stageId: "s1" });
+      await service.performAction(record.id, {
+        expectedStateVersion: service.snapshot(record.id).competition.stateVersion, idempotencyKey: key,
+        action: { type: "mark-stage-started", stageId: "s1", confirmationToken: confirmation.token, impactHash: confirmation.impactHash }
+      });
+    };
+    // First mark is allowed directly from the lobby, before any Ready or Go.
+    await setStarted("first");
+    let runtime = testRuntimeManager(service).getRuntime(record.id, runId);
+    const first = runtime.automation.snapshot().attempts[0]!;
+    const player = runtime.definition.players[0]!;
+    const atMs = runtime.automationClock.now();
+    runtime.automation.recordResult({ stageId: "s1", playerId: player.id, status: "finished", sourceId: "old-score", receivedAtMs: atMs });
+    runtime.engine.apply({ type: "finish", stageId: "s1", playerId: player.id, sourceId: "old-score", atMs, score: 100, elapsedMs: 0 });
+    testRuntimeManager(service).settle(runtime);
+    expect(service.snapshot(record.id).currentScoreboard.some(entry => entry.stages.s1)).toBe(true);
+    runtime.automationClock.advanceBy(1_000);
+    await setStarted("second");
+    const second = runtime.automation.snapshot().attempts[1]!;
+    expect(second).toMatchObject({ goAtMs: atMs + 1_000, deadlineAtMs: atMs + 201_000, voided: false });
+    expect(service.snapshot(record.id).currentScoreboard.every(entry => !entry.stages.s1)).toBe(true);
+    await service.close();
+    database.close();
+    database = openDatabase(dbPath);
+    service = new CompetitionService(undefined, { database, dataRoot });
+    const restored = service.snapshot(record.id);
+    expect(restored.runtime).toMatchObject({ phase: "paused", pausedFromPhase: "running" });
+    expect(restored.runtime.attempts).toEqual([
+      expect.objectContaining({ id: first.id, voided: true }), expect.objectContaining({ id: second.id, voided: false, goAtMs: second.goAtMs })
+    ]);
+    expect(restored.currentScoreboard.every(entry => !entry.stages.s1)).toBe(true);
+    runtime = testRuntimeManager(service).getRuntime(record.id, runId);
+    runtime.automation.enable();
+    for (const [index, participant] of runtime.definition.players.slice(0, 3).entries()) {
+      runtime.automation.recordResult({ stageId: "s1", playerId: participant.id, status: "finished", sourceId: `new-${index}`, receivedAtMs: runtime.automationClock.now() });
+    }
+    expect(runtime.automation.snapshot()).toMatchObject({ automationEnabled: true, phase: "tail-intake", plannedReadyStageId: "s2" });
+    testRuntimeManager(service).settle(runtime);
+    expect(runtime.automation.snapshot().actions).toContainEqual(expect.objectContaining({ kind: "bulletin", stageId: "s2", status: "acknowledged" }));
     await service.close();
   });
 
@@ -2131,8 +2187,8 @@ describe("CompetitionService dynamic participants", () => {
 
     const committed = await service.performAction(record.id, input);
     expect(runtime.automation.snapshot()).toMatchObject({
-      phase: "paused",
-      pausedFromPhase: "running",
+      phase: "running",
+      automationEnabled: true,
       attempts: [expect.objectContaining({ stageId: "s1", origin: "referee-marked-started" })]
     });
     const committedStateVersion = service.snapshot(record.id).competition.stateVersion;

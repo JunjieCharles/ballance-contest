@@ -1053,17 +1053,18 @@ export class CompetitionController {
     this.bump();
   }
 
-  public markCurrentReadyStageStarted(input: ExpectedCurrentStageInput): ControlledAttempt {
+  public markCurrentStageStarted(input: ExpectedCurrentStageInput): ControlledAttempt {
     const now = this.clock.now();
     this.settleDueStageClosures(now);
     this.assertExpectedCurrentStage(input.expectedCurrentStageId);
-    if (this.effectivePhase() !== "ready") throw new Error("MARK_STAGE_STARTED_NOT_AVAILABLE");
-    if (this.currentAttempt) throw new Error("MARK_STAGE_STARTED_ATTEMPT_EXISTS");
-
-    this.isolateUnfinishedActions((action) =>
-      action.stageId === this.stage.id
-      && (["bulletin", "notice", "ready", "cheat-off", "go"].includes(action.kind)
-        || action.kind === "announce" && action.message === "READY!"));
+    if (this.phase === "review") throw new Error("MARK_STAGE_STARTED_NOT_AVAILABLE");
+    for (const previous of this.attempts.filter(candidate => candidate.stageId === this.stage.id && !candidate.voided)) {
+      previous.voided = true;
+      this.closeIntake(previous, now);
+    }
+    this.isolateUnfinishedActions();
+    this.clearOldCycleBlockers();
+    this.clearLaunchCycleState();
     const attempt = this.startAttemptForStage(this.stage.id, {
       origin: "referee-marked-started",
       startedAtMs: now,
@@ -1071,10 +1072,9 @@ export class CompetitionController {
       applyCheatExclusions: false
     });
     if (!attempt) throw new Error("MARK_STAGE_STARTED_ATTEMPT_EXISTS");
-    this.clearLaunchCycleState({ preserveParticipantWaitState: true, preserveStartProtection: true });
-    this.automationEnabled = false;
-    this.phase = "paused";
-    this.pausedFromPhase = "running";
+    this.automationEnabled = true;
+    this.phase = "running";
+    this.pausedFromPhase = undefined;
     this.nextStagePending = false;
     this.restartPending = false;
     this.bump();

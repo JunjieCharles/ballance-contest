@@ -292,7 +292,8 @@ describe("automation runtimes", () => {
     await runtime.dispatch();
     controller.tick();
     await runtime.dispatch();
-    controller.markCurrentReadyStageStarted({ expectedCurrentStageId: "s1" });
+    controller.markCurrentStageStarted({ expectedCurrentStageId: "s1" });
+    controller.pause();
     expect(controller.recordResult({
       stageId: "s1",
       playerId: "p1",

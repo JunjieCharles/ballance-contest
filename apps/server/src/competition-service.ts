@@ -1013,11 +1013,11 @@ export class CompetitionService {
           };
         case "mark-stage-started":
           return {
-            title: `把 ${displayStageName} 标记为已起跑？`,
+            title: `将 ${displayStageName} 设为已起跑？`,
             consequences: [
-              "从确认成功时刻开始计算本关时限。",
+              "作废本关已有有效尝试和成绩，保留原始证据与旧榜单；从确认成功时刻重新计算本关时限。",
               "不会向比赛服务器发送命令，也不会回补标记前发生的完赛、DNF、Warning 或 [CHEAT] 证据。",
-              "自动化保持暂停；本关成绩接收窗口和关卡时限继续运行。"
+              "取消旧发令周期及下一关计划，进入比赛中并启用自动化，正常接收新成绩、处理时限和安排下一关；真实连接或权限故障仍可阻断后续发令。"
             ],
             irreversible: true
           };
@@ -1502,9 +1502,7 @@ export class CompetitionService {
     const competitionBefore = { ...this.get(competitionId) };
     const controller = this.controllerFor(competitionId);
     const automationBefore = controller.snapshot();
-    const commandsBefore = action.type === "mark-stage-started"
-      ? []
-      : this.unconfirmedCommandsFor(competitionId, automationBefore);
+    const commandsBefore = this.unconfirmedCommandsFor(competitionId, automationBefore);
     const auditMemoryBefore = this.auditService.checkpointCommandMemory(competitionId);
     const testRunId = competitionBefore.mode === "test"
       ? this.getPayload(competitionId).activeRunId ?? competitionBefore.activeRunId
@@ -1536,7 +1534,7 @@ export class CompetitionService {
           ...(workLogEvidenceBoundary === undefined ? {} : { logEvidenceBoundary: workLogEvidenceBoundary })
         }
       );
-      if (action.type !== "mark-stage-started") {
+      {
         const fromStageId = automationBefore.currentStageId;
         const toStageId = action.type === "force-next-stage" ? action.stageId : fromStageId;
         const commandsAfterIsolation = this.unconfirmedCommandsFor(
@@ -2046,7 +2044,7 @@ export class CompetitionService {
     competitionId: string,
     fromStageId: string,
     toStageId: string,
-    action: "restart-stage" | "force-reset-stage" | "force-next-stage"
+    action: StageRecoveryAction["type"]
   ): void {
     if (!this.options.database) return;
     const gaps = this.observationGapsFor(competitionId);
@@ -2058,7 +2056,7 @@ export class CompetitionService {
       id: `observation-gaps-${action}:${fromStageId}:${randomUUID()}`,
       category: "incident",
       severity: "info",
-      title: action === "restart-stage"
+      title: action === "mark-stage-started" ? "观察缺口已由设为已起跑隔离" : action === "restart-stage"
         ? "观察缺口已由重赛处置"
         : action === "force-reset-stage"
           ? "观察缺口已由强制重置隔离"
@@ -2078,7 +2076,7 @@ export class CompetitionService {
     fromStageId: string,
     toStageId: string,
     commands: RuntimeSnapshot["unconfirmedCommands"],
-    action: "restart-stage" | "force-reset-stage" | "force-next-stage"
+    action: StageRecoveryAction["type"]
   ): void {
     if (commands.length === 0) return;
     const payload = this.getPayload(competitionId);
@@ -2091,7 +2089,7 @@ export class CompetitionService {
       id: `commands-superseded-by-${action}:${fromStageId}:${randomUUID()}`,
       category: "command",
       severity: "warning",
-      title: action === "restart-stage"
+      title: action === "mark-stage-started" ? "未决真实命令已由设为已起跑隔离" : action === "restart-stage"
         ? "未决真实命令已由强制重赛隔离"
         : action === "force-reset-stage"
           ? "未决真实命令已由强制重置隔离"
@@ -2934,9 +2932,6 @@ export class CompetitionService {
       ? -1
       : configuredStages.findIndex((stage) => stage.id === snapshot.currentStageId);
     const nextStageId = currentStageIndex >= 0 ? configuredStages[currentStageIndex + 1]?.id : undefined;
-    const hasCurrentNonVoidedAttempt = snapshot?.attempts.some((attempt) =>
-      attempt.stageId === snapshot.currentStageId && !attempt.voided) ?? false;
-    const markStartedReady = effectivePhase === "ready";
     const descriptor = (
       action: RefereeActionId,
       label: string,
@@ -3015,17 +3010,13 @@ export class CompetitionService {
         competition.status === "published" && hasRuntime && Boolean(snapshot?.currentStageId),
         competition.status !== "published" ? "只有已发布且未结束的比赛可以重赛" : !hasRuntime ? "请先建立比赛连接或创建测试运行" : "当前运行没有可重置的关卡",
         snapshot?.currentStageId),
-      descriptor("mark-stage-started", "标记本关已起跑", "不发送命令，从确认时刻开始计时，自动化保持暂停。",
-        competition.status === "published" && hasRuntime && Boolean(snapshot?.currentStageId) && markStartedReady && !hasCurrentNonVoidedAttempt,
+      descriptor("mark-stage-started", "设为本关已起跑", "清除本关有效成绩，从确认时刻重新计时并继续自动流程，不重新发令。",
+        competition.status === "published" && hasRuntime && Boolean(snapshot?.currentStageId),
         competition.status !== "published"
           ? "只有已发布且未结束的比赛可以标记起跑"
           : !hasRuntime
             ? "请先建立比赛连接或创建测试运行"
-            : !markStartedReady
-              ? "只有当前逻辑阶段为 Ready 时才能标记已起跑"
-              : hasCurrentNonVoidedAttempt
-                ? "当前关已存在非作废尝试，不能重复标记起跑"
-                : "当前运行没有可标记的关卡",
+            : "当前运行没有可设置的关卡",
         snapshot?.currentStageId),
       descriptor("force-reset-stage", "重置本关到 T-60", "清除本关有效成绩，准备 60 秒后开始 Ready 和自动发令流程。",
         competition.status === "published" && hasRuntime && Boolean(snapshot?.currentStageId),

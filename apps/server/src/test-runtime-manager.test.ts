@@ -323,7 +323,7 @@ describe("TestRuntimeManager generation safety", () => {
     const runtime = manager.getRuntime(competitionId, runId);
     expect(runtime.automation.snapshot().phase).toBe("ready");
 
-    const marked = manager.markCurrentReadyStageStarted(runtime, "s1");
+    const marked = manager.markCurrentStageStarted(runtime, "s1");
     expect(marked).toMatchObject({
       stageId: "s1",
       attemptNumber: 1,
@@ -334,9 +334,8 @@ describe("TestRuntimeManager generation safety", () => {
       voided: false
     });
     expect(runtime.automation.snapshot()).toMatchObject({
-      phase: "paused",
-      pausedFromPhase: "running",
-      automationEnabled: false
+      phase: "running",
+      automationEnabled: true
     });
     expect(runtime.engine.snapshot().attempts).toContainEqual(expect.objectContaining({
       id: marked.id,
@@ -397,7 +396,7 @@ describe("TestRuntimeManager generation safety", () => {
     expect(getConfig().participants.every((participant) => participant.currentStageStatus === "waiting")).toBe(true);
 
     manager.advanceAutomation(competitionId, runId, 60_000);
-    const secondMarked = manager.markCurrentReadyStageStarted(runtime, "s1");
+    const secondMarked = manager.markCurrentStageStarted(runtime, "s1");
     expect(secondMarked).toMatchObject({
       stageId: "s1",
       attemptNumber: 2,

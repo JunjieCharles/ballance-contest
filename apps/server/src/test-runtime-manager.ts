@@ -361,12 +361,16 @@ export class TestRuntimeManager {
     runtime.updatedAt = checkpoint.updatedAt;
   }
 
-  public markCurrentReadyStageStarted(runtime: TestRuntime, expectedStageId: string): AutomationSnapshot["attempts"][number] {
+  public markCurrentStageStarted(runtime: TestRuntime, expectedStageId: string): AutomationSnapshot["attempts"][number] {
     const before = runtime.automation.snapshot();
-    const attempt = this.runExpectedStageAction(() => runtime.automation.markCurrentReadyStageStarted({
+    const attempt = this.runExpectedStageAction(() => runtime.automation.markCurrentStageStarted({
       expectedCurrentStageId: expectedStageId
     }));
     this.resetStageCycleAuxiliary(runtime, before.currentStageId);
+    this.resetParticipantStageStatuses(runtime, before.currentStageId);
+    for (const previous of before.attempts.filter(candidate => candidate.stageId === before.currentStageId && !candidate.voided)) {
+      runtime.engine.voidAttempt(previous.stageId, previous.attemptNumber, `mark-stage-started:${attempt.id}:void:${previous.id}`);
+    }
     runtime.engine.startRefereeMarkedAttempt({
       id: attempt.id,
       stageId: attempt.stageId,

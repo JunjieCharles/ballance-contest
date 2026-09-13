@@ -110,12 +110,12 @@ export class RefereeActionService {
       case "mark-stage-started": {
         const before = controller.snapshot();
         if (before.currentStageId !== action.stageId) {
-          throw new ServiceError("ACTION_UNAVAILABLE", "当前 Ready 关卡已变化，不能使用旧确认标记起跑", 409);
+          throw new ServiceError("ACTION_UNAVAILABLE", "当前关卡已变化，不能使用旧确认设置已起跑", 409);
         }
         const attempt = competition.mode === "test"
           ? (() => {
               const runId = this.host.getPayload(competitionId).activeRunId as string;
-              return this.host.testRuntimeManager.markCurrentReadyStageStarted(
+              return this.host.testRuntimeManager.markCurrentStageStarted(
                 this.host.testRuntimeManager.getRuntime(competitionId, runId),
                 action.stageId
               );
@@ -123,7 +123,7 @@ export class RefereeActionService {
           : (() => {
               const runtime = this.host.workRuntimeManager.get(competitionId);
               if (!runtime) throw new ServiceError("NOT_FOUND", "比赛连接尚未建立", 404);
-              return this.host.workRuntimeManager.markCurrentReadyStageStarted(
+              return this.host.workRuntimeManager.markCurrentStageStarted(
                 runtime,
                 action.stageId,
                 workOptions
@@ -132,9 +132,9 @@ export class RefereeActionService {
         this.host.appendAttention(competitionId, {
           id: `mark-stage-started:${attempt.id}:${randomUUID()}`,
           category: "flow",
-          severity: "critical",
-          title: "裁判已将当前关标记为已起跑",
-          message: `本关尝试 #${attempt.attemptNumber} 以裁判确认时刻作为 goAt 并开始关卡时限；未发送服务器命令，标记前的比赛事件不会回补。自动化保持暂停。`,
+          severity: "warning",
+          title: "裁判已将本关设为已起跑",
+          message: `本关尝试 #${attempt.attemptNumber} 从裁判确认时刻重新计时；未发送服务器命令，标记前的比赛事件不会回补。本关旧有效成绩已作废，自动化已启用。`,
           occurredAt: new Date().toISOString(),
           stageId: attempt.stageId
         });
@@ -375,12 +375,12 @@ export class RefereeActionService {
       case "mark-stage-started": {
         const before = controller().snapshot();
         if (before.currentStageId !== action.stageId) {
-          throw new ServiceError("ACTION_UNAVAILABLE", "当前 Ready 关卡已变化，不能使用旧确认标记起跑", 409);
+          throw new ServiceError("ACTION_UNAVAILABLE", "当前关卡已变化，不能使用旧确认设置已起跑", 409);
         }
         const attempt = competition.mode === "test"
           ? (() => {
               const runId = this.host.getPayload(competitionId).activeRunId as string;
-              return this.host.testRuntimeManager.markCurrentReadyStageStarted(
+              return this.host.testRuntimeManager.markCurrentStageStarted(
                 this.host.testRuntimeManager.getRuntime(competitionId, runId),
                 action.stageId
               );
@@ -388,14 +388,14 @@ export class RefereeActionService {
           : (() => {
               const runtime = this.host.workRuntimeManager.get(competitionId);
               if (!runtime) throw new ServiceError("NOT_FOUND", "比赛连接尚未建立", 404);
-              return this.host.workRuntimeManager.markCurrentReadyStageStarted(runtime, action.stageId);
+              return this.host.workRuntimeManager.markCurrentStageStarted(runtime, action.stageId);
             })();
         this.host.appendAttention(competitionId, {
           id: `mark-stage-started:${attempt.id}:${randomUUID()}`,
           category: "flow",
-          severity: "critical",
-          title: "裁判已将当前关标记为已起跑",
-          message: `本关尝试 #${attempt.attemptNumber} 以裁判确认时刻作为 goAt，关卡时限从该时刻开始；未发送服务器命令，标记前的比赛事件不会回补。自动化保持暂停。`,
+          severity: "warning",
+          title: "裁判已将本关设为已起跑",
+          message: `本关尝试 #${attempt.attemptNumber} 从裁判确认时刻重新计算完整关卡时限；未发送服务器命令，标记前的比赛事件不会回补。本关旧有效成绩已作废，自动化已启用。`,
           occurredAt: new Date().toISOString(),
           stageId: attempt.stageId
         });

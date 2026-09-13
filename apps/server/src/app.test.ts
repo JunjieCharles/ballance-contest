@@ -489,7 +489,7 @@ describe("local API", () => {
 
     let snapshot = await getSnapshot();
     expect(snapshot.runtime.availableActions).toEqual(expect.arrayContaining([
-      expect.objectContaining({ action: "mark-stage-started", enabled: false, targetStageId: "s1" }),
+      expect.objectContaining({ action: "mark-stage-started", enabled: true, targetStageId: "s1" }),
       expect.objectContaining({ action: "force-reset-stage", enabled: true, targetStageId: "s1" }),
       expect.objectContaining({ action: "force-next-stage", enabled: true, targetStageId: "s2" })
     ]));
@@ -505,7 +505,7 @@ describe("local API", () => {
     expect(snapshot.runtime).toMatchObject({ phase: "ready", currentStageId: "s1" });
     expect((await execute("mark-stage-started", "s1", "api-mark-started")).statusCode).toBe(200);
     snapshot = await getSnapshot();
-    expect(snapshot.runtime).toMatchObject({ phase: "paused", pausedFromPhase: "running", currentStageId: "s1" });
+    expect(snapshot.runtime).toMatchObject({ phase: "running", automationEnabled: true, currentStageId: "s1" });
     expect(snapshot.runtime.attempts).toContainEqual(expect.objectContaining({
       stageId: "s1",
       origin: "referee-marked-started",
@@ -513,7 +513,7 @@ describe("local API", () => {
     }));
     expect(snapshot.runtime.availableActions).toContainEqual(expect.objectContaining({
       action: "mark-stage-started",
-      enabled: false,
+      enabled: true,
       targetStageId: "s1"
     }));
 

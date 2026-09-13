@@ -1083,7 +1083,7 @@ export class WorkRuntimeManager {
     delete runtime.preparedStageRecovery;
   }
 
-  public markCurrentReadyStageStarted(
+  public markCurrentStageStarted(
     runtime: WorkRuntime,
     expectedStageId: string,
     options: WorkStageRecoveryOptions = {}
@@ -1096,7 +1096,7 @@ export class WorkRuntimeManager {
     runtime.attemptEvidenceLogBoundaries ??= new Map();
     const before = runtime.controller.snapshot();
     const stageId = before.currentStageId;
-    const attempt = this.runExpectedStageAction(() => runtime.controller.markCurrentReadyStageStarted({
+    const attempt = this.runExpectedStageAction(() => runtime.controller.markCurrentStageStarted({
       expectedCurrentStageId: expectedStageId
     }));
     const after = runtime.controller.snapshot();
@@ -1104,6 +1104,10 @@ export class WorkRuntimeManager {
     runtime.attemptEvidenceSequenceBoundaries.set(attempt.id, runtime.logReceiveSequence);
     this.establishStageCycleLogEvidenceBoundary(runtime, logBoundary, attempt.id);
     const wallClockOriginMs = after.wallClockOriginMs ?? Date.now() - performance.now();
+    for (const previous of before.attempts.filter(candidate => candidate.stageId === stageId && !candidate.voided)) {
+      runtime.engine.voidAttempt(stageId, previous.attemptNumber, `mark-stage-started:${attempt.id}:void:${previous.id}`);
+    }
+    this.synchronizeParticipantStageStatuses(runtime, stageId, true);
     runtime.engine.startRefereeMarkedAttempt({
       id: attempt.id,
       stageId: attempt.stageId,

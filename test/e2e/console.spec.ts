@@ -608,9 +608,9 @@ test("binds stage confirmations and submitted actions to the backend SR3 target"
   await expect(page.locator("header")).toContainText("确认已失效：目标关已从 SR3 变更");
 
   const markStartedAction = page.locator(".confirm-action").filter({
-    has: page.getByRole("button", { name: "标记本关已起跑" })
+    has: page.getByRole("button", { name: "设为本关已起跑" })
   });
-  await markStartedAction.getByRole("button", { name: "标记本关已起跑" }).click();
+  await markStartedAction.getByRole("button", { name: "设为本关已起跑" }).click();
   await expect(markStartedAction).toContainText("把 SR2 标记为已起跑？");
   expect(confirmationRequests.at(-1)).toMatchObject({
     intent: "mark-stage-started",
@@ -1026,12 +1026,12 @@ test("recovers a live stage by marking start, clearing a reset, and preserving a
   await page.getByRole("button", { name: "控制台", exact: true }).click();
 
   const recovery = page.getByRole("group", { name: "现场恢复", exact: true });
-  await expect(recovery.getByRole("button")).toHaveText(["标记本关已起跑", "重置本关到 Ready", "重置本关到 T-60", "进入下一关 T-60"]);
-  await expect(recovery).toContainText("不发送命令，从确认时刻开始计时，自动化保持暂停。");
+  await expect(recovery.getByRole("button")).toHaveText(["设为本关已起跑", "重置本关到 Ready", "重置本关到 T-60", "进入下一关 T-60"]);
+  await expect(recovery).toContainText("清除本关有效成绩，从确认时刻重新计时并继续自动流程，不重新发令。");
   await expect(recovery).toContainText("清除本关有效成绩，立即开始 Ready 和自动发令流程。");
   await expect(recovery).toContainText("清除本关有效成绩，准备 60 秒后开始 Ready 和自动发令流程。");
   await expect(recovery).toContainText("保留本关成绩并关闭接收，切换到下一关，准备 60 秒后开始 Ready。");
-  await expect(page.getByRole("button", { name: "标记本关已起跑" })).toBeDisabled();
+  await expect(page.getByRole("button", { name: "设为本关已起跑" })).toBeEnabled();
   await expect(page.getByRole("button", { name: "重置本关到 T-60" })).toBeEnabled();
   await expect(page.getByRole("button", { name: "进入下一关 T-60" })).toBeEnabled();
 
@@ -1042,16 +1042,16 @@ test("recovers a live stage by marking start, clearing a reset, and preserving a
   await readyFlow.getByRole("button", { name: "确认" }).click();
   await accelerateActiveTestRun(page, name, 60_000);
   await expect(page.getByText("阶段", { exact: true }).locator("..")).toContainText("Ready");
-  await expect(page.getByRole("button", { name: "标记本关已起跑" })).toBeEnabled();
+  await expect(page.getByRole("button", { name: "设为本关已起跑" })).toBeEnabled();
 
   const beforeMark = (await selectedCompetitionSnapshot(page, name)).snapshot;
   const markAction = page.locator(".confirm-action").filter({
-    has: page.getByRole("button", { name: "标记本关已起跑" })
+    has: page.getByRole("button", { name: "设为本关已起跑" })
   });
-  await markAction.getByRole("button", { name: "标记本关已起跑" }).click();
-  await expect(markAction).toContainText("从确认成功时刻开始计算本关时限。");
+  await markAction.getByRole("button", { name: "设为本关已起跑" }).click();
+  await expect(markAction).toContainText("从确认成功时刻重新计算本关时限。");
   await expect(markAction).toContainText("不会向比赛服务器发送命令");
-  await expect(markAction).toContainText("自动化保持暂停");
+  await expect(markAction).toContainText("进入比赛中并启用自动化");
   await markAction.getByRole("button", { name: "确认" }).click();
 
   const marked = (await selectedCompetitionSnapshot(page, name)).snapshot;
@@ -1080,13 +1080,24 @@ test("recovers a live stage by marking start, clearing a reset, and preserving a
       status: "simulated"
     })
   ]);
-  expect(marked.runtime).toMatchObject({ phase: "paused", automationEnabled: false, pausedFromPhase: "running" });
+  expect(marked.runtime).toMatchObject({ phase: "running", automationEnabled: true });
   await expect(page.getByText("本关起跑（UTC+8）").locator("..")).not.toContainText("未设置");
   await expect(page.getByText("本关最晚结束（UTC+8）").locator("..")).not.toContainText("未设置");
-  await expect(page.getByText("自动化 / 倒数").locator("..")).toContainText("暂停");
+  await expect(page.getByText("自动化 / 倒数").locator("..")).toContainText("启用");
 
-  const scoredBeforeReset = await advanceUntilStageScore(page, name, "sr-1");
+  let scoredBeforeReset = await advanceUntilStageScore(page, name, "sr-1");
   expect(scoredBeforeReset.currentScoreboard.some((entry) => entry.stages["sr-1"] !== undefined)).toBe(true);
+  await expect(markAction).toHaveAttribute("data-version", `${scoredBeforeReset.competition.stateVersion}:${scoredBeforeReset.runtime.stateVersion}`);
+  await markAction.getByRole("button", { name: "设为本关已起跑" }).click();
+  await expect(markAction).toContainText("作废本关已有有效尝试和成绩");
+  await markAction.getByRole("button", { name: "确认" }).click();
+  const remarked = (await selectedCompetitionSnapshot(page, name)).snapshot;
+  expect(remarked.runtime).toMatchObject({ phase: "running", automationEnabled: true });
+  expect(remarked.currentScoreboard.every(entry => entry.stages["sr-1"] === undefined)).toBe(true);
+  expect(remarked.runtime.attempts).toContainEqual(expect.objectContaining({ origin: "referee-marked-started", voided: true }));
+  expect(remarked.runtime.commands.filter(command => !scoredBeforeReset.runtime.commands.some(old => old.id === command.id)))
+    .toEqual([expect.objectContaining({ actionType: "mark-stage-started" })]);
+  scoredBeforeReset = await advanceUntilStageScore(page, name, "sr-1");
   const resetAction = page.locator(".confirm-action").filter({
     has: page.getByRole("button", { name: "重置本关到 T-60" })
   });
