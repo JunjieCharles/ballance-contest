@@ -2035,6 +2035,45 @@ describe("CompetitionService dynamic participants", () => {
     await service.close();
   });
 
+  it.each([false, true])("persists the protection notification chain across SQLite restart (announcement sent: %s)", async (sent) => {
+    dataRoot = mkdtempSync(join(tmpdir(), "ballance-protection-notification-recovery-"));
+    database = openDatabase(join(dataRoot, "console.sqlite"));
+    let service = new CompetitionService(undefined, { database, dataRoot });
+    const record = service.create({ name: "Protection notification recovery", mode: "work", idempotencyKey: "protection-notifications" });
+    service.publish(record.id, 0, "publish-protection-notifications");
+    const manager = workRuntimeManager(service);
+    const runtime = manager.makeRuntime(record.id, service.snapshot(record.id).config, { write: async () => undefined });
+    manager.register(record.id, runtime);
+    runtime.controller.registerParticipant("p1");
+    runtime.controller.observeAuthoritativeGo();
+    runtime.controller.observeCrash("p1", "fatal error");
+    const announcement = runtime.controller.snapshot().actions.find(item => item.kind === "announce")!;
+    if (sent) {
+      expect(runtime.controller.drainActions().map(item => item.id)).toEqual([announcement.id]);
+      runtime.controller.observeActionWritten(announcement.id);
+    }
+    manager.saveSnapshot(runtime);
+    const original = runtime.controller.snapshot();
+    const notice = original.actions.find(item => item.kind === "notice")!;
+    const bulletin = original.actions.find(item => item.afterActionId === notice.id)!;
+    await service.close();
+    database.close();
+    database = openDatabase(join(dataRoot, "console.sqlite"));
+    service = new CompetitionService(undefined, { database, dataRoot });
+    const restored = workRuntimeManager(service).makeRuntime(record.id, service.snapshot(record.id).config, { write: async () => undefined });
+    workRuntimeManager(service).register(record.id, restored);
+    const state = restored.controller.snapshot();
+    expect(state.actions.find(item => item.id === announcement.id)).toMatchObject({ status: sent ? "sent-unconfirmed" : "pending", undelivered: !sent });
+    expect(state.actions.find(item => item.id === notice.id)).toMatchObject({ status: "pending", undelivered: true, afterActionId: announcement.id });
+    expect(state.actions.find(item => item.id === bulletin.id)).toMatchObject({ status: "pending", undelivered: true, afterActionId: notice.id });
+    for (const before of [notice, bulletin]) {
+      const after = state.actions.find(item => item.id === before.id)!;
+      expect(state.wallClockOriginMs! + after.notBeforeMs!).toBeCloseTo(original.wallClockOriginMs! + before.notBeforeMs!, 2);
+    }
+    expect(restored.controller.drainDispatchableActions()).toEqual([]);
+    await service.close();
+  });
+
   it("persists and relocates the delayed launch Bulletin with its authoritative Go across service recreation", async () => {
     dataRoot = mkdtempSync(join(tmpdir(), "ballance-delayed-bulletin-recovery-"));
     database = openDatabase(join(dataRoot, "console.sqlite"));

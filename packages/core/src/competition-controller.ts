@@ -70,6 +70,8 @@ export interface AutomationAction {
   idempotencyKey: string;
   createdAtMs: number;
   notBeforeMs?: number;
+  /** Wait at least one second after this preceding notification was sent. */
+  afterActionId?: string;
   stageId: string;
   map: string;
   mapName?: string;
@@ -566,7 +568,7 @@ export class CompetitionController {
     }
     if (enabled && !this.isResultIntakePhase() && !this.cheatWarningSent && this.hasCurrentCheatOffConfirmation(this.stage.id)) {
       this.cheatWarningSent = true;
-      this.queueAction("notice", "检测到有玩家开启了cheat，请在发令前及时关闭，发令后仍开启视作违规。");
+      this.queueAction("notice", "检测到玩家开启 cheat，请及时关闭。\n发令后仍开启，将视作违规。");
     }
     this.bump();
   }
@@ -1219,6 +1221,12 @@ export class CompetitionController {
     this.settleDueStageClosures(this.clock.now());
     const result = this.actions.filter((action) => {
       if (!this.undeliveredActionIds.has(action.id) || (action.notBeforeMs !== undefined && this.clock.now() < action.notBeforeMs) || !predicate(action)) return false;
+      if (action.afterActionId !== undefined) {
+        const previous = this.actions.find((candidate) => candidate.id === action.afterActionId);
+        const sentAtMs = previous?.writtenAtMs ?? previous?.acknowledgedAtMs;
+        if (!previous || previous.isolated || previous.status === "cancelled" || previous.status === "failed"
+          || sentAtMs === undefined || this.clock.now() < sentAtMs + 1_000) return false;
+      }
       this.undeliveredActionIds.delete(action.id);
       action.undelivered = false;
       return true;
@@ -1511,18 +1519,24 @@ export class CompetitionController {
     this.readyAnnouncementActionId = undefined;
     this.cheatOffActionId = undefined;
     this.goActionId = undefined;
-    const protectionMessage = postGo
-      ? `由于玩家 ${participantId} 起跑保护期掉线，当前尝试及成绩已作废，本关将在一分钟后重新发令，请做好准备。`
-      : `由于玩家 ${participantId} 起跑保护期掉线，发令流程已中止，本关将在一分钟后重新发令，请做好准备。`;
-    this.planReady(this.stageIndex, plannedReadyAtMs, protectionMessage);
-    this.queueActionForStage("announce", stage, protectionMessage);
+    const protectionOutcome = postGo ? "本次起跑已作废。" : "发令流程已中止。";
+    const protectionMessage = `玩家 ${participantId} 掉线，触发起跑保护。\n${protectionOutcome}`;
+    const protectionSummary = `玩家 ${participantId} 掉线，${postGo ? "本次起跑已作废。" : "发令流程已中止。"}`;
+    const announcement = this.queueActionForStage("announce", stage, protectionMessage);
+    announcement.notBeforeMs = now;
+    const bulletin = this.planReady(this.stageIndex, plannedReadyAtMs, protectionSummary);
     this.queueDueReadyNotice();
+    const notice = this.actions.find((action) => action.id === this.noticeActionId)!;
+    notice.notBeforeMs = now + 1_000;
+    notice.afterActionId = announcement.id;
+    bulletin.notBeforeMs = now + 2_000;
+    bulletin.afterActionId = notice.id;
   }
 
   private cancelPendingLaunchActions(stageId: string): void {
     for (const action of this.actions) {
       if (action.stageId !== stageId || action.status !== "pending"
-        || !(["ready", "announce", "cheat-off", "go"].includes(action.kind) || action.kind === "bulletin" && action.notBeforeMs !== undefined)) continue;
+        || !(["ready", "announce", "cheat-off", "go"].includes(action.kind) || action.kind === "bulletin" && action.notBeforeMs !== undefined || action.afterActionId !== undefined)) continue;
       action.status = "cancelled";
       this.undeliveredActionIds.delete(action.id);
       action.undelivered = false;
@@ -1604,22 +1618,30 @@ export class CompetitionController {
     return action;
   }
 
-  private planReady(stageIndex: number, plannedReadyAtMs: number, protectionMessage?: string): void {
+  private planReady(stageIndex: number, plannedReadyAtMs: number, protectionMessage?: string): AutomationAction {
     const target = this.stages[stageIndex];
     if (!target || !Number.isFinite(plannedReadyAtMs)) throw new Error("INVALID_READY_PLAN");
+    for (const action of this.actions) {
+      if (action.stageId !== target.id || action.afterActionId === undefined
+        || action.status !== "pending" || !action.undelivered) continue;
+      action.status = "cancelled";
+      action.undelivered = false;
+      this.undeliveredActionIds.delete(action.id);
+    }
     this.plannedReadyAtMs = plannedReadyAtMs;
     this.plannedReadyStageIndex = stageIndex;
     this.noticeActionId = undefined;
-    this.queueBulletin(target, plannedReadyAtMs, protectionMessage);
+    const bulletin = this.queueBulletin(target, plannedReadyAtMs, protectionMessage);
     this.enterPlannedStagePreparationIfDue(this.clock.now());
+    return bulletin;
   }
 
-  private queueBulletin(stage: AutomationStage, plannedReadyAtMs: number, protectionMessage?: string): void {
+  private queueBulletin(stage: AutomationStage, plannedReadyAtMs: number, protectionMessage?: string): AutomationAction {
     const name = stage.displayName ?? `${stage.mode.toUpperCase()}${stage.map}`;
     const protectionContext = protectionMessage ? `\n${protectionMessage}` : "";
     const suffix = this.startProtectionExhaustedStageIds.has(stage.id) ? START_PROTECTION_USED_SUFFIX
       : this.startProtectionUsedStageIds.has(stage.id) ? "\n本关起跑保护剩余 1 次，仅保护 fatal error。" : "";
-    this.queueActionForStage("bulletin", stage, `${name} 将在 ${formatUtc8Time(this.wallClockOriginMs + plannedReadyAtMs)} 发令${protectionContext}${suffix}`);
+    return this.queueActionForStage("bulletin", stage, `${name} 将在 ${formatUtc8Time(this.wallClockOriginMs + plannedReadyAtMs)} ${protectionMessage ? "重新发令" : "发令"}${protectionContext}${suffix}`);
   }
 
   private queueDueReadyNotice(): void {
@@ -1632,7 +1654,7 @@ export class CompetitionController {
     this.noticeActionId = this.queueActionForStage(
       "notice",
       stage,
-      `${name} 即将在 1 分钟后发令，请提前做好重启游戏等准备，避免影响发令流程。${suffix}`
+      `${name} 将在一分钟后发令。\n请提前重启游戏，做好准备。${suffix}`
     ).id;
   }
 

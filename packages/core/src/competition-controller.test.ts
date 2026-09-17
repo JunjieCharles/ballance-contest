@@ -52,6 +52,23 @@ const enterRunning = (controller: CompetitionController, clock: FakeClock): void
   controller.acknowledgeAction(go.id, "acknowledged");
 };
 
+const drainProtectionNotifications = (controller: CompetitionController, clock: FakeClock): AutomationAction[] => {
+  const result: AutomationAction[] = [];
+  for (const kind of ["announce", "notice", "bulletin"]) {
+    const next = controller.drainActions();
+    expect(next.map((item) => item.kind)).toEqual([kind]);
+    result.push(...next);
+    for (const item of next) controller.acknowledgeAction(item.id, "acknowledged");
+    if (kind !== "bulletin") {
+      clock.advance(999);
+      expect(controller.drainActions()).toEqual([]);
+      clock.advance(1);
+    }
+  }
+  expect(controller.drainActions()).toEqual([]);
+  return result;
+};
+
 describe("CompetitionController", () => {
   it("restores a persisted running attempt without redelivering historical commands", () => {
     const clock = new FakeClock();
@@ -106,7 +123,7 @@ describe("CompetitionController", () => {
     const initialActions = controller.drainActions();
     const notice = initialActions.find((item) => item.kind === "notice");
     let current = initialActions.find((item) => item.kind === "ready");
-    expect(notice?.message).toBe("第一关 即将在 1 分钟后发令，请提前做好重启游戏等准备，避免影响发令流程。");
+    expect(notice?.message).toBe("第一关 将在一分钟后发令。\n请提前重启游戏，做好准备。");
     if (!notice || !current) throw new Error("Missing initial Notice or Ready");
     controller.acknowledgeAction(notice.id, "acknowledged");
     expect(current.createdAtMs).toBe(0);
@@ -241,6 +258,10 @@ describe("CompetitionController", () => {
     controller.observeCheat("p1", true, "practice-cheat-again");
     const notice = controller.snapshot().actions.find((a) => a.kind === "notice" && a.status === "pending");
     expect(notice).toBeTruthy();
+    expect(notice?.message).toBe("检测到玩家开启 cheat，请及时关闭。\n发令后仍开启，将视作违规。");
+    for (const line of notice!.message!.split("\n")) {
+      expect([...line].reduce((sum, character) => sum + (character.codePointAt(0)! > 127 ? 2 : 1), 0)).toBeLessThanOrEqual(48);
+    }
     controller.observeCheat("p1", false);
     controller.observeCheat("p1", true, "practice-cheat-third-time");
     expect(controller.snapshot().actions.filter((item) => item.kind === "notice")).toHaveLength(1);
@@ -707,6 +728,35 @@ describe("CompetitionController", () => {
     expect(controller.snapshot().attempts[0]?.results.some((result) => result.playerId === "p5")).toBe(false);
   });
 
+  it.each([
+    { postGo: false, used: false }, { postGo: false, used: true },
+    { postGo: true, used: false }, { postGo: true, used: true }
+  ])("keeps automatic notification copy within three lines of 48 columns (%j)", ({ postGo, used }) => {
+    const clock = new FakeClock();
+    const controller = new CompetitionController(configuration({
+      startProtectionUsedStageIds: used ? ["s1"] : [], startProtectionExhaustedStageIds: []
+    }), clock);
+    connectAll(controller);
+    if (postGo) enterRunning(controller, clock);
+    else {
+      controller.enable(0);
+      for (const item of controller.drainActions()) controller.acknowledgeAction(item.id, "acknowledged");
+      controller.tick();
+    }
+    controller.observeCrash("p1", "fatal error");
+    const messages = controller.snapshot().actions.filter((item) => ["notice", "announce", "bulletin"].includes(item.kind));
+    for (const message of messages) {
+      const lines = message.message!.split("\n");
+      expect(lines.length, message.message).toBeLessThanOrEqual(3);
+      for (const line of lines) {
+        const width = [...line].reduce((sum, character) => sum + (character.codePointAt(0)! > 127 ? 2 : 1), 0);
+        expect(width, message.message).toBeLessThanOrEqual(48);
+      }
+    }
+    expect(messages.filter((item) => item.kind === "bulletin").at(-1)?.message?.split("\n")).toHaveLength(3);
+    expect(messages.filter((item) => item.kind === "notice").at(-1)?.message?.split("\n")).toHaveLength(3);
+  });
+
   it("uses the first pre-Go protection and separates the protection announcement from the T-60 notice", () => {
     const clock = new FakeClock();
     const controller = new CompetitionController(configuration(), clock);
@@ -726,14 +776,14 @@ describe("CompetitionController", () => {
       attempts: []
     });
     expect(snapshot.actions.find((candidate) => candidate.kind === "ready")?.status).toBe("cancelled");
-    const correction = controller.drainActions();
-    expect(correction.map((candidate) => candidate.kind)).toEqual(["bulletin", "announce", "notice"]);
+    const correction = drainProtectionNotifications(controller, clock);
+    expect(correction.map((candidate) => candidate.kind)).toEqual(["announce", "notice", "bulletin"]);
     expect(correction.find((candidate) => candidate.kind === "announce")?.message)
-      .toBe("由于玩家 p1 起跑保护期掉线，发令流程已中止，本关将在一分钟后重新发令，请做好准备。");
+      .toBe("玩家 p1 掉线，触发起跑保护。\n发令流程已中止。");
     expect(correction.find((candidate) => candidate.kind === "notice")?.message)
-      .toBe("第一关 即将在 1 分钟后发令，请提前做好重启游戏等准备，避免影响发令流程。\n本关起跑保护剩余 1 次，仅保护 fatal error。");
+      .toBe("第一关 将在一分钟后发令。\n请提前重启游戏，做好准备。\n本关起跑保护剩余 1 次，仅保护 fatal error。");
     expect(correction.find((candidate) => candidate.kind === "bulletin")?.message)
-      .toBe("第一关 将在 08:01 发令\n由于玩家 p1 起跑保护期掉线，发令流程已中止，本关将在一分钟后重新发令，请做好准备。\n本关起跑保护剩余 1 次，仅保护 fatal error。");
+      .toBe("第一关 将在 08:01 重新发令\n玩家 p1 掉线，发令流程已中止。\n本关起跑保护剩余 1 次，仅保护 fatal error。");
     for (const item of correction) controller.acknowledgeAction(item.id, "acknowledged");
 
     clock.set(10_000);
@@ -790,15 +840,15 @@ describe("CompetitionController", () => {
     });
     expect(snapshot.attempts[0]?.results).toEqual([expect.objectContaining({ sourceId: "finish-before-crash" })]);
     expect(snapshot.attempts[0]?.results.some((result) => result.status === "dnf")).toBe(false);
-    const correction = controller.drainActions();
-    expect(correction.map((candidate) => candidate.kind)).toEqual(["bulletin", "announce", "notice"]);
+    const correction = drainProtectionNotifications(controller, clock);
+    expect(correction.map((candidate) => candidate.kind)).toEqual(["announce", "notice", "bulletin"]);
     expect(correction.find((candidate) => candidate.kind === "announce")?.message)
-      .toBe("由于玩家 p2 起跑保护期掉线，当前尝试及成绩已作废，本关将在一分钟后重新发令，请做好准备。");
+      .toBe("玩家 p2 掉线，触发起跑保护。\n本次起跑已作废。");
     expect(correction.find((candidate) => candidate.kind === "notice")?.message)
-      .toBe("第一关 即将在 1 分钟后发令，请提前做好重启游戏等准备，避免影响发令流程。\n本关起跑保护剩余 1 次，仅保护 fatal error。");
+      .toBe("第一关 将在一分钟后发令。\n请提前重启游戏，做好准备。\n本关起跑保护剩余 1 次，仅保护 fatal error。");
     const correctionBulletins = correction.filter((candidate) => candidate.kind === "bulletin");
     expect(correctionBulletins.find((candidate) => candidate.message?.includes("起跑保护"))?.message)
-      .toBe("第一关 将在 08:01 发令\n由于玩家 p2 起跑保护期掉线，当前尝试及成绩已作废，本关将在一分钟后重新发令，请做好准备。\n本关起跑保护剩余 1 次，仅保护 fatal error。");
+      .toBe("第一关 将在 08:01 重新发令\n玩家 p2 掉线，本次起跑已作废。\n本关起跑保护剩余 1 次，仅保护 fatal error。");
     for (const item of correction) controller.acknowledgeAction(item.id, "acknowledged");
 
     controller.manualCheatOff();
@@ -810,7 +860,7 @@ describe("CompetitionController", () => {
     controller.acknowledgeAction(go.id, "acknowledged");
     expect(controller.snapshot().attempts).toMatchObject([
       { attemptNumber: 1, voided: true },
-      { attemptNumber: 2, voided: false, goAtMs: 35_000 }
+      { attemptNumber: 2, voided: false, goAtMs: 37_000 }
     ]);
 
     clock.advance(1_000);
@@ -819,6 +869,48 @@ describe("CompetitionController", () => {
     expect(snapshot.phase).toBe("running");
     expect(snapshot.attempts[1]).toMatchObject({ intakeOpen: true, voided: false });
     expect(snapshot.incidents.filter((incident) => incident.type === "protected-crash")).toHaveLength(1);
+  });
+
+  it("preserves notification spacing after late writes and snapshot recovery", () => {
+    const clock = new FakeClock();
+    let controller = new CompetitionController(configuration({ nonBlockingCommands: true }), clock);
+    connectAll(controller);
+    enterRunning(controller, clock);
+    controller.observeCrash("p1", "fatal error");
+    clock.advance(5_000);
+    const announcement = action(controller, "announce");
+    expect(controller.drainActions()).toEqual([]);
+    controller.observeActionWritten(announcement.id);
+    controller = new CompetitionController(configuration({ initialSnapshot: controller.snapshot(), nonBlockingCommands: true }), clock);
+    clock.advance(999);
+    expect(controller.drainActions()).toEqual([]);
+    clock.advance(1);
+    const notice = action(controller, "notice");
+    clock.advance(5_000);
+    expect(controller.drainActions()).toEqual([]);
+    controller.observeActionWritten(notice.id);
+    controller = new CompetitionController(configuration({ initialSnapshot: controller.snapshot(), nonBlockingCommands: true }), clock);
+    clock.advance(999);
+    expect(controller.drainActions()).toEqual([]);
+    clock.advance(1);
+    expect(controller.drainActions().map((item) => item.kind)).toEqual(["bulletin"]);
+    expect(controller.drainActions()).toEqual([]);
+  });
+
+  it.each(["second-protection", "reschedule"])("cancels stale delayed protection notifications on %s", (change) => {
+    const clock = new FakeClock();
+    const controller = new CompetitionController(configuration(), clock);
+    connectAll(controller);
+    enterRunning(controller, clock);
+    controller.observeCrash("p1", "fatal error");
+    const announcement = action(controller, "announce");
+    controller.acknowledgeAction(announcement.id, "acknowledged");
+    const staleIds = controller.snapshot().actions.filter((item) => item.afterActionId !== undefined).map((item) => item.id);
+    if (change === "second-protection") controller.observeCrash("p2", "fatal error");
+    else controller.reschedule(clock.now() + 120_000);
+    expect(controller.snapshot().actions.filter((item) => staleIds.includes(item.id)).map((item) => item.status)).toEqual(["cancelled", "cancelled"]);
+    clock.advance(2_000);
+    expect(controller.drainActions().some((item) => staleIds.includes(item.id))).toBe(false);
   });
 
   it("does not consume start protection when a terminal player disconnects or crashes", () => {
@@ -858,7 +950,7 @@ describe("CompetitionController", () => {
     controller.observeConnection("p3", false);
     expect(controller.snapshot().incidents).toHaveLength(2);
     expect(controller.snapshot().startProtectionExhaustedStageIds).toEqual(["s1"]);
-    expect(controller.drainActions().filter((item) => item.kind === "notice").at(-1)?.message)
+    expect(controller.snapshot().actions.filter((item) => item.kind === "notice").at(-1)?.message)
       .toContain("本关起跑保护已被使用，后续不再延时。");
 
     controller = new CompetitionController(configuration({ initialSnapshot: controller.snapshot(), restoreParticipantState: true }), clock);

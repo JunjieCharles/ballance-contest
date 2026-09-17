@@ -82,6 +82,44 @@ describe("automation runtimes", () => {
     expect(controller.snapshot().attempts).toHaveLength(1);
   });
 
+  it("spaces protection notifications from actual writes even without echoes", async () => {
+    const clock = new Clock();
+    const controller = new CompetitionController({
+      competitionId: "spaced", participants: ["p1"], nonBlockingCommands: true,
+      stages: [{ id: "s1", map: "1", mode: "sr", timeLimitMs: 120_000, minimumScoringPlace: 1 }]
+    }, clock);
+    controller.observeAuthoritativeGo();
+    controller.observeCrash("p1", "fatal error");
+    const sent: Array<{ channel: string; atMs: number }> = [];
+    const runtime = new WorkAutomationRuntime(controller, {
+      enqueue: async (command, idempotencyKey, _onWriteStart, onWritten) => {
+        if (command.type === "notification") sent.push({ channel: command.channel, atMs: clock.now() });
+        const record: CommandRecord = {
+          id: idempotencyKey, idempotencyKey, action: command, command: command.type,
+          status: "timed_out", createdAt: "2026-09-17T00:00:00Z", updatedAt: "2026-09-17T00:00:00Z"
+        };
+        onWritten?.(record);
+        return record;
+      }
+    });
+    clock.value = 5_000;
+    await runtime.dispatch();
+    clock.value = 5_999;
+    await runtime.dispatch();
+    expect(sent).toEqual([{ channel: "announce", atMs: 5_000 }]);
+    clock.value = 6_000;
+    await runtime.dispatch();
+    clock.value = 6_999;
+    await runtime.dispatch();
+    expect(sent).toHaveLength(2);
+    clock.value = 7_000;
+    await runtime.dispatch();
+    expect(sent).toEqual([
+      { channel: "announce", atMs: 5_000 }, { channel: "notice", atMs: 6_000 }, { channel: "bulletin", atMs: 7_000 }
+    ]);
+    expect(controller.snapshot()).toMatchObject({ automationEnabled: true, blockers: [] });
+  });
+
   it("keeps ordinary notification timeouts non-blocking", async () => {
     const { controller } = makeController();
     const port: CommandQueuePort = {

@@ -525,17 +525,17 @@ describe("CommandQueue", () => {
     expect(transport.writes).toEqual(["bulletin SR1 20:10", "notice wait Player", "announce READY!", "s 请回到大厅"]);
   });
 
-  it("keeps a business newline but protocol-escapes it into one MockClient command", async () => {
+  it("keeps three business lines but protocol-escapes them into one MockClient command", async () => {
     const transport = new FakeTransport();
     const queue = new CommandQueue(transport, 100);
     queue.setRefereeConnectionId("7");
-    transport.onWrite = () => setTimeout(() => queue.observeLine("[Notice] (7, *ContestConsole): SR1 即将发令。\\n本关起跑保护已被使用，后续不再延时。"), 0);
+    transport.onWrite = () => setTimeout(() => queue.observeLine("[Notice] (7, *ContestConsole): SR1 将在一分钟后发令。\\n请提前重启游戏，做好准备。\\n本关起跑保护已被使用，后续不再延时。"), 0);
     await queue.enqueue({
       type: "notification",
       channel: "notice",
-      text: "SR1 即将发令。\n本关起跑保护已被使用，后续不再延时。"
+      text: "SR1 将在一分钟后发令。\n请提前重启游戏，做好准备。\n本关起跑保护已被使用，后续不再延时。"
     }, "protected-notice");
-    expect(transport.writes).toEqual(["notice SR1 即将发令。\\n本关起跑保护已被使用，后续不再延时。"]);
+    expect(transport.writes).toEqual(["notice SR1 将在一分钟后发令。\\n请提前重启游戏，做好准备。\\n本关起跑保护已被使用，后续不再延时。"]);
   });
 
   it("does not acknowledge kick or raw commands from local echo and unrelated output", async () => {
