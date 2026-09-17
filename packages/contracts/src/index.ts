@@ -347,6 +347,7 @@ export interface RuntimeSnapshot {
   nextStagePreparationAt?: string;
   startProtectionEnabled: boolean;
   startProtectionUsed: boolean;
+  startProtectionRemaining: number;
   plannedStageStartAt?: string;
   stageDeadlineAt?: string;
   countdownValue?: 3 | 2 | 1;

@@ -873,7 +873,10 @@ export class CompetitionService {
     if (startProtectionMatch) {
       const stageId = startProtectionMatch[1];
       const used = startProtectionMatch[2] === "true";
-      const currentUsed = runtimeSnapshot?.startProtectionUsedStageIds?.includes(runtimeSnapshot.currentStageId) ?? false;
+      const usedStages = used
+        ? runtimeSnapshot?.startProtectionExhaustedStageIds ?? runtimeSnapshot?.startProtectionUsedStageIds
+        : runtimeSnapshot?.startProtectionUsedStageIds;
+      const currentUsed = runtimeSnapshot ? usedStages?.includes(runtimeSnapshot.currentStageId) ?? false : false;
       const availability = this.availableActionsFor(competitionId, runtimeSnapshot).find((candidate) => candidate.action === "set-start-protection");
       if (!runtimeSnapshot || stageId !== runtimeSnapshot.currentStageId || used === currentUsed) {
         throw new ServiceError("CONFIRMATION_UNAVAILABLE", "起跑保护目标关或目标状态已经变化", 409);
@@ -956,7 +959,7 @@ export class CompetitionService {
           title: startProtectionMatch[2] === "true" ? `把 ${displayStageName} 的起跑保护标记为已使用？` : `重置 ${displayStageName} 的起跑保护？`,
           consequences: startProtectionMatch[2] === "true"
             ? ["本关后续掉线不再触发自动延时或作废尝试。", "不会改变 Ready 计划或当前尝试。"]
-            : ["本关下一次符合条件的掉线可以再次触发起跑保护。", "不会改变 Ready 计划或当前尝试。"],
+            : ["恢复本关两次保护：第一次保护任何形式的掉线，第二次仅保护 fatal error。", "不会改变 Ready 计划或当前尝试。"],
           irreversible: false
         };
       }
@@ -2925,7 +2928,6 @@ export class CompetitionService {
       : Boolean((this.getPayload(competitionId).activeRunId ?? competition.activeRunId) && snapshot);
     const hasPersistedWorkRuntime = competition.mode === "work" && Boolean(this.getPayload(competitionId).work?.started);
     const startProtectionEnabled = (this.getPublishedConfig(competitionId) ?? this.getDraftConfig(competitionId)).flow.startProtectionEnabled !== false;
-    const startProtectionUsed = snapshot?.startProtectionUsedStageIds?.includes(snapshot.currentStageId) ?? false;
     const configuredStages = [...(this.getPublishedConfig(competitionId) ?? this.getDraftConfig(competitionId)).stages]
       .sort((left, right) => left.order - right.order);
     const currentStageIndex = snapshot?.currentStageId === undefined
@@ -3032,8 +3034,8 @@ export class CompetitionService {
               ? "当前已是末关，没有下一关"
               : "当前运行没有可切换的下一关",
         nextStageId),
-      descriptor("set-start-protection", startProtectionUsed ? "将起跑保护重置为未使用" : "将起跑保护标记为已使用",
-        startProtectionUsed ? "允许本关后续首次有效敏感期掉线再次触发起跑保护。" : "本关后续敏感期掉线不再自动延时或作废尝试。",
+      descriptor("set-start-protection", "设置起跑保护",
+        "标记已使用会耗尽本关两次保护；重置为未使用会一次恢复两次保护。",
         refereeActionsUnlocked && hasRuntime && startProtectionEnabled && Boolean(snapshot?.currentStageId) && phase !== "review",
         !startProtectionEnabled ? "比赛配置未启用起跑保护" : !refereeActionsUnlocked ? "请先发布比赛配置" : !hasRuntime ? "请先建立比赛连接或创建测试运行" : "比赛已进入复核",
         snapshot?.currentStageId),

@@ -93,6 +93,9 @@ export const automationView = (
   ...(nextReady === undefined ? {} : { nextStageReadyAt: nextReady }),
   ...(nextReady === undefined ? {} : { nextStagePreparationAt: new Date(Date.parse(nextReady) - 60_000).toISOString() }),
   startProtectionEnabled: snapshot?.startProtectionEnabled ?? true,
+  startProtectionRemaining: snapshot?.startProtectionUsedStageIds?.includes(snapshot.currentStageId)
+    ? (snapshot.startProtectionExhaustedStageIds ?? snapshot.startProtectionUsedStageIds).includes(snapshot.currentStageId) ? 0 : 1
+    : 2,
   startProtectionUsed: snapshot?.startProtectionUsedStageIds?.includes(snapshot.currentStageId) ?? false,
   ...(plannedStageStartAt === undefined ? {} : { plannedStageStartAt }),
   ...(deadlineAt === undefined ? {} : { stageDeadlineAt: deadlineAt }),

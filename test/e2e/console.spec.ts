@@ -1203,13 +1203,20 @@ test("shows disabled reasons, shared scheduling controls and automatic review co
   await expect(page.getByRole("button", { name: "关闭 cheat" })).toBeEnabled();
   await expect(page.getByRole("button", { name: "手动发令" })).toBeDisabled();
   await expect(page.getByText("目标关尚无关闭 cheat 成功回显")).toBeVisible();
+  await expect(page.getByRole("button", { name: "将起跑保护重置为未使用" })).toBeDisabled();
   const protectionAction = page.locator(".confirm-action").filter({ hasText: "将起跑保护标记为已使用" });
   await expect(protectionAction.getByRole("button", { name: "将起跑保护标记为已使用" })).toBeEnabled();
   await protectionAction.getByRole("button", { name: "将起跑保护标记为已使用" }).click();
   await expect(protectionAction.getByText("把 SR1 的起跑保护标记为已使用？", { exact: true })).toBeVisible();
   await expect(protectionAction.getByText("本关后续掉线不再触发自动延时或作废尝试。", { exact: true })).toBeVisible();
   await protectionAction.getByRole("button", { name: "确认" }).click();
-  await expect(page.getByRole("button", { name: "将起跑保护重置为未使用" })).toBeVisible();
+  await expect(page.getByText("起跑保护剩余 0 次", { exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "将起跑保护标记为已使用" })).toBeDisabled();
+  const restoreProtection = page.locator(".confirm-action").filter({ has: page.getByRole("button", { name: "将起跑保护重置为未使用" }) });
+  await restoreProtection.getByRole("button", { name: "将起跑保护重置为未使用" }).click();
+  await expect(restoreProtection).toContainText("恢复本关两次保护：第一次保护任何形式的掉线，第二次仅保护 fatal error。");
+  await restoreProtection.getByRole("button", { name: "确认" }).click();
+  await expect(page.getByText("起跑保护剩余 2 次（第一次保护任何掉线，第二次仅保护 fatal error）", { exact: true })).toBeVisible();
   await expect(page.getByText("下一关 Ready（UTC+8）").locator("..")).toContainText("未设置");
 
   await page.getByRole("button", { name: "启动自动化" }).click();

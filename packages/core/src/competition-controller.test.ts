@@ -707,7 +707,7 @@ describe("CompetitionController", () => {
     expect(controller.snapshot().attempts[0]?.results.some((result) => result.playerId === "p5")).toBe(false);
   });
 
-  it("uses pre-Go protection once and separates the protection announcement from the T-60 notice", () => {
+  it("uses the first pre-Go protection and separates the protection announcement from the T-60 notice", () => {
     const clock = new FakeClock();
     const controller = new CompetitionController(configuration(), clock);
     connectAll(controller);
@@ -731,9 +731,9 @@ describe("CompetitionController", () => {
     expect(correction.find((candidate) => candidate.kind === "announce")?.message)
       .toBe("由于玩家 p1 起跑保护期掉线，发令流程已中止，本关将在一分钟后重新发令，请做好准备。");
     expect(correction.find((candidate) => candidate.kind === "notice")?.message)
-      .toBe("第一关 即将在 1 分钟后发令，请提前做好重启游戏等准备，避免影响发令流程。\n本关起跑保护已被使用，后续不再延时。");
+      .toBe("第一关 即将在 1 分钟后发令，请提前做好重启游戏等准备，避免影响发令流程。\n本关起跑保护剩余 1 次，仅保护 fatal error。");
     expect(correction.find((candidate) => candidate.kind === "bulletin")?.message)
-      .toBe("第一关 将在 08:01 发令\n由于玩家 p1 起跑保护期掉线，发令流程已中止，本关将在一分钟后重新发令，请做好准备。\n本关起跑保护已被使用，后续不再延时。");
+      .toBe("第一关 将在 08:01 发令\n由于玩家 p1 起跑保护期掉线，发令流程已中止，本关将在一分钟后重新发令，请做好准备。\n本关起跑保护剩余 1 次，仅保护 fatal error。");
     for (const item of correction) controller.acknowledgeAction(item.id, "acknowledged");
 
     clock.set(10_000);
@@ -795,10 +795,10 @@ describe("CompetitionController", () => {
     expect(correction.find((candidate) => candidate.kind === "announce")?.message)
       .toBe("由于玩家 p2 起跑保护期掉线，当前尝试及成绩已作废，本关将在一分钟后重新发令，请做好准备。");
     expect(correction.find((candidate) => candidate.kind === "notice")?.message)
-      .toBe("第一关 即将在 1 分钟后发令，请提前做好重启游戏等准备，避免影响发令流程。\n本关起跑保护已被使用，后续不再延时。");
+      .toBe("第一关 即将在 1 分钟后发令，请提前做好重启游戏等准备，避免影响发令流程。\n本关起跑保护剩余 1 次，仅保护 fatal error。");
     const correctionBulletins = correction.filter((candidate) => candidate.kind === "bulletin");
     expect(correctionBulletins.find((candidate) => candidate.message?.includes("起跑保护"))?.message)
-      .toBe("第一关 将在 08:01 发令\n由于玩家 p2 起跑保护期掉线，当前尝试及成绩已作废，本关将在一分钟后重新发令，请做好准备。\n本关起跑保护已被使用，后续不再延时。");
+      .toBe("第一关 将在 08:01 发令\n由于玩家 p2 起跑保护期掉线，当前尝试及成绩已作废，本关将在一分钟后重新发令，请做好准备。\n本关起跑保护剩余 1 次，仅保护 fatal error。");
     for (const item of correction) controller.acknowledgeAction(item.id, "acknowledged");
 
     controller.manualCheatOff();
@@ -839,6 +839,78 @@ describe("CompetitionController", () => {
       startProtectionUsedStageIds: [],
       incidents: []
     });
+  });
+
+  it.each([false, true])("restores two protections, restricts the second to fatal error, and refills both (first fatal: %s)", (firstFatal) => {
+    const clock = new FakeClock();
+    let controller = new CompetitionController(configuration(), clock);
+    connectAll(controller);
+    enterRunning(controller, clock);
+    if (firstFatal) controller.observeCrash("p1", "fatal error");
+    controller.observeConnection("p1", false);
+    expect(controller.snapshot().incidents).toHaveLength(1);
+    expect(controller.snapshot().startProtectionExhaustedStageIds).toEqual([]);
+
+    controller = new CompetitionController(configuration({ initialSnapshot: controller.snapshot(), restoreParticipantState: true }), clock);
+    controller.observeConnection("p2", false);
+    expect(controller.snapshot().incidents).toHaveLength(1);
+    controller.observeCrash("p3", "fatal error");
+    controller.observeConnection("p3", false);
+    expect(controller.snapshot().incidents).toHaveLength(2);
+    expect(controller.snapshot().startProtectionExhaustedStageIds).toEqual(["s1"]);
+    expect(controller.drainActions().filter((item) => item.kind === "notice").at(-1)?.message)
+      .toContain("本关起跑保护已被使用，后续不再延时。");
+
+    controller = new CompetitionController(configuration({ initialSnapshot: controller.snapshot(), restoreParticipantState: true }), clock);
+    controller.observeCrash("p4", "fatal error");
+    expect(controller.snapshot().incidents).toHaveLength(2);
+    controller.setStartProtectionUsed(false);
+    expect(controller.snapshot().startProtectionUsedStageIds).toEqual([]);
+    expect(controller.snapshot().startProtectionExhaustedStageIds).toEqual([]);
+    controller = new CompetitionController(configuration({ initialSnapshot: controller.snapshot(), restoreParticipantState: true }), clock);
+    controller.observeConnection("p4", false);
+    controller.observeCrash("p5", "fatal error");
+    controller.observeConnection("p5", false);
+    expect(controller.snapshot().incidents).toHaveLength(4);
+    expect(controller.snapshot().startProtectionExhaustedStageIds).toEqual(["s1"]);
+  });
+
+  it.each([false, true])("applies fatal-only protection on the next launch (post-Go: %s)", (postGo) => {
+    const clock = new FakeClock();
+    const controller = new CompetitionController(configuration({ startProtectionUsedStageIds: ["s1"], startProtectionExhaustedStageIds: [] }), clock);
+    connectAll(controller);
+    if (postGo) enterRunning(controller, clock);
+    else {
+      controller.enable(0);
+      for (const item of controller.drainActions()) controller.acknowledgeAction(item.id, "acknowledged");
+      controller.tick();
+    }
+    const phase = controller.snapshot().phase;
+    controller.observeConnection("p1", false);
+    expect(controller.snapshot().phase).toBe(phase);
+    expect(controller.snapshot().incidents).toHaveLength(0);
+    controller.observeCrash("p2", "fatal error");
+    controller.observeConnection("p2", false);
+    expect(controller.snapshot()).toMatchObject({ phase: "restart-preparing", startProtectionExhaustedStageIds: ["s1"], plannedReadyAtMs: clock.now() + 60_000 });
+    expect(controller.snapshot().incidents).toHaveLength(1);
+    if (postGo) expect(controller.snapshot().attempts[0]).toMatchObject({ voided: true, intakeOpen: false });
+  });
+
+  it("preserves exhausted protection when migrating an older snapshot", () => {
+    const clock = new FakeClock();
+    const original = new CompetitionController(configuration(), clock);
+    connectAll(original);
+    enterRunning(original, clock);
+    const legacy = original.snapshot();
+    delete legacy.startProtectionExhaustedStageIds;
+    legacy.startProtectionUsedStageIds = ["s1"];
+    const restored = new CompetitionController(configuration({ initialSnapshot: legacy }), clock);
+    restored.observeCrash("p1", "fatal error");
+    expect(restored.snapshot().incidents).toHaveLength(0);
+    restored.setStartProtectionUsed(false);
+    restored.observeCrash("p1", "fatal error");
+    expect(restored.snapshot().incidents).toHaveLength(1);
+    expect(restored.snapshot().startProtectionExhaustedStageIds).toEqual([]);
   });
 
   it("can disable protection by policy and manually toggle the current stage usage", () => {
@@ -1220,7 +1292,7 @@ describe("CompetitionController", () => {
       receivedAtMs: 4_321
     })).toBe("accepted");
 
-    const restored = new CompetitionController(configuration({ initialSnapshot: controller.snapshot() }), clock);
+    const restored = new CompetitionController(configuration({ initialSnapshot: controller.snapshot(), restoreParticipantState: true }), clock);
     expect(restored.snapshot().attempts[0]).toMatchObject({
       id: marked.id,
       origin: "referee-marked-started",
@@ -1435,7 +1507,7 @@ describe("CompetitionController", () => {
     expect(controller.snapshot()).toMatchObject({ currentStageId: "s2", attempts: [{ stageId: "s1" }] });
     expect(controller.snapshot().attempts).toHaveLength(1);
 
-    const restored = new CompetitionController(configuration({ initialSnapshot: controller.snapshot() }), clock);
+    const restored = new CompetitionController(configuration({ initialSnapshot: controller.snapshot(), restoreParticipantState: true }), clock);
     expect(restored.snapshot()).toMatchObject({
       currentStageId: "s2",
       plannedReadyAtMs: 95_000,

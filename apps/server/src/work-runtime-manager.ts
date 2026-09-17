@@ -365,6 +365,7 @@ export class WorkRuntimeManager {
       ...(this.host.getPayload(competitionId).work?.automation?.startProtectionUsedStageIds === undefined
         ? {}
         : { startProtectionUsedStageIds: this.host.getPayload(competitionId).work?.automation?.startProtectionUsedStageIds }),
+      startProtectionExhaustedStageIds: this.host.getPayload(competitionId).work?.automation?.startProtectionExhaustedStageIds,
       ...(initialSnapshot === undefined ? {} : { initialSnapshot })
     }, new SystemMonotonicClock());
     if (initialSnapshot && !["review", "lobby"].includes(initialSnapshot.phase)) controller.pause();

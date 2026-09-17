@@ -244,7 +244,7 @@ describe("CompetitionService dynamic participants", () => {
     });
     expect(automation.incidents.filter((incident) => incident.type === "protected-crash")).toHaveLength(1);
     expect(automation.actions.filter((action) => action.kind === "bulletin").at(-1)?.message)
-      .toContain("\n本关起跑保护已被使用，后续不再延时。");
+      .toContain("\n本关起跑保护剩余 1 次，仅保护 fatal error。");
     expect(runtime.engine.snapshot().attempts).toMatchObject([{ attemptNumber: 1, voided: true, open: false }]);
     expect(runtime.engine.snapshot().currentScoreboard.every((entry) => Object.keys(entry.stages).length === 0)).toBe(true);
     expect(service.snapshot(record.id).config.participants).toContainEqual(expect.objectContaining({ id: "Player One", online: false }));
@@ -1391,7 +1391,7 @@ describe("CompetitionService dynamic participants", () => {
     service.createTestRunFromScenario(record.id, "normal-player-roster");
 
     let snapshot = service.snapshot(record.id);
-    expect(snapshot.runtime).toMatchObject({ startProtectionEnabled: true, startProtectionUsed: false });
+    expect(snapshot.runtime).toMatchObject({ startProtectionEnabled: true, startProtectionUsed: false, startProtectionRemaining: 2 });
     let confirmation = service.createConfirmation(record.id, { kind: "manual-action", intent: "set-start-protection", target: `${record.id}:start-protection:sr-1:true` });
     expect(confirmation.effect).toMatchObject({
       title: "把 SR1 的起跑保护标记为已使用？",
@@ -1408,6 +1408,7 @@ describe("CompetitionService dynamic participants", () => {
     service = new CompetitionService(undefined, { database, dataRoot });
     snapshot = service.snapshot(record.id);
     expect(snapshot.runtime.startProtectionUsed).toBe(true);
+    expect(snapshot.runtime.startProtectionRemaining).toBe(0);
     confirmation = service.createConfirmation(record.id, { kind: "manual-action", intent: "set-start-protection", target: `${record.id}:start-protection:sr-1:false` });
     await service.performAction(record.id, {
       expectedStateVersion: snapshot.competition.stateVersion,
@@ -1415,6 +1416,7 @@ describe("CompetitionService dynamic participants", () => {
       action: { type: "set-start-protection", used: false, confirmationToken: confirmation.token, impactHash: confirmation.impactHash }
     });
     expect(service.snapshot(record.id).runtime.startProtectionUsed).toBe(false);
+    expect(service.snapshot(record.id).runtime.startProtectionRemaining).toBe(2);
     await service.close();
   });
 
@@ -2389,6 +2391,50 @@ describe("CompetitionService dynamic participants", () => {
       }
     })).rejects.toMatchObject({ code: "CONFIRMATION_INVALID", statusCode: 409 });
 
+    await service.close();
+  });
+
+  it("persists the remaining fatal-only protection through SQLite shutdown and restores both on reset", async () => {
+    dataRoot = mkdtempSync(join(tmpdir(), "ballance-two-protections-"));
+    database = openDatabase(join(dataRoot, "console.sqlite"));
+    let service = new CompetitionService(undefined, { database, dataRoot });
+    const record = service.create({ name: "Two protections", mode: "work", idempotencyKey: "two-protections" });
+    service.publish(record.id, 0, "publish-two-protections");
+    const config = service.snapshot(record.id).publishedConfig as CompetitionConfig;
+    let manager = workRuntimeManager(service);
+    let runtime = manager.makeRuntime(record.id, config, { write: async () => undefined });
+    manager.register(record.id, runtime);
+    runtime.controller.registerParticipant("p1");
+    runtime.controller.enable(0);
+    for (const action of runtime.controller.drainActions()) runtime.controller.acknowledgeAction(action.id, "acknowledged");
+    runtime.controller.tick();
+    runtime.controller.observeConnection("p1", false);
+    manager.saveSnapshot(runtime);
+    expect(service.snapshot(record.id).runtime.startProtectionRemaining).toBe(1);
+    await service.close();
+    database.close();
+
+    database = openDatabase(join(dataRoot, "console.sqlite"));
+    service = new CompetitionService(undefined, { database, dataRoot });
+    manager = workRuntimeManager(service);
+    runtime = manager.makeRuntime(record.id, config, { write: async () => undefined });
+    manager.register(record.id, runtime);
+    expect(service.snapshot(record.id).runtime.startProtectionRemaining).toBe(1);
+    expect(() => service.createConfirmation(record.id, {
+      kind: "manual-action", intent: "set-start-protection", target: `${record.id}:start-protection:sr-1:true`
+    })).not.toThrow();
+    const snapshot = service.snapshot(record.id);
+    const confirmation = service.createConfirmation(record.id, {
+      kind: "manual-action", intent: "set-start-protection", target: `${record.id}:start-protection:sr-1:false`
+    });
+    await service.performAction(record.id, {
+      expectedStateVersion: snapshot.competition.stateVersion, idempotencyKey: "restore-both",
+      action: { type: "set-start-protection", used: false, confirmationToken: confirmation.token, impactHash: confirmation.impactHash }
+    });
+    expect(service.snapshot(record.id).runtime.startProtectionRemaining).toBe(2);
+    await service.close();
+    service = new CompetitionService(undefined, { database, dataRoot });
+    expect(service.snapshot(record.id).runtime.startProtectionRemaining).toBe(2);
     await service.close();
   });
 

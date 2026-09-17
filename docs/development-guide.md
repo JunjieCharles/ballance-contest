@@ -4,6 +4,7 @@
 
 ## 工具链与测试隔离
 
+- Windows PowerShell 向 Node 等进程通过管道传递含中文脚本时，先把本次命令的 `$OutputEncoding` 设为 UTF-8；读文件显式使用 UTF-8，写后核对中文差异。调用 npm 使用 `npm.cmd`，避免误触 `npm.ps1` 的脚本执行策略。
 - npm 默认用户缓存目录不可写时，仅为当前命令设置 `npm_config_cache` 到工作区 `.runtime/npm-cache` 后重试；不要修改全局 npm 配置或为缓存写入扩大用户目录权限。
 - E2E 使用独立 `BALLANCE_DATA_ROOT`，不得写入 `%LOCALAPPDATA%\BallanceContestConsole` 的用户数据。
 - Playwright 临时产物写入 `.runtime/playwright-results`；不要在根目录保留 `test-results/`。

@@ -48,6 +48,7 @@ export interface AutomationConfiguration {
   confirmationSecret?: string;
   wallClockOriginMs?: number;
   startProtectionUsedStageIds?: readonly string[] | undefined;
+  startProtectionExhaustedStageIds?: readonly string[] | undefined;
   initialSnapshot?: AutomationSnapshot | undefined;
   restoreParticipantState?: boolean;
   nonBlockingCommands?: boolean;
@@ -175,6 +176,7 @@ export interface AutomationSnapshot {
   participantStates?: readonly AutomationParticipantState[];
   cheatWarningSent?: boolean;
   startProtectionUsedStageIds?: readonly string[];
+  startProtectionExhaustedStageIds?: readonly string[];
   startProtectionEnabled?: boolean;
   startProtectionSensitiveStageId?: string;
   startProtectionUntilMs?: number;
@@ -294,6 +296,7 @@ export class CompetitionController {
   private readonly waiting = new Set<string>();
   private readonly absent = new Set<string>();
   private readonly startProtectionUsedStageIds = new Set<string>();
+  private readonly startProtectionExhaustedStageIds = new Set<string>();
   private readonly actions: AutomationAction[] = [];
   private readonly undeliveredActionIds = new Set<string>();
   private readonly attempts: MutableAttempt[] = [];
@@ -337,6 +340,9 @@ export class CompetitionController {
     this.wallClockOriginMs = configuration.wallClockOriginMs ?? 0;
     if (this.policy.groupDisconnectThreshold < 1) throw new Error("Group disconnect threshold must be positive");
     this.tokenService = new RestartConfirmationTokens(configuration.confirmationSecret ?? randomUUID());
+    for (const stageId of configuration.startProtectionExhaustedStageIds ?? configuration.startProtectionUsedStageIds ?? []) {
+      if (this.stages.some((stage) => stage.id === stageId)) this.startProtectionExhaustedStageIds.add(stageId);
+    }
     for (const stageId of configuration.startProtectionUsedStageIds ?? []) {
       if (this.stages.some((stage) => stage.id === stageId)) this.startProtectionUsedStageIds.add(stageId);
     }
@@ -381,6 +387,7 @@ export class CompetitionController {
     this.waiting.clear();
     this.absent.clear();
     this.startProtectionUsedStageIds.clear();
+    this.startProtectionExhaustedStageIds.clear();
     this.actions.length = 0;
     this.undeliveredActionIds.clear();
     this.attempts.length = 0;
@@ -411,7 +418,10 @@ export class CompetitionController {
     this.startProtectionSensitiveStageId = snapshot.startProtectionSensitiveStageId;
     this.startProtectionUntilMs = snapshot.startProtectionUntilMs;
     this.startProtectionUsedStageIds.clear();
+    this.startProtectionExhaustedStageIds.clear();
     for (const stageId of snapshot.startProtectionUsedStageIds ?? []) this.startProtectionUsedStageIds.add(stageId);
+    // Older snapshots only recorded a fully consumed boolean protection.
+    for (const stageId of snapshot.startProtectionExhaustedStageIds ?? snapshot.startProtectionUsedStageIds ?? []) this.startProtectionExhaustedStageIds.add(stageId);
 
     const restoredParticipants = new Set<string>([
       ...this.participantIds,
@@ -588,7 +598,7 @@ export class CompetitionController {
     this.settleDueStageClosures(this.clock.now());
     this.assertParticipant(participantId);
     if (!this.isStartProtectionSensitive() || this.hasProtectionIneligibleResult(participantId)) return;
-    if (!this.startProtectionUsedStageIds.has(this.stage.id)) this.triggerStartProtection(participantId, evidence);
+    if (!this.startProtectionExhaustedStageIds.has(this.stage.id)) this.triggerStartProtection(participantId, evidence);
     this.bump();
   }
 
@@ -596,11 +606,16 @@ export class CompetitionController {
     this.settleDueStageClosures(this.clock.now());
     if (!this.policy.startProtectionEnabled) throw new Error("START_PROTECTION_DISABLED");
     const changed = used
-      ? !this.startProtectionUsedStageIds.has(this.stage.id)
+      ? !this.startProtectionExhaustedStageIds.has(this.stage.id)
       : this.startProtectionUsedStageIds.has(this.stage.id);
     if (!changed) return;
-    if (used) this.startProtectionUsedStageIds.add(this.stage.id);
-    else this.startProtectionUsedStageIds.delete(this.stage.id);
+    if (used) {
+      this.startProtectionUsedStageIds.add(this.stage.id);
+      this.startProtectionExhaustedStageIds.add(this.stage.id);
+    } else {
+      this.startProtectionUsedStageIds.delete(this.stage.id);
+      this.startProtectionExhaustedStageIds.delete(this.stage.id);
+    }
     this.bump();
   }
 
@@ -1248,6 +1263,7 @@ export class CompetitionController {
       cheatWarningSent: this.cheatWarningSent,
       startProtectionEnabled: this.policy.startProtectionEnabled,
       startProtectionUsedStageIds: [...this.startProtectionUsedStageIds],
+      startProtectionExhaustedStageIds: [...this.startProtectionExhaustedStageIds],
       ...(this.startProtectionSensitiveStageId === undefined ? {} : { startProtectionSensitiveStageId: this.startProtectionSensitiveStageId }),
       ...(this.startProtectionUntilMs === undefined ? {} : { startProtectionUntilMs: this.startProtectionUntilMs }),
       attempts: this.attempts.map(cloneAttempt),
@@ -1463,6 +1479,7 @@ export class CompetitionController {
     const postGo = Boolean(attempt?.intakeOpen && now <= attempt.goAtMs + this.policy.protectionWindowMs);
     const plannedReadyAtMs = now + READY_NOTICE_LEAD_MS;
     const stage = this.stage;
+    if (this.startProtectionUsedStageIds.has(stage.id)) this.startProtectionExhaustedStageIds.add(stage.id);
     this.startProtectionUsedStageIds.add(stage.id);
     this.cancelPendingLaunchActions(stage.id);
     this.incidents.push({
@@ -1600,7 +1617,8 @@ export class CompetitionController {
   private queueBulletin(stage: AutomationStage, plannedReadyAtMs: number, protectionMessage?: string): void {
     const name = stage.displayName ?? `${stage.mode.toUpperCase()}${stage.map}`;
     const protectionContext = protectionMessage ? `\n${protectionMessage}` : "";
-    const suffix = this.startProtectionUsedStageIds.has(stage.id) ? START_PROTECTION_USED_SUFFIX : "";
+    const suffix = this.startProtectionExhaustedStageIds.has(stage.id) ? START_PROTECTION_USED_SUFFIX
+      : this.startProtectionUsedStageIds.has(stage.id) ? "\n本关起跑保护剩余 1 次，仅保护 fatal error。" : "";
     this.queueActionForStage("bulletin", stage, `${name} 将在 ${formatUtc8Time(this.wallClockOriginMs + plannedReadyAtMs)} 发令${protectionContext}${suffix}`);
   }
 
@@ -1609,7 +1627,8 @@ export class CompetitionController {
     if (this.clock.now() < this.plannedReadyAtMs - READY_NOTICE_LEAD_MS) return;
     const stage = this.plannedReadyStage;
     const name = stage.displayName ?? `${stage.mode.toUpperCase()}${stage.map}`;
-    const suffix = this.startProtectionUsedStageIds.has(stage.id) ? START_PROTECTION_USED_SUFFIX : "";
+    const suffix = this.startProtectionExhaustedStageIds.has(stage.id) ? START_PROTECTION_USED_SUFFIX
+      : this.startProtectionUsedStageIds.has(stage.id) ? "\n本关起跑保护剩余 1 次，仅保护 fatal error。" : "";
     this.noticeActionId = this.queueActionForStage(
       "notice",
       stage,

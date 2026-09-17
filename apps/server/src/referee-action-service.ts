@@ -298,7 +298,7 @@ export class RefereeActionService {
           title: action.used ? "起跑保护已手动标记为已使用" : "起跑保护已手动重置为未使用",
           message: action.used
             ? "本关后续敏感期掉线不会再触发自动延时或作废。"
-            : "本关后续首次有效敏感期掉线可以再次触发起跑保护。",
+            : "恢复本关两次保护：第一次保护任何形式的掉线，第二次仅保护 fatal error。",
           occurredAt: new Date().toISOString(),
           stageId: snapshot.currentStageId
         });

@@ -547,7 +547,7 @@ describe("local API", () => {
         actions: expect.arrayContaining([
           expect.objectContaining({
             kind: "bulletin",
-            message: expect.stringContaining("\n本关起跑保护已被使用，后续不再延时。")
+            message: expect.stringContaining("\n本关起跑保护剩余 1 次，仅保护 fatal error。")
           })
         ])
       }
