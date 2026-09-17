@@ -1,0 +1,326 @@
+{
+  "scope": "Real notification transport and server echoes on 2.bmmo.win; p1 and protection triggers are synthetic local controller inputs. No real Ready/Go/crash or score experiment; no game-client visual or server recovery acceptance.",
+  "server": "2.bmmo.win",
+  "status": "passed",
+  "checkedAt": "2026-09-17T04:34:57.902Z",
+  "finishedAt": "2026-09-17T04:35:58.251Z",
+  "mockClientVersion": "3.6.8-beta18.",
+  "authenticatedIdentity": {
+    "connectionId": "368585312",
+    "style": "modern-id-row",
+    "line": "[09-17 12:34:59] 368585312: *ContestConsole     0ms"
+  },
+  "initialOrdinaryPlayerCount": 0,
+  "sourceArtifacts": [
+    {
+      "path": "test/artifacts/notification-acceptance-2026-09-17T04-34-57-900Z/live-work-mode-2.bmmo.win.json",
+      "sha256": "cfab9a6cad11b389f6b88f4be6aa324a70898f27d7281925b1768983e3cf1f28"
+    },
+    {
+      "path": "test/artifacts/notification-acceptance-2026-09-17T04-35-51-250Z/live-work-mode-2.bmmo.win.json",
+      "sha256": "d2108a37431dd8eabad157ec39f415d1239687ee96c25e23141681d732f06f23"
+    }
+  ],
+  "probeSources": [
+    {
+      "path": "test/artifacts/notification-acceptance-2026-09-17T04-34-57-900Z/probe.mjs",
+      "sha256": "0383af996168348e9c815b1acccd684e42ac279c8ed7cb5961e803e356cdecd5"
+    },
+    {
+      "path": "test/artifacts/notification-acceptance-2026-09-17T04-35-51-250Z/probe.mjs",
+      "sha256": "bdfe63fc7e3ae7ddaea2d722bbf6d99e5b38c9596d030b02122062930268200c"
+    }
+  ],
+  "productionSourceHashes": [
+    {
+      "path": "packages/core/src/competition-controller.ts",
+      "sha256": "d10e4d1d8ee81f83b48fe7a8c6011308a0fb52bc90382f5710e1cbb0116338c0"
+    },
+    {
+      "path": "apps/server/src/automation-runtime.ts",
+      "sha256": "23b1c201fe006b40a778cc564b8fee8c7dc44bcf00376d38845672a188ad7036"
+    },
+    {
+      "path": "apps/server/src/command-queue.ts",
+      "sha256": "0bdf567d7e0ec4dadca1cf3b1b40e95fd7b3ced0827f6f1322e1c3f5a999ebdb"
+    }
+  ],
+  "protectionCases": [
+    {
+      "postGo": false,
+      "protectionNumber": 1,
+      "trigger": "synthetic-local-controller-event",
+      "writes": [
+        {
+          "channel": "announce",
+          "text": "玩家 p1 掉线，触发起跑保护。\n发令流程已中止。",
+          "widths": [
+            28,
+            16
+          ],
+          "atMs": 4091.5264,
+          "record": {
+            "actionType": "notification",
+            "command": "announce 玩家 p1 掉线，触发起跑保护。\\n发令流程已中止。",
+            "status": "acknowledged",
+            "responseLine": "[09-17 12:35:01] [Announcement] (368585312, *ContestConsole): 玩家 p1 掉线，触发起跑保护。\\n发令流程已中止。"
+          }
+        },
+        {
+          "channel": "notice",
+          "text": "SR1 将在一分钟后发令。\n请提前重启游戏，做好准备。\n本关起跑保护剩余 1 次，仅保护 fatal error。",
+          "widths": [
+            22,
+            26,
+            43
+          ],
+          "atMs": 5120.7135,
+          "record": {
+            "actionType": "notification",
+            "command": "notice SR1 将在一分钟后发令。\\n请提前重启游戏，做好准备。\\n本关起跑保护剩余 1 次，仅保护 fatal error。",
+            "status": "acknowledged",
+            "responseLine": "[09-17 12:35:03] [Notice] (368585312, *ContestConsole): SR1 将在一分钟后发令。\\n请提前重启游戏，做好准备。\\n本关起跑保护剩余 1 次，仅保护 fatal error。"
+          }
+        },
+        {
+          "channel": "bulletin",
+          "text": "SR1 将在 12:36 重新发令\n玩家 p1 掉线，发令流程已中止。\n本关起跑保护剩余 1 次，仅保护 fatal error。",
+          "widths": [
+            23,
+            30,
+            43
+          ],
+          "atMs": 6134.4237,
+          "record": {
+            "actionType": "notification",
+            "command": "bulletin SR1 将在 12:36 重新发令\\n玩家 p1 掉线，发令流程已中止。\\n本关起跑保护剩余 1 次，仅保护 fatal error。",
+            "status": "acknowledged",
+            "responseLine": "[09-17 12:35:04] [Bulletin] *ContestConsole: SR1 将在 12:36 重新发令\\n玩家 p1 掉线，发令流程已中止。\\n本关起跑保护剩余 1 次，仅保护 fatal error。"
+          }
+        }
+      ],
+      "gapsMs": [
+        1029.1870999999996,
+        1013.7102000000004
+      ],
+      "status": "passed"
+    },
+    {
+      "postGo": false,
+      "protectionNumber": 2,
+      "trigger": "synthetic-local-controller-event",
+      "writes": [
+        {
+          "channel": "announce",
+          "text": "玩家 p1 掉线，触发起跑保护。\n发令流程已中止。",
+          "widths": [
+            28,
+            16
+          ],
+          "atMs": 7739.8901,
+          "record": {
+            "actionType": "notification",
+            "command": "announce 玩家 p1 掉线，触发起跑保护。\\n发令流程已中止。",
+            "status": "acknowledged",
+            "responseLine": "[09-17 12:35:05] [Announcement] (368585312, *ContestConsole): 玩家 p1 掉线，触发起跑保护。\\n发令流程已中止。"
+          }
+        },
+        {
+          "channel": "notice",
+          "text": "SR1 将在一分钟后发令。\n请提前重启游戏，做好准备。\n本关起跑保护已被使用，后续不再延时。",
+          "widths": [
+            22,
+            26,
+            36
+          ],
+          "atMs": 8743.2061,
+          "record": {
+            "actionType": "notification",
+            "command": "notice SR1 将在一分钟后发令。\\n请提前重启游戏，做好准备。\\n本关起跑保护已被使用，后续不再延时。",
+            "status": "acknowledged",
+            "responseLine": "[09-17 12:35:06] [Notice] (368585312, *ContestConsole): SR1 将在一分钟后发令。\\n请提前重启游戏，做好准备。\\n本关起跑保护已被使用，后续不再延时。"
+          }
+        },
+        {
+          "channel": "bulletin",
+          "text": "SR1 将在 12:36 重新发令\n玩家 p1 掉线，发令流程已中止。\n本关起跑保护已被使用，后续不再延时。",
+          "widths": [
+            23,
+            30,
+            36
+          ],
+          "atMs": 9760.9156,
+          "record": {
+            "actionType": "notification",
+            "command": "bulletin SR1 将在 12:36 重新发令\\n玩家 p1 掉线，发令流程已中止。\\n本关起跑保护已被使用，后续不再延时。",
+            "status": "acknowledged",
+            "responseLine": "[09-17 12:35:07] [Bulletin] *ContestConsole: SR1 将在 12:36 重新发令\\n玩家 p1 掉线，发令流程已中止。\\n本关起跑保护已被使用，后续不再延时。"
+          }
+        }
+      ],
+      "gapsMs": [
+        1003.3159999999998,
+        1017.7095000000008
+      ],
+      "status": "passed"
+    },
+    {
+      "postGo": true,
+      "protectionNumber": 1,
+      "trigger": "synthetic-local-controller-event",
+      "writes": [
+        {
+          "channel": "announce",
+          "text": "玩家 p1 掉线，触发起跑保护。\n本次起跑已作废。",
+          "widths": [
+            28,
+            16
+          ],
+          "atMs": 11410.9393,
+          "record": {
+            "actionType": "notification",
+            "command": "announce 玩家 p1 掉线，触发起跑保护。\\n本次起跑已作废。",
+            "status": "acknowledged",
+            "responseLine": "[09-17 12:35:09] [Announcement] (368585312, *ContestConsole): 玩家 p1 掉线，触发起跑保护。\\n本次起跑已作废。"
+          }
+        },
+        {
+          "channel": "notice",
+          "text": "SR1 将在一分钟后发令。\n请提前重启游戏，做好准备。\n本关起跑保护剩余 1 次，仅保护 fatal error。",
+          "widths": [
+            22,
+            26,
+            43
+          ],
+          "atMs": 12430.9886,
+          "record": {
+            "actionType": "notification",
+            "command": "notice SR1 将在一分钟后发令。\\n请提前重启游戏，做好准备。\\n本关起跑保护剩余 1 次，仅保护 fatal error。",
+            "status": "acknowledged",
+            "responseLine": "[09-17 12:35:10] [Notice] (368585312, *ContestConsole): SR1 将在一分钟后发令。\\n请提前重启游戏，做好准备。\\n本关起跑保护剩余 1 次，仅保护 fatal error。"
+          }
+        },
+        {
+          "channel": "bulletin",
+          "text": "SR1 将在 12:36 重新发令\n玩家 p1 掉线，本次起跑已作废。\n本关起跑保护剩余 1 次，仅保护 fatal error。",
+          "widths": [
+            23,
+            30,
+            43
+          ],
+          "atMs": 13449.9724,
+          "record": {
+            "actionType": "notification",
+            "command": "bulletin SR1 将在 12:36 重新发令\\n玩家 p1 掉线，本次起跑已作废。\\n本关起跑保护剩余 1 次，仅保护 fatal error。",
+            "status": "acknowledged",
+            "responseLine": "[09-17 12:35:11] [Bulletin] *ContestConsole: SR1 将在 12:36 重新发令\\n玩家 p1 掉线，本次起跑已作废。\\n本关起跑保护剩余 1 次，仅保护 fatal error。"
+          }
+        }
+      ],
+      "gapsMs": [
+        1020.0493000000006,
+        1018.9838
+      ],
+      "status": "passed"
+    },
+    {
+      "postGo": true,
+      "protectionNumber": 2,
+      "trigger": "synthetic-local-controller-event",
+      "writes": [
+        {
+          "channel": "announce",
+          "text": "玩家 p1 掉线，触发起跑保护。\n本次起跑已作废。",
+          "widths": [
+            28,
+            16
+          ],
+          "atMs": 15085.7761,
+          "record": {
+            "actionType": "notification",
+            "command": "announce 玩家 p1 掉线，触发起跑保护。\\n本次起跑已作废。",
+            "status": "acknowledged",
+            "responseLine": "[09-17 12:35:12] [Announcement] (368585312, *ContestConsole): 玩家 p1 掉线，触发起跑保护。\\n本次起跑已作废。"
+          }
+        },
+        {
+          "channel": "notice",
+          "text": "SR1 将在一分钟后发令。\n请提前重启游戏，做好准备。\n本关起跑保护已被使用，后续不再延时。",
+          "widths": [
+            22,
+            26,
+            36
+          ],
+          "atMs": 16116.8507,
+          "record": {
+            "actionType": "notification",
+            "command": "notice SR1 将在一分钟后发令。\\n请提前重启游戏，做好准备。\\n本关起跑保护已被使用，后续不再延时。",
+            "status": "acknowledged",
+            "responseLine": "[09-17 12:35:13] [Notice] (368585312, *ContestConsole): SR1 将在一分钟后发令。\\n请提前重启游戏，做好准备。\\n本关起跑保护已被使用，后续不再延时。"
+          }
+        },
+        {
+          "channel": "bulletin",
+          "text": "SR1 将在 12:36 重新发令\n玩家 p1 掉线，本次起跑已作废。\n本关起跑保护已被使用，后续不再延时。",
+          "widths": [
+            23,
+            30,
+            36
+          ],
+          "atMs": 17133.0859,
+          "record": {
+            "actionType": "notification",
+            "command": "bulletin SR1 将在 12:36 重新发令\\n玩家 p1 掉线，本次起跑已作废。\\n本关起跑保护已被使用，后续不再延时。",
+            "status": "acknowledged",
+            "responseLine": "[09-17 12:35:15] [Bulletin] *ContestConsole: SR1 将在 12:36 重新发令\\n玩家 p1 掉线，本次起跑已作废。\\n本关起跑保护已被使用，后续不再延时。"
+          }
+        }
+      ],
+      "gapsMs": [
+        1031.0746000000017,
+        1016.2351999999973
+      ],
+      "status": "passed"
+    }
+  ],
+  "otherNotices": [
+    {
+      "kind": "ready-notice",
+      "text": "SR1 将在一分钟后发令。\n请提前重启游戏，做好准备。",
+      "widths": [
+        22,
+        26
+      ],
+      "command": {
+        "actionType": "notification",
+        "command": "notice SR1 将在一分钟后发令。\\n请提前重启游戏，做好准备。",
+        "status": "acknowledged",
+        "responseLine": "[09-17 12:35:55] [Notice] (4152138671, *ContestConsole): SR1 将在一分钟后发令。\\n请提前重启游戏，做好准备。"
+      },
+      "status": "passed"
+    },
+    {
+      "kind": "cheat-notice",
+      "text": "检测到玩家开启 cheat，请及时关闭。\n发令后仍开启，将视作违规。",
+      "widths": [
+        34,
+        26
+      ],
+      "command": {
+        "actionType": "notification",
+        "command": "notice 检测到玩家开启 cheat，请及时关闭。\\n发令后仍开启，将视作违规。",
+        "status": "acknowledged",
+        "responseLine": "[09-17 12:35:56] [Notice] (4152138671, *ContestConsole): 检测到玩家开启 cheat，请及时关闭。\\n发令后仍开启，将视作违规。"
+      },
+      "status": "passed"
+    }
+  ],
+  "cleanup": {
+    "originalBulletin": "",
+    "restoredBulletinEvidence": [
+      "[09-17 12:34:59] [Bulletin]",
+      "[09-17 12:35:15] [Bulletin] *ContestConsole - Content cleared",
+      "[09-17 12:35:15] [Bulletin]"
+    ]
+  }
+}
