@@ -292,6 +292,10 @@ const verifyLocalHelpers = () => {
 
 const probeServer = async (server, serverIndex) => {
   const temporary = await mkdtemp(join(tmpdir(), `ballance-live-work-${server.replaceAll(".", "-")}-`));
+  const removeTemporary = async () => {
+    if (!resolve(temporary).startsWith(resolve(tmpdir()) + "\\")) throw new Error("Temporary cleanup escaped temp root");
+    await rm(temporary, { recursive: true, force: true });
+  };
   const checkedAt = new Date().toISOString();
   const records = [];
   const recoveryRecords = [];
@@ -304,6 +308,8 @@ const probeServer = async (server, serverIndex) => {
   let observedList;
   let recovery;
   let failure;
+  let originalBulletin;
+  let bulletinChanged = false;
 
   const upsertRecord = (target, record) => {
     const existing = target.findIndex((candidate) => candidate.id === record.id);
@@ -578,6 +584,24 @@ const probeServer = async (server, serverIndex) => {
     };
   };
 
+  const restoreBulletin = async () => {
+    if (!bulletinChanged || originalBulletin === undefined || !activeSession?.client.isRunning) return;
+    {
+      try {
+        if (originalBulletin !== "") await run(activeSession, { type: "notification", channel: "bulletin", text: originalBulletin }, "restore-original-bulletin");
+        else {
+          await activeSession.client.write("bulletin");
+          await wait(750);
+          const start = activeSession.lines.length;
+          await activeSession.client.write("getbulletin");
+          await waitForCondition(() => activeSession.lines.slice(start).find(line => /\[Bulletin\]\s*$/.test(line)), 3_000, () => "Empty Bulletin restoration could not be verified");
+        }
+      }
+      catch (error) { throw new Error("Original Bulletin restoration failed: " + error.message); }
+      bulletinChanged = false;
+    }
+  };
+
   try {
     primarySession = createSession(
       "primary",
@@ -591,6 +615,21 @@ const probeServer = async (server, serverIndex) => {
     identityEvidence = initialAuth.identity;
     refereeConnectionId = identityEvidence.connectionId;
 
+    // Read the existing permanent message before the notification experiment.
+    const bulletinStart = activeSession.lines.length;
+    await activeSession.client.write("getbulletin");
+    await wait(1_000);
+    const previousLine = activeSession.lines.slice(bulletinStart).find(line => /\[Bulletin\]/.test(line));
+    if (previousLine) {
+      const parsed = /\[Bulletin\] [^:]*: ?(.*)$/.exec(previousLine);
+      if (!parsed && !/\[Bulletin\]\s*$/.test(previousLine)) throw new Error("Cannot safely read existing Bulletin: " + previousLine);
+      originalBulletin = parsed ? parsed[1].replace(/\\n/g, "\n") : "";
+    } else if (activeSession.lines.slice(bulletinStart).some(line => /no bulletin|bulletin.*empty|empty.*bulletin/i.test(line))) {
+      originalBulletin = "";
+    } else {
+      throw new Error("Cannot confirm current Bulletin before modification: " + activeSession.lines.slice(bulletinStart).join("\n"));
+    }
+    bulletinChanged = true;
     await run(activeSession, { type: "notification", channel: "bulletin", text: `${probeName} workflow probe` }, "live-bulletin");
     await run(activeSession, { type: "notification", channel: "notice", text: `${probeName} notice probe` }, "live-notice");
     await run(activeSession, { type: "notification", channel: "announce", text: `${probeName} announce probe` }, "live-announce");
@@ -623,17 +662,19 @@ const probeServer = async (server, serverIndex) => {
       };
       recovery.status = "passed";
     }
+    await restoreBulletin();
     await run(activeSession, { type: "kick", playerName: `*${probeName}`, reason: "workflow-probe-finished" }, "live-kick");
   } catch (error) {
     failure = error instanceof Error ? error.message : String(error);
     if (recovery && recovery.status !== "passed") recovery = { ...recovery, status: "failed", failure };
   } finally {
+    await restoreBulletin().catch(error => { failure ??= error.message; });
     for (const session of [...sessions].reverse()) {
       await stopSessionSafely(session, `Live probe session ${session.label}`).catch((error) => {
         if (!failure) failure = error instanceof Error ? error.message : String(error);
       });
     }
-    await rm(temporary, { recursive: true, force: true });
+    await removeTemporary();
   }
 
   const commands = commandEvidence(records);

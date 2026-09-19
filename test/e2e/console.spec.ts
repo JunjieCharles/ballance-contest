@@ -490,7 +490,11 @@ test("renders every work connection state and invalidates lifecycle confirmation
   // Keep competition/runtime versions unchanged: only the connection generations invalidate this confirmation.
   await applyConnection("healthy", 5, 32);
   await expect(restartConfirmation).toHaveCount(0);
-  await expect(operatorPanel.getByText("judge-32", { exact: true })).toBeVisible();
+  await expect(page.getByRole("region", { name: "工作模式连接状态" }).getByText("judge-32", { exact: true })).toBeVisible();
+  expect(await page.locator(".global-connection").evaluate(element => Boolean(element.compareDocumentPosition(document.querySelector(".shell")!) & Node.DOCUMENT_POSITION_FOLLOWING))).toBe(true);
+  await page.getByRole("button", { name: "玩家", exact: true }).click();
+  await expect(page.getByRole("region", { name: "工作模式连接状态" })).toBeVisible();
+  await page.getByRole("button", { name: "控制台", exact: true }).click();
 
   await applyConnection("blocked", 5, 32, true);
   await expect(operatorPanel.getByRole("button", { name: "恢复比赛现场", exact: true })).toBeEnabled();
@@ -619,8 +623,8 @@ test("binds stage confirmations and submitted actions to the backend SR3 target"
   await expect.poll(() => submittedActions.length).toBe(1);
   expect(submittedActions[0]?.action).toMatchObject({
     type: "force-next-stage-ready",
-    confirmationToken: "fixture-start-ready-flow-sr-3",
-    impactHash: "fixture-hash-start-ready-flow-sr-3"
+    confirmationToken: "fixture-force-next-stage-ready-sr-3",
+    impactHash: "fixture-hash-force-next-stage-ready-sr-3"
   });
 
   const manualReadyAction = page.locator(".confirm-action").filter({

@@ -780,7 +780,7 @@ function ConsolePanel({ snapshot, canWrite, versionKey, saveConnection, startWor
       requestPayload={confirmationPayload} requestConfirmation={requestConfirmation} onConfirm={(confirmation) => performAction(build(confirmation))} />;
   };
   return <section className="grid two">
-    <div className="panel"><h2>裁判操作</h2>
+    <div className="panel referee-panel wide"><h2>裁判操作</h2>
       <h3 id="服务器连接">服务器连接</h3>
       <div className="button-row action-row" role="group" aria-labelledby="服务器连接">
         {snapshot.competition.mode === "work" && <div className="connection-settings">

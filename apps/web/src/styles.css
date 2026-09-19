@@ -195,6 +195,12 @@ header > span:last-of-type { margin-left: auto; font-size: 13px; }
 .action-row { align-items: flex-start; }
 .global-connection { margin: 12px 16px 0; }
 .global-connection .work-connection-panel { margin: 0; }
+.referee-panel .action-row > .confirm-action,
+.referee-panel .action-row > .action-control { flex: 1 1 180px; min-width: 0; }
+.referee-panel .action-row > .connection-settings { flex: 2 1 260px; }
+.referee-panel .action-row > p { flex-basis: 100%; margin: 0 0 4px; }
+.referee-panel .action-effect,
+.referee-panel .disabled-reason { max-width: none; }
 .action-control,
 .confirm-action {
   display: grid;
