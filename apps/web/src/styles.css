@@ -193,7 +193,7 @@ header > span:last-of-type { margin-left: auto; font-size: 13px; }
   margin-bottom: 12px;
 }
 .action-row { align-items: flex-start; }
-.global-connection { margin: 12px 16px 0; }
+.global-connection { min-width: 0; }
 .global-connection .work-connection-panel { margin: 0; }
 .referee-panel .action-row > .confirm-action,
 .referee-panel .action-row > .action-control { flex: 1 1 180px; min-width: 0; }

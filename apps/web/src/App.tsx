@@ -652,7 +652,6 @@ export function App() {
         sessionStorage.setItem(sessionKey, JSON.stringify(next)); setSession(next);
       }, "已接管控制权")}>接管</button>}
     </header>
-    {snapshot?.competition.mode === "work" && <div className="global-connection">{snapshot.runtime.workConnection ? <WorkConnectionPanel connection={snapshot.runtime.workConnection} /> : <section className="work-connection-panel" aria-label="工作模式连接状态"><h3>MockClient 与服务器连接</h3><strong>未连接</strong></section>}</div>}
     <div className="shell">
       <aside className="sidebar">
         <section className="panel create-panel"><h2>比赛</h2>
@@ -665,6 +664,7 @@ export function App() {
         </button>)}</nav>
       </aside>
       <section className="workspace">
+        {snapshot?.competition.mode === "work" && <div className="global-connection">{snapshot.runtime.workConnection ? <WorkConnectionPanel connection={snapshot.runtime.workConnection} /> : <section className="work-connection-panel" aria-label="工作模式连接状态"><h3>MockClient 与服务器连接</h3><strong>未连接</strong></section>}</div>}
         {snapshot && runtime ? <>
           <section className="status-strip">
             <div><span>阶段</span><strong>{phaseLabel[runtime.phase] ?? runtime.phase}</strong></div>
@@ -780,7 +780,7 @@ function ConsolePanel({ snapshot, canWrite, versionKey, saveConnection, startWor
       requestPayload={confirmationPayload} requestConfirmation={requestConfirmation} onConfirm={(confirmation) => performAction(build(confirmation))} />;
   };
   return <section className="grid two">
-    <div className="panel referee-panel wide"><h2>裁判操作</h2>
+    <div className="panel referee-panel"><h2>裁判操作</h2>
       <h3 id="服务器连接">服务器连接</h3>
       <div className="button-row action-row" role="group" aria-labelledby="服务器连接">
         {snapshot.competition.mode === "work" && <div className="connection-settings">
@@ -1215,6 +1215,11 @@ function LiveScoringEditor({ snapshot, canWrite, versionKey, requestConfirmation
   const liveScoringDirty = activeScoringSignature !== livePoints.join(",");
   return <section className="live-scoring-editor">
     <div className="panel-title-row"><div><h3>实时计分映射</h3><p className="muted">发布后可调整全部关卡的名次—分数映射。保存会立即重算已有成绩并生成新榜单版本，不改写发布快照或旧榜单。</p></div><span className="mode-badge">{snapshot.activeScoring.source === "runtime-override" ? `运行期修订 r${snapshot.activeScoring.revision}` : "发布配置"}</span></div>
+    <div className="button-row compact" role="group" aria-label="实时计分预设">
+      {([{ label: "小型赛事预设", points: SMALL_SCORING }, { label: "中型赛事预设", points: MEDIUM_SCORING }, { label: "大型赛事预设", points: LARGE_SCORING }]).map(preset =>
+        <button key={preset.label} className="ghost" disabled={!canWrite || snapshot.competition.status === "draft"} onClick={() => setLivePoints([...preset.points])}>{preset.label}</button>)}
+    </div>
+    <p className="muted">选择预设后可继续修改，点击“保存并实时重算”才会生效。最低计分名次：第 {minimumScoringPlaceFor(livePoints)} 名。</p>
     <div className="scoring-point-grid">{livePoints.map((point, index) => <label key={index}>第 {index + 1} 名<input aria-label={`第 ${index + 1} 名分数`} type="number" value={Number.isFinite(point) ? point : ""} onChange={(event) => {
       const next = [...livePoints];
       next[index] = event.target.value === "" ? Number.NaN : Number(event.target.value);

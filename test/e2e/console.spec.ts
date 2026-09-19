@@ -211,6 +211,10 @@ test("uses grouped controls to adjust a paused plan and enter next Ready immedia
   await page.getByRole("button", { name: "创建测试运行" }).click();
   await page.getByRole("button", { name: "控制台", exact: true }).click();
   const operator = page.getByRole("heading", { name: "裁判操作", exact: true }).locator("..");
+  const operatorBox = await operator.boundingBox();
+  const activityBox = await page.getByRole("heading", { name: "流程动态与注意事项" }).locator("..").boundingBox();
+  expect(activityBox!.x).toBeGreaterThan(operatorBox!.x);
+  expect(Math.abs(activityBox!.y - operatorBox!.y)).toBeLessThan(2);
   await expect(operator.locator("h3")).toHaveText(["服务器连接", "自动化", "手动操作", "流程推进", "起跑保护", "本关重置", "时间操作", "改期（UTC+8）"]);
   await expect(operator.getByLabel("通知文本")).toHaveCount(0);
   await expect(page.getByRole("heading", { name: "玩家处置" }).locator("..").getByLabel("通知文本")).toBeVisible();
@@ -491,7 +495,11 @@ test("renders every work connection state and invalidates lifecycle confirmation
   await applyConnection("healthy", 5, 32);
   await expect(restartConfirmation).toHaveCount(0);
   await expect(page.getByRole("region", { name: "工作模式连接状态" }).getByText("judge-32", { exact: true })).toBeVisible();
-  expect(await page.locator(".global-connection").evaluate(element => Boolean(element.compareDocumentPosition(document.querySelector(".shell")!) & Node.DOCUMENT_POSITION_FOLLOWING))).toBe(true);
+  await expect(page.locator(".workspace > .global-connection")).toHaveCount(1);
+  await page.evaluate(() => window.scrollTo(0, 0));
+  const sidebarBox = await page.locator(".sidebar").boundingBox();
+  const connectionBox = await page.locator(".global-connection").boundingBox();
+  expect(sidebarBox!.y).toBeLessThanOrEqual(connectionBox!.y);
   await page.getByRole("button", { name: "玩家", exact: true }).click();
   await expect(page.getByRole("region", { name: "工作模式连接状态" })).toBeVisible();
   await page.getByRole("button", { name: "控制台", exact: true }).click();
@@ -882,6 +890,12 @@ test("runs the 20-player sandbox from the console and edits a score without losi
   const firstStageResults = await page.locator(".scoreboard tbody tr td:nth-child(5) .cell-button").allTextContents();
   expect(firstStageResults.filter((value) => value.trim().startsWith("#")).length).toBeGreaterThan(12);
   const liveScoring = page.locator(".live-scoring-editor");
+  for (const [preset, count, first] of [["大型", 15, 30], ["中型", 12, 20], ["小型", 10, 15]] as const) {
+    await liveScoring.getByRole("button", { name: `${preset}赛事预设` }).click();
+    await expect(liveScoring.getByRole("spinbutton")).toHaveCount(count);
+    await expect(liveScoring.getByLabel("第 1 名分数")).toHaveValue(String(first));
+    await expect(liveScoring).toContainText(`最低计分名次：第 ${count} 名`);
+  }
   await liveScoring.getByLabel("第 1 名分数").fill("25");
   await liveScoring.getByRole("button", { name: "保存并实时重算" }).click();
   const scoringConfirmation = liveScoring.getByRole("group", { name: "保存并实时重算确认" });
