@@ -1,3 +1,4 @@
+import { isReadyAnnouncement } from "@ballance/core";
 import { createHash, randomUUID } from "node:crypto";
 import type { AttentionItem, CommandRecordView, RawClientLogLine, RefereeActionId } from "@ballance/contracts";
 import type { AutomationAction, AutomationSnapshot } from "@ballance/core";
@@ -140,7 +141,7 @@ export class CompetitionAuditService {
   public recordAutomationAttention(competitionId: string, action: AutomationAction): void {
     const details = action.kind === "bulletin" ? ["flow", "info", "赛程计划已更新"] as const
       : action.kind === "notice" ? ["flow", "info", "流程通知"] as const
-      : action.kind === "announce" ? ["flow", "info", action.message === "READY!" ? "已发出 READY" : "重要比赛通知"] as const
+      : action.kind === "announce" ? ["flow", "info", isReadyAnnouncement(action) ? "已发出 READY" : "重要比赛通知"] as const
       : action.kind === "go" ? ["flow", "warning", "本关已发令 Go"] as const
       : ["command", "info", "裁判命令已确认"] as const;
     this.appendAttention(competitionId, {

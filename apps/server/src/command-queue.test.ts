@@ -521,8 +521,10 @@ describe("CommandQueue", () => {
     await queue.enqueue({ type: "notification", channel: "bulletin", text: "SR1 20:10" }, "bulletin");
     await queue.enqueue({ type: "notification", channel: "notice", text: "wait Player" }, "notice");
     await queue.enqueue({ type: "notification", channel: "announce", text: "READY!" }, "announce");
+    const hsReady = await queue.enqueue({ type: "notification", channel: "announce", text: "READY!\n记得收分" }, "announce-hs");
+    expect(hsReady.status).toBe("acknowledged");
     await queue.enqueue({ type: "notification", channel: "s", text: "请回到大厅" }, "chat");
-    expect(transport.writes).toEqual(["bulletin SR1 20:10", "notice wait Player", "announce READY!", "s 请回到大厅"]);
+    expect(transport.writes).toEqual(["bulletin SR1 20:10", "notice wait Player", "announce READY!", "announce READY!\\n记得收分", "s 请回到大厅"]);
   });
 
   it("keeps three business lines but protocol-escapes them into one MockClient command", async () => {

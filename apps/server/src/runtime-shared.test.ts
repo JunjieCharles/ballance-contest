@@ -83,10 +83,10 @@ describe("runtime schedule views", () => {
     expect(currentStageReadyAt(restarted, 1_000)).toBe(new Date(71_000).toISOString());
   });
 
-  it("moves the displayed planned Go after delayed acknowledgements", () => {
+  it.each(["READY!", "READY!\n记得收分"])("moves planned Go after delayed %s acknowledgement", (message) => {
     const action = (id: string, kind: "ready" | "announce" | "cheat-off", createdAtMs: number, acknowledgedAtMs: number) => ({
       id, kind, idempotencyKey: id, createdAtMs, acknowledgedAtMs, stageId: "s1", map: "level 1", mode: "sr" as const,
-      ...(kind === "announce" ? { message: "READY!" } : {}), status: "acknowledged" as const
+      ...(kind === "announce" ? { message } : {}), status: "acknowledged" as const
     });
     const snapshot: AutomationSnapshot = {
       phase: "ready", stateVersion: 1, automationEnabled: true, currentStageId: "s1", blockers: [], waitingParticipants: [], attempts: [], incidents: [], rejectedResults: [],

@@ -70,7 +70,7 @@ const drainProtectionNotifications = (controller: CompetitionController, clock: 
 };
 
 describe("CompetitionController", () => {
-  it("holds READY! while paused but sends due T-60 notifications without resuming", () => {
+  it.each(["sr", "hs"] as const)("holds %s READY announcement while paused and after restore", (mode) => {
     const clock = new FakeClock();
     const controller = new CompetitionController(configuration(), clock);
     connectAll(controller);
@@ -82,7 +82,8 @@ describe("CompetitionController", () => {
     expect(controller.drainDispatchableActions().map(item => item.kind)).toEqual(["notice"]);
     expect(controller.snapshot().automationEnabled).toBe(false);
 
-    const launch = new CompetitionController(configuration(), clock);
+    const launchConfig = configuration({ stages: configuration().stages.map(stage => ({ ...stage, mode })) });
+    const launch = new CompetitionController(launchConfig, clock);
     connectAll(launch);
     launch.enable(clock.now());
     for (const item of launch.drainDispatchableActions()) launch.acknowledgeAction(item.id, "acknowledged");
@@ -92,9 +93,19 @@ describe("CompetitionController", () => {
       clock.advance(5_000);
     }
     launch.tick();
-    expect(launch.snapshot().actions).toContainEqual(expect.objectContaining({ message: "READY!", status: "pending" }));
+    const message = mode === "hs" ? "READY!\n记得收分" : "READY!";
+    expect(launch.snapshot().actions).toContainEqual(expect.objectContaining({ message, status: "pending" }));
     launch.pause();
     expect(launch.drainDispatchableActions()).toEqual([]);
+    const restored = new CompetitionController({ ...launchConfig, initialSnapshot: launch.snapshot() }, clock);
+    expect(restored.drainDispatchableActions()).toEqual([]);
+    restored.enable();
+    const announcement = action(restored, "announce");
+    expect(announcement.message).toBe(message);
+    restored.acknowledgeAction(announcement.id, "acknowledged");
+    clock.advance(5_000);
+    restored.tick();
+    expect(restored.drainDispatchableActions().map(item => item.kind)).toEqual(["cheat-off"]);
   });
   it("restores a persisted running attempt without redelivering historical commands", () => {
     const clock = new FakeClock();

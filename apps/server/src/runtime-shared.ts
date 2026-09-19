@@ -1,3 +1,4 @@
+import { isReadyAnnouncement } from "@ballance/core";
 import { createHash, randomUUID } from "node:crypto";
 import { performance } from "node:perf_hooks";
 import type {
@@ -153,7 +154,7 @@ export const plannedStageStartAt = (snapshot: AutomationSnapshot, epochOriginMs:
   const firstReady = flowActions.find((action) => action.kind === "ready");
   const pendingGo = flowActions.findLast((action) => action.kind === "go");
   const cheatOff = flowActions.findLast((action) => action.kind === "cheat-off");
-  const readyAnnouncement = flowActions.findLast((action) => action.kind === "announce" && action.message === "READY!");
+  const readyAnnouncement = flowActions.findLast((action) => isReadyAnnouncement(action));
   const readyActions = flowActions.filter((action) => action.kind === "ready");
   const acknowledgedOrCreatedAt = (action: typeof flowActions[number]): number => action.acknowledgedAtMs ?? action.createdAtMs;
   const plannedFromFlow = pendingGo ? pendingGo.createdAtMs + 3_000

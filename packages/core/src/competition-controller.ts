@@ -85,10 +85,14 @@ export interface AutomationAction {
   status: "pending" | "acknowledged" | "failed" | "uncertain" | "referee-confirmed" | "cancelled" | "sent-unconfirmed";
 }
 
+/** Both SR and HS READY announcements belong to the launch sequence. */
+export const isReadyAnnouncement = (action: Pick<AutomationAction, "kind" | "message">): boolean =>
+  action.kind === "announce" && (action.message === "READY!" || action.message === "READY!\n记得收分");
+
 /** READY! is a launch step despite using the announcement transport. */
 export const isInformationalAction = (action: AutomationAction): boolean =>
   action.kind === "bulletin" || action.kind === "notice"
-  || action.kind === "announce" && action.message !== "READY!";
+  || action.kind === "announce" && !isReadyAnnouncement(action);
 
 export interface AutomationBlocker {
   code: "AUTOMATION_PAUSED" | "PERMISSION_DENIED" | "PARTICIPANT_OFFLINE" | "PARTICIPANT_CHEAT" | "COMMAND_UNCONFIRMED" | "INCIDENT_OPEN";
@@ -494,7 +498,7 @@ export class CompetitionController {
     this.readyActionIds.push(...readyActions.map((action) => action.id));
     this.readyActionId = readyActions.at(-1)?.id;
     this.noticeActionId = latest("notice")?.id;
-    this.readyAnnouncementActionId = [...cycleActions].reverse().find((action) => action.kind === "announce" && action.message === "READY!")?.id;
+    this.readyAnnouncementActionId = [...cycleActions].reverse().find((action) => isReadyAnnouncement(action))?.id;
     this.cheatOffActionId = latest("cheat-off")?.id;
     this.goActionId = latest("go")?.id;
     this.readyAtMs ??= readyActions[0]?.createdAtMs;
@@ -807,7 +811,7 @@ export class CompetitionController {
     if (!this.readyAnnouncementActionId) {
       const lastReadyAcknowledgedAt = this.actionAcknowledgedAt(this.readyActionIds.at(-1));
       if (lastReadyAcknowledgedAt === undefined || now < Math.max(this.readyAtMs + 3 * READY_STEP_MS, lastReadyAcknowledgedAt + READY_STEP_MS)) return;
-      this.readyAnnouncementActionId = this.queueAction("announce", "READY!").id;
+      this.readyAnnouncementActionId = this.queueAction("announce", this.stage.mode === "hs" ? "READY!\n记得收分" : "READY!").id;
       this.bump();
       return;
     }
@@ -1604,7 +1608,7 @@ export class CompetitionController {
         && action.status === "pending"
         && this.undeliveredActionIds.has(action.id)
         && (["bulletin", "notice", "ready", "cheat-off", "go"].includes(action.kind)
-          || action.kind === "announce" && action.message === "READY!");
+          || isReadyAnnouncement(action));
       if (!staleStageAction) continue;
       action.status = "cancelled";
       this.undeliveredActionIds.delete(action.id);
