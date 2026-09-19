@@ -507,7 +507,7 @@ export class RefereeActionService {
         this.host.workRuntimeManager.synchronizeStageBoundary(runtime);
         const lifecycleAction = action.type === "reconnect-work" || action.type === "restart-work";
         if (!lifecycleAction && this.host.workRuntimeManager.businessCommandsReady(runtime)) {
-          await runtime.runtime.dispatch();
+          if (this.host.workRuntimeManager.businessCommandsReady(runtime)) await runtime.runtime.dispatch();
         }
         const synchronized = this.host.workRuntimeManager.synchronizeStageBoundary(runtime);
         this.host.completeCompetitionOnReview(competitionId, synchronized);

@@ -1020,13 +1020,14 @@ export class TestRuntimeManager {
     const effectivePhase = (automation.phase === "paused" || automation.phase === "incident") && automation.pausedFromPhase
       ? automation.pausedFromPhase
       : automation.phase;
+    const targetStageId = automation.plannedReadyStageId ?? automation.currentStageId;
     const currentPendingGo = [...automation.actions].reverse().find((candidate) =>
       candidate.kind === "go"
       && candidate.status === "pending"
-      && candidate.stageId === automation.currentStageId);
+      && candidate.stageId === targetStageId);
     const activeCycle = action?.kind === "go"
       && action.status === "pending"
-      && action.stageId === automation.currentStageId
+      && action.stageId === targetStageId
       && currentPendingGo?.id === action.id
       && effectivePhase === "countdown"
       && !automation.attempts.some((attempt) => attempt.stageId === action.stageId && !attempt.voided);

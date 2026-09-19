@@ -36,6 +36,7 @@ import {
 } from "@ballance/contracts";
 import {
   ScoreboardRevisionLedger,
+  isInformationalAction,
   type AutomationAction,
   type AutomationSnapshot,
   CompetitionController,
@@ -2916,7 +2917,7 @@ export class CompetitionService {
     const targetStageActions = snapshot?.actions.filter((action) => action.stageId === commandTargetStageId) ?? [];
     const previousGoIndex = targetStageActions.findLastIndex((action) => action.kind === "go" && (action.status === "acknowledged" || action.status === "sent-unconfirmed" || action.status === "referee-confirmed"));
     const cheatOffConfirmed = targetStageActions.slice(previousGoIndex + 1).some((action) => action.kind === "cheat-off" && (action.status === "acknowledged" || action.status === "sent-unconfirmed"));
-    const hasPendingCommands = snapshot?.actions.some((action) => action.status === "pending") ?? false;
+    const hasPendingCommands = snapshot?.actions.some((action) => action.status === "pending" && !isInformationalAction(action)) ?? false;
     const effectivePhase = (phase === "paused" || phase === "incident") && snapshot?.pausedFromPhase
       ? snapshot.pausedFromPhase
       : phase;

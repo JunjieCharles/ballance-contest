@@ -2070,7 +2070,9 @@ describe("CompetitionService dynamic participants", () => {
       const after = state.actions.find(item => item.id === before.id)!;
       expect(state.wallClockOriginMs! + after.notBeforeMs!).toBeCloseTo(original.wallClockOriginMs! + before.notBeforeMs!, 2);
     }
-    expect(restored.controller.drainDispatchableActions()).toEqual([]);
+    expect(restored.controller.drainDispatchableActions()).toEqual(sent ? [] : [
+      expect.objectContaining({ id: announcement.id, kind: "announce" })
+    ]);
     await service.close();
   });
 
@@ -2466,6 +2468,8 @@ describe("CompetitionService dynamic participants", () => {
     const confirmation = service.createConfirmation(record.id, {
       kind: "manual-action", intent: "set-start-protection", target: `${record.id}:start-protection:sr-1:false`
     });
+    // This persistence test has no transport; settle pending informational evidence explicitly.
+    for (const action of runtime.controller.drainActions()) runtime.controller.acknowledgeAction(action.id, "acknowledged");
     await service.performAction(record.id, {
       expectedStateVersion: snapshot.competition.stateVersion, idempotencyKey: "restore-both",
       action: { type: "set-start-protection", used: false, confirmationToken: confirmation.token, impactHash: confirmation.impactHash }

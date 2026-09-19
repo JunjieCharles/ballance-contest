@@ -308,7 +308,7 @@ describe("automation runtimes", () => {
     expect(controller.snapshot().stateVersion).toBe(projected.stateVersion);
   });
 
-  it("keeps automatic next-stage announcements undelivered while a referee-marked attempt is paused", async () => {
+  it("sends next-stage announcements while a referee-marked attempt is paused", async () => {
     const { controller } = makeTwoStageController();
     const sent: CommandAction[] = [];
     const port: CommandQueuePort = {
@@ -343,7 +343,7 @@ describe("automation runtimes", () => {
 
     await runtime.dispatch();
 
-    expect(sent).toHaveLength(sentBeforePausedDispatch);
+    expect(sent).toHaveLength(sentBeforePausedDispatch + 1);
     expect(controller.snapshot()).toMatchObject({
       phase: "paused",
       automationEnabled: false,
@@ -352,8 +352,8 @@ describe("automation runtimes", () => {
     expect(controller.snapshot().actions).toContainEqual(expect.objectContaining({
       kind: "bulletin",
       stageId: "s2",
-      status: "pending",
-      undelivered: true
+      status: "acknowledged",
+      undelivered: false
     }));
     controller.enable();
     await runtime.dispatch();

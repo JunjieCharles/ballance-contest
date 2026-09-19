@@ -85,6 +85,11 @@ export interface AutomationAction {
   status: "pending" | "acknowledged" | "failed" | "uncertain" | "referee-confirmed" | "cancelled" | "sent-unconfirmed";
 }
 
+/** READY! is a launch step despite using the announcement transport. */
+export const isInformationalAction = (action: AutomationAction): boolean =>
+  action.kind === "bulletin" || action.kind === "notice"
+  || action.kind === "announce" && action.message !== "READY!";
+
 export interface AutomationBlocker {
   code: "AUTOMATION_PAUSED" | "PERMISSION_DENIED" | "PARTICIPANT_OFFLINE" | "PARTICIPANT_CHEAT" | "COMMAND_UNCONFIRMED" | "INCIDENT_OPEN";
   severity: "warning" | "critical";
@@ -751,7 +756,7 @@ export class CompetitionController {
   public tick(): void {
     const now = this.clock.now();
     this.settleDueStageClosures(now);
-    if (this.automationEnabled) this.queueDueReadyNotice();
+    this.queueDueReadyNotice();
     if (!this.automationEnabled && this.phase !== "ready" && this.phase !== "countdown") return;
 
     if (this.phase === "pre-start-wait") {
@@ -1063,7 +1068,7 @@ export class CompetitionController {
     if (["countdown", "running", "review", "incident"].includes(this.phase)) throw new Error("MANUAL_GO_NOT_AVAILABLE");
     const target = this.commandTargetStage;
     if (!this.hasCurrentCheatOffConfirmation(target.id)) throw new Error("MANUAL_GO_CHEAT_OFF_REQUIRED");
-    if (this.actions.some((action) => action.status === "pending")) throw new Error("MANUAL_GO_COMMAND_PENDING");
+    if (this.actions.some((action) => action.status === "pending" && !isInformationalAction(action))) throw new Error("MANUAL_GO_COMMAND_PENDING");
     if (this.readyFlowBlockers().length > 0) throw new Error("MANUAL_GO_BLOCKED");
     this.goActionId = this.queueActionForStage("go", target, undefined, true).id;
     this.phase = "countdown";
@@ -1235,7 +1240,7 @@ export class CompetitionController {
   }
 
   public drainDispatchableActions(): readonly AutomationAction[] {
-    return this.drainActions((action) => this.automationEnabled || action.manual === true);
+    return this.drainActions((action) => this.automationEnabled || action.manual === true || isInformationalAction(action));
   }
 
   public snapshot(): AutomationSnapshot {

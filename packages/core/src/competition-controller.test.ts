@@ -70,6 +70,32 @@ const drainProtectionNotifications = (controller: CompetitionController, clock: 
 };
 
 describe("CompetitionController", () => {
+  it("holds READY! while paused but sends due T-60 notifications without resuming", () => {
+    const clock = new FakeClock();
+    const controller = new CompetitionController(configuration(), clock);
+    connectAll(controller);
+    controller.enable(120_000);
+    controller.pause();
+    for (const item of controller.drainDispatchableActions()) controller.acknowledgeAction(item.id, "acknowledged");
+    clock.advance(60_000);
+    controller.tick();
+    expect(controller.drainDispatchableActions().map(item => item.kind)).toEqual(["notice"]);
+    expect(controller.snapshot().automationEnabled).toBe(false);
+
+    const launch = new CompetitionController(configuration(), clock);
+    connectAll(launch);
+    launch.enable(clock.now());
+    for (const item of launch.drainDispatchableActions()) launch.acknowledgeAction(item.id, "acknowledged");
+    for (let step = 0; step < 3; step++) {
+      launch.tick();
+      for (const item of launch.drainDispatchableActions()) launch.acknowledgeAction(item.id, "acknowledged");
+      clock.advance(5_000);
+    }
+    launch.tick();
+    expect(launch.snapshot().actions).toContainEqual(expect.objectContaining({ message: "READY!", status: "pending" }));
+    launch.pause();
+    expect(launch.drainDispatchableActions()).toEqual([]);
+  });
   it("restores a persisted running attempt without redelivering historical commands", () => {
     const clock = new FakeClock();
     const original = new CompetitionController(configuration({ wallClockOriginMs: 1_000_000 }), clock);
@@ -1736,7 +1762,7 @@ describe("CompetitionController", () => {
       .toThrow("ISOLATED_ACTION_RECONCILE_NOT_AVAILABLE");
   });
 
-  it("holds automatic actions while a marked attempt is paused, but dispatches manual actions and restores the hold", () => {
+  it("dispatches notifications while paused and does not redeliver them after restoration", () => {
     const clock = new FakeClock();
     const controller = new CompetitionController(configuration({
       stages: [
@@ -1771,7 +1797,9 @@ describe("CompetitionController", () => {
     const heldBulletin = controller.snapshot().actions.findLast((item) =>
       item.kind === "bulletin" && item.stageId === "s2");
     expect(heldBulletin).toMatchObject({ status: "pending", undelivered: true });
-    expect(controller.drainDispatchableActions()).toEqual([]);
+    expect(controller.drainDispatchableActions()).toEqual([
+      expect.objectContaining({ id: heldBulletin?.id, kind: "bulletin" })
+    ]);
 
     controller.manualCheatOff();
     expect(controller.drainDispatchableActions()).toEqual([
@@ -1779,7 +1807,7 @@ describe("CompetitionController", () => {
     ]);
     expect(controller.snapshot().actions.find((item) => item.id === heldBulletin?.id)).toMatchObject({
       status: "pending",
-      undelivered: true
+      undelivered: false
     });
 
     const restored = new CompetitionController(configuration({
@@ -1798,8 +1826,6 @@ describe("CompetitionController", () => {
     }), clock);
     expect(restored.drainDispatchableActions()).toEqual([]);
     restored.enable();
-    expect(restored.drainDispatchableActions()).toEqual([
-      expect.objectContaining({ id: heldBulletin?.id, kind: "bulletin", stageId: "s2" })
-    ]);
+    expect(restored.drainDispatchableActions()).toEqual([]);
   });
 });
