@@ -158,6 +158,7 @@ export interface ExpectedCurrentStageInput {
 }
 
 export interface ExpectedNextStageInput extends ExpectedCurrentStageInput {
+  readyImmediately?: boolean;
   expectedTargetStageId: string;
 }
 
@@ -1006,18 +1007,19 @@ export class CompetitionController {
     this.settleDueStageClosures(this.clock.now());
     if (!Number.isFinite(plannedReadyAtMs)) throw new Error("INVALID_READY_TIME");
     if (this.plannedReadyAtMs === undefined || this.plannedReadyStageIndex === undefined || this.phase === "ready" || this.phase === "countdown" || this.phase === "review") throw new Error("RESCHEDULE_NOT_AVAILABLE");
-    if (this.phase !== "tail-intake") this.phase = this.restartPending ? "restart-preparing" : "preparing";
-    this.planReady(this.plannedReadyStageIndex, plannedReadyAtMs);
+    if (this.clock.now() >= this.plannedReadyAtMs - READY_NOTICE_LEAD_MS) throw new Error("PREPARATION_ALREADY_STARTED");
+    if (this.phase !== "tail-intake" && this.phase !== "paused") this.phase = this.restartPending ? "restart-preparing" : "preparing";
+    this.planReady(this.plannedReadyStageIndex, Math.max(this.clock.now() + READY_NOTICE_LEAD_MS, plannedReadyAtMs));
     this.queueDueReadyNotice();
     this.bump();
   }
 
   public delayReady(milliseconds: number): void {
     this.settleDueStageClosures(this.clock.now());
-    if (!Number.isFinite(milliseconds) || milliseconds <= 0) throw new Error("INVALID_WAIT_EXTENSION");
-    if (this.phase === "pre-start-wait" && this.waitDeadlineAtMs !== undefined) this.waitDeadlineAtMs += milliseconds;
-    else if (this.plannedReadyAtMs !== undefined && this.plannedReadyStageIndex !== undefined) {
-      this.planReady(this.plannedReadyStageIndex, this.plannedReadyAtMs + milliseconds);
+    if (!Number.isFinite(milliseconds) || milliseconds === 0) throw new Error("INVALID_WAIT_EXTENSION");
+    if (this.plannedReadyAtMs !== undefined && this.plannedReadyStageIndex !== undefined) {
+      if (this.clock.now() >= this.plannedReadyAtMs - READY_NOTICE_LEAD_MS) throw new Error("PREPARATION_ALREADY_STARTED");
+      this.planReady(this.plannedReadyStageIndex, Math.max(this.clock.now() + READY_NOTICE_LEAD_MS, this.plannedReadyAtMs + milliseconds));
       this.queueDueReadyNotice();
     }
     else throw new Error("WAIT_EXTENSION_NOT_AVAILABLE");
@@ -1028,11 +1030,16 @@ export class CompetitionController {
 
   public extendStageDeadline(milliseconds: number): void {
     this.settleDueStageClosures(this.clock.now());
-    if (!Number.isFinite(milliseconds) || milliseconds <= 0) throw new Error("INVALID_DEADLINE_EXTENSION");
+    if (!Number.isFinite(milliseconds) || milliseconds === 0) throw new Error("INVALID_DEADLINE_EXTENSION");
     const attempt = this.currentAttempt;
-    if (!attempt?.intakeOpen || (this.phase !== "running" && this.phase !== "tail-intake")) throw new Error("DEADLINE_EXTENSION_NOT_AVAILABLE");
-    attempt.deadlineAtMs += milliseconds;
-    this.queueAction("notice", `本关时限已延长 ${formatDelay(milliseconds)}`);
+    if (!attempt?.intakeOpen || !["running", "tail-intake"].includes(this.effectivePhase())) throw new Error("DEADLINE_EXTENSION_NOT_AVAILABLE");
+    const requestedDeadline = attempt.deadlineAtMs + milliseconds;
+    const now = this.clock.now();
+    // An immediate closure must not create a deadline preceding its own Go.
+    attempt.deadlineAtMs = Math.max(attempt.goAtMs + 1, now, requestedDeadline);
+    this.queueAction("notice", `本关时限已${milliseconds > 0 ? "延长" : "缩短"} ${formatDelay(Math.abs(milliseconds))}`);
+    if (requestedDeadline <= now) this.closeAtDeadline(attempt, now);
+    this.settleDueStageClosures(now);
     this.bump();
   }
 
@@ -1040,7 +1047,7 @@ export class CompetitionController {
     this.settleDueStageClosures(this.clock.now());
     if (!Number.isFinite(deadlineAtMs) || deadlineAtMs <= this.clock.now()) throw new Error("INVALID_STAGE_DEADLINE");
     const attempt = this.currentAttempt;
-    if (!attempt?.intakeOpen || (this.phase !== "running" && this.phase !== "tail-intake")) throw new Error("DEADLINE_RESCHEDULE_NOT_AVAILABLE");
+    if (!attempt?.intakeOpen || !["running", "tail-intake"].includes(this.effectivePhase())) throw new Error("DEADLINE_RESCHEDULE_NOT_AVAILABLE");
     attempt.deadlineAtMs = deadlineAtMs;
     this.queueAction("notice", "本关最晚结束时间已改期");
     this.bump();
@@ -1151,8 +1158,9 @@ export class CompetitionController {
     this.pausedFromPhase = undefined;
     this.restartPending = false;
     this.nextStagePending = false;
-    this.planReady(this.stageIndex, now + READY_NOTICE_LEAD_MS);
-    this.queueDueReadyNotice();
+    this.planReady(this.stageIndex, now + (input.readyImmediately ? 0 : READY_NOTICE_LEAD_MS));
+    if (input.readyImmediately) this.enterReady();
+    else this.queueDueReadyNotice();
     this.bump();
     return {
       previousStageId,

@@ -315,7 +315,7 @@ describe("CompetitionController", () => {
     const clock = new FakeClock();
     const controller = new CompetitionController(configuration({ wallClockOriginMs: Date.UTC(2026, 6, 1, 15, 59) }), clock);
     connectAll(controller);
-    controller.enable(60_000);
+    controller.enable(60_001);
     expect(action(controller, "bulletin").message).toBe("第一关 将在 00:00 发令");
     controller.reschedule(120_000);
     expect(action(controller, "bulletin").message).toBe("第一关 将在 00:01 发令");
@@ -933,7 +933,11 @@ describe("CompetitionController", () => {
     controller.acknowledgeAction(announcement.id, "acknowledged");
     const staleIds = controller.snapshot().actions.filter((item) => item.afterActionId !== undefined).map((item) => item.id);
     if (change === "second-protection") controller.observeCrash("p2", "fatal error");
-    else controller.reschedule(clock.now() + 120_000);
+    else {
+      expect(() => controller.reschedule(clock.now() + 120_000)).toThrow("PREPARATION_ALREADY_STARTED");
+      expect(controller.snapshot().actions.filter(item => staleIds.includes(item.id)).every(item => item.status === "pending")).toBe(true);
+      return;
+    }
     expect(controller.snapshot().actions.filter((item) => staleIds.includes(item.id)).map((item) => item.status)).toEqual(["cancelled", "cancelled"]);
     clock.advance(2_000);
     expect(controller.drainActions().some((item) => staleIds.includes(item.id))).toBe(false);

@@ -388,8 +388,8 @@ export interface RuntimeSnapshot {
 
 export type RefereeActionId =
   | "start-work" | "disconnect-work" | "reconnect-work" | "restart-work" | "enable-automation" | "pause-automation" | "notification" | "start-ready-flow" | "ready" | "cheat-off" | "manual-go"
-  | "delay-ready" | "extend-stage-deadline" | "reschedule" | "reschedule-stage-deadline" | "end-stage" | "restart-stage" | "set-start-protection"
-  | "mark-stage-started" | "force-reset-stage" | "force-next-stage"
+  | "advance-ready" | "shorten-stage-deadline" | "delay-ready" | "extend-stage-deadline" | "reschedule" | "reschedule-stage-deadline" | "end-stage" | "restart-stage" | "set-start-protection"
+  | "mark-stage-started" | "force-reset-stage" | "force-next-stage" | "force-next-stage-ready"
   | "kick" | "raw-command" | "finish" | "archive" | "delete";
 
 export interface ActionAvailability {
@@ -505,9 +505,9 @@ export interface CompetitionSnapshot {
 export type ConfirmationKind = "restart-stage" | "manual-action" | "manual-go" | "scoreboard-override" | "automation-command-resolution" | "command-resolution" | "observation-gap-resolution" | "high-risk";
 
 export type ConfirmationIntent =
-  | "disconnect-work" | "reconnect-work" | "restart-work" | "start-ready-flow" | "ready" | "manual-go" | "delay-ready" | "extend-stage-deadline"
+  | "disconnect-work" | "reconnect-work" | "restart-work" | "start-ready-flow" | "ready" | "manual-go" | "advance-ready" | "shorten-stage-deadline" | "delay-ready" | "extend-stage-deadline"
   | "reschedule" | "reschedule-stage-deadline" | "end-stage" | "restart-stage" | "set-start-protection"
-  | "mark-stage-started" | "force-reset-stage" | "force-next-stage"
+  | "mark-stage-started" | "force-reset-stage" | "force-next-stage" | "force-next-stage-ready"
   | "kick" | "raw-command" | "finish" | "finish-and-archive" | "delete"
   | "scoreboard-set-place" | "scoreboard-set-dnf" | "scoreboard-update-scoring";
 
@@ -564,13 +564,13 @@ export type CompetitionAction =
   | { type: "manual-go"; confirmationToken: string; impactHash: string }
   | { type: "reschedule"; preparationAt: string; confirmationToken: string; impactHash: string }
   | { type: "reschedule-stage-deadline"; deadlineAt: string; confirmationToken: string; impactHash: string }
-  | { type: "delay-ready"; milliseconds: number; confirmationToken: string; impactHash: string }
-  | { type: "extend-stage-deadline"; milliseconds: number; confirmationToken: string; impactHash: string }
+  | { type: "delay-ready" | "advance-ready"; milliseconds: number; confirmationToken: string; impactHash: string }
+  | { type: "extend-stage-deadline" | "shorten-stage-deadline"; milliseconds: number; confirmationToken: string; impactHash: string }
   | { type: "end-stage"; confirmationToken: string; impactHash: string }
   | { type: "restart-stage"; stageId: string; confirmationToken: string; impactHash: string }
   | { type: "mark-stage-started"; stageId: string; confirmationToken: string; impactHash: string }
   | { type: "force-reset-stage"; stageId: string; confirmationToken: string; impactHash: string }
-  | { type: "force-next-stage"; stageId: string; confirmationToken: string; impactHash: string }
+  | { type: "force-next-stage" | "force-next-stage-ready"; stageId: string; confirmationToken: string; impactHash: string }
   | { type: "set-start-protection"; used: boolean; confirmationToken: string; impactHash: string }
   | { type: "participant-associate"; participantId: string; connectionId: string }
   | { type: "participant-split"; connectionId: string }

@@ -107,6 +107,7 @@ export interface WorkStageRecoveryCheckpoint {
 }
 
 export interface WorkStageRecoveryOptions {
+  readyImmediately?: boolean;
   deferCommandIsolation?: boolean;
   logAlreadyFlushed?: boolean;
   logEvidenceBoundary?: WorkLogEvidenceBoundary;
@@ -1197,7 +1198,8 @@ export class WorkRuntimeManager {
       attempt.stageId === fromStageId && !attempt.voided);
     const result = this.runExpectedStageAction(() => runtime.controller.forceAdvanceToNextStage({
       expectedCurrentStageId,
-      expectedTargetStageId
+      expectedTargetStageId,
+      readyImmediately: options.readyImmediately ?? false
     }));
     const after = runtime.controller.snapshot();
     this.isolateStageCycleCommands(runtime, before, after, fromStageId, options.deferCommandIsolation);

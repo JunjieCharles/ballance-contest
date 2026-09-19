@@ -437,7 +437,8 @@ export class TestRuntimeManager {
   public forceAdvanceToNextStage(
     runtime: TestRuntime,
     expectedCurrentStageId: string,
-    expectedTargetStageId: string
+    expectedTargetStageId: string,
+    readyImmediately = false
   ): {
     fromStageId: string;
     toStageId: string;
@@ -449,7 +450,8 @@ export class TestRuntimeManager {
       attempt.stageId === fromStageId && !attempt.voided);
     const result = this.runExpectedStageAction(() => runtime.automation.forceAdvanceToNextStage({
       expectedCurrentStageId,
-      expectedTargetStageId
+      expectedTargetStageId,
+      readyImmediately
     }));
     delete runtime.pendingCountdown;
     const after = runtime.automation.snapshot();

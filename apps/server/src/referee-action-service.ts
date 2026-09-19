@@ -35,7 +35,7 @@ interface RefereeActionHost {
 
 export type StageRecoveryAction = Extract<
   CompetitionAction,
-  { type: "restart-stage" | "mark-stage-started" | "force-reset-stage" | "force-next-stage" }
+  { type: "restart-stage" | "mark-stage-started" | "force-reset-stage" | "force-next-stage" | "force-next-stage-ready" }
 >;
 
 export const assertRawCommandAllowed = (command: string): void => {
@@ -178,6 +178,7 @@ export class RefereeActionService {
         });
         return;
       }
+      case "force-next-stage-ready":
       case "force-next-stage": {
         const before = controller.snapshot();
         const stages = [...(this.host.getPublishedConfig(competitionId) ?? this.host.getDraftConfig(competitionId)).stages]
@@ -193,7 +194,8 @@ export class RefereeActionService {
               return this.host.testRuntimeManager.forceAdvanceToNextStage(
                 this.host.testRuntimeManager.getRuntime(competitionId, runId),
                 before.currentStageId,
-                action.stageId
+                action.stageId,
+                action.type === "force-next-stage-ready"
               );
             })()
           : (() => {
@@ -203,7 +205,7 @@ export class RefereeActionService {
                 runtime,
                 before.currentStageId,
                 action.stageId,
-                workOptions
+                { ...workOptions, readyImmediately: action.type === "force-next-stage-ready" }
               );
             })();
         if (before.currentStageId !== result.fromStageId || expectedNextStageId !== result.toStageId) {
@@ -214,8 +216,8 @@ export class RefereeActionService {
           id: sourceId,
           category: "flow",
           severity: "critical",
-          title: "裁判已进入下一关 T-60",
-          message: `${result.fromStageId} 的成绩窗口已关闭且已有成绩保留；当前关已原子切换为 ${result.toStageId}，并从当前时刻进入 T-60 准备。`,
+          title: action.type === "force-next-stage-ready" ? "裁判已直接进入下一关 Ready" : "裁判已进入下一关 T-60",
+          message: `${result.fromStageId} 的成绩窗口已关闭且已有成绩保留；当前关已原子切换为 ${result.toStageId}，并${action.type === "force-next-stage-ready" ? "立即开始 Ready 和自动发令" : "从当前时刻进入 T-60 准备"}。`,
           occurredAt: new Date().toISOString(),
           stageId: result.toStageId
         });
@@ -318,10 +320,20 @@ export class RefereeActionService {
         controller().rescheduleStageDeadline(this.wallTimeToRuntimeMs(competitionId, target));
         break;
       }
+      case "advance-ready":
+        if (action.milliseconds !== 60_000) throw new ServiceError("VALIDATION_FAILED", "提前操作固定为 1 分钟", 400);
+        controller().delayReady(-60_000);
+        break;
       case "delay-ready":
+        if (!Number.isFinite(action.milliseconds) || action.milliseconds <= 0) throw new ServiceError("VALIDATION_FAILED", "延后时长必须为正数", 400);
         controller().delayReady(action.milliseconds);
         break;
+      case "shorten-stage-deadline":
+        if (action.milliseconds !== 60_000) throw new ServiceError("VALIDATION_FAILED", "缩短操作固定为 1 分钟", 400);
+        controller().extendStageDeadline(-60_000);
+        break;
       case "extend-stage-deadline":
+        if (!Number.isFinite(action.milliseconds) || action.milliseconds <= 0) throw new ServiceError("VALIDATION_FAILED", "延长时长必须为正数", 400);
         controller().extendStageDeadline(action.milliseconds);
         break;
       case "end-stage":
@@ -434,6 +446,7 @@ export class RefereeActionService {
         });
         break;
       }
+      case "force-next-stage-ready":
       case "force-next-stage": {
         const before = controller().snapshot();
         const stages = [...(this.host.getPublishedConfig(competitionId) ?? this.host.getDraftConfig(competitionId)).stages]
@@ -449,13 +462,14 @@ export class RefereeActionService {
               return this.host.testRuntimeManager.forceAdvanceToNextStage(
                 this.host.testRuntimeManager.getRuntime(competitionId, runId),
                 before.currentStageId,
-                action.stageId
+                action.stageId,
+                action.type === "force-next-stage-ready"
               );
             })()
           : (() => {
               const runtime = this.host.workRuntimeManager.get(competitionId);
               if (!runtime) throw new ServiceError("NOT_FOUND", "比赛连接尚未建立", 404);
-              return this.host.workRuntimeManager.forceAdvanceToNextStage(runtime, before.currentStageId, action.stageId);
+              return this.host.workRuntimeManager.forceAdvanceToNextStage(runtime, before.currentStageId, action.stageId, { readyImmediately: action.type === "force-next-stage-ready" });
             })();
         if (before.currentStageId !== result.fromStageId || expectedNextStageId !== result.toStageId) {
           throw new Error("FORCE_NEXT_STAGE_RESULT_MISMATCH");
@@ -465,8 +479,8 @@ export class RefereeActionService {
           id: sourceId,
           category: "flow",
           severity: "critical",
-          title: "裁判已进入下一关 T-60",
-          message: `${result.fromStageId} 的成绩窗口已关闭且已有成绩保留；当前关已原子切换为 ${result.toStageId}，并从当前时刻进入 T-60 准备。`,
+          title: action.type === "force-next-stage-ready" ? "裁判已直接进入下一关 Ready" : "裁判已进入下一关 T-60",
+          message: `${result.fromStageId} 的成绩窗口已关闭且已有成绩保留；当前关已原子切换为 ${result.toStageId}，并${action.type === "force-next-stage-ready" ? "立即开始 Ready 和自动发令" : "从当前时刻进入 T-60 准备"}。`,
           occurredAt: new Date().toISOString(),
           stageId: result.toStageId
         });
@@ -507,7 +521,7 @@ export class RefereeActionService {
         this.host.workRuntimeManager.synchronizeStageBoundary(runtime);
         const lifecycleAction = action.type === "reconnect-work" || action.type === "restart-work";
         if (!lifecycleAction && this.host.workRuntimeManager.businessCommandsReady(runtime)) {
-          if (this.host.workRuntimeManager.businessCommandsReady(runtime)) await runtime.runtime.dispatch();
+          await runtime.runtime.dispatch();
         }
         const synchronized = this.host.workRuntimeManager.synchronizeStageBoundary(runtime);
         this.host.completeCompetitionOnReview(competitionId, synchronized);

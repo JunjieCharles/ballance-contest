@@ -108,15 +108,18 @@ const stageBoundActionForIntent = (intent: ConfirmationIntent | undefined): Refe
     case "start-ready-flow":
     case "ready":
     case "manual-go":
-    case "delay-ready":
-    case "extend-stage-deadline":
+    case "advance-ready":
+      case "delay-ready":
+    case "shorten-stage-deadline":
+      case "extend-stage-deadline":
     case "reschedule":
     case "reschedule-stage-deadline":
     case "end-stage":
     case "restart-stage":
     case "mark-stage-started":
     case "force-reset-stage":
-    case "force-next-stage":
+    case "force-next-stage-ready":
+      case "force-next-stage":
       return intent;
     default:
       return undefined;
@@ -138,8 +141,10 @@ interface ConfirmationBindingInput {
 
 const confirmationInputBinding = (intent: ConfirmationIntent | undefined, input: ConfirmationBindingInput): string | undefined => {
   switch (intent) {
-    case "delay-ready":
-    case "extend-stage-deadline":
+    case "advance-ready":
+      case "delay-ready":
+    case "shorten-stage-deadline":
+      case "extend-stage-deadline":
       return JSON.stringify({ milliseconds: input.milliseconds });
     case "reschedule":
       return JSON.stringify({ preparationAt: input.preparationAt });
@@ -1035,26 +1040,29 @@ export class CompetitionService {
             ],
             irreversible: true
           };
-        case "force-next-stage":
+        case "force-next-stage-ready":
+      case "force-next-stage":
           return {
-            title: `进入下一关 T-60（${currentStageName} → ${displayStageName}）？`,
+            title: `进入下一关 ${intent === "force-next-stage-ready" ? "Ready+发令流程" : "T-60"}（${currentStageName} → ${displayStageName}）？`,
             consequences: [
               "立即关闭上一关成绩窗口但保留已有尝试和成绩；上一关随即开放人工修订。",
-              `当前关卡立即切换为 ${displayStageName}，60 秒后发送该关第一条 Ready，再继续自动发令。`,
+              `当前关卡立即切换为 ${displayStageName}，${intent === "force-next-stage-ready" ? "立即" : "60 秒后"}发送第一条 Ready，并启用自动化继续发令。`,
               "上一关迟到的 Ready、Go、完赛和违规证据只保留日志，不再改变新关状态。"
             ],
             irreversible: true
           };
-        case "delay-ready":
+        case "advance-ready":
+      case "delay-ready":
           return {
-            title: "把下一次 Ready 延后 1 分钟？",
-            consequences: ["现有 Ready 计划顺延 1 分钟，并发送新的发令时间公告。"],
+            title: `把下一次 T-60 ${intent === "advance-ready" ? "提前" : "延后"} 1 分钟？`,
+            consequences: [intent === "advance-ready" ? "准备计划提前 1 分钟；若已到当前时间则立即开始准备，60 秒后 Ready。" : "准备计划与 Ready 同时延后 1 分钟，并更新公告。"],
             irreversible: false
           };
-        case "extend-stage-deadline":
+        case "shorten-stage-deadline":
+      case "extend-stage-deadline":
           return {
-            title: `把 ${displayStageName} 的时限延长 1 分钟？`,
-            consequences: ["本关成绩接收截止时间延后 1 分钟。"],
+            title: `把 ${displayStageName} 的时限${intent === "shorten-stage-deadline" ? "缩短" : "延长"} 1 分钟？`,
+            consequences: [intent === "shorten-stage-deadline" ? "截止时间提前 1 分钟；若不晚于当前时间，立即按到期处理。" : "本关成绩接收截止时间延后 1 分钟。"],
             irreversible: false
           };
         case "reschedule":
@@ -1421,6 +1429,7 @@ export class CompetitionService {
       || input.action.type === "mark-stage-started"
       || input.action.type === "force-reset-stage"
       || input.action.type === "force-next-stage"
+      || input.action.type === "force-next-stage-ready"
         ? input.action
         : undefined;
     const workStageRecoveryRuntime = stageRecoveryAction && competition.mode === "work"
@@ -1540,7 +1549,7 @@ export class CompetitionService {
       );
       {
         const fromStageId = automationBefore.currentStageId;
-        const toStageId = action.type === "force-next-stage" ? action.stageId : fromStageId;
+        const toStageId = (action.type === "force-next-stage" || action.type === "force-next-stage-ready") ? action.stageId : fromStageId;
         const commandsAfterIsolation = this.unconfirmedCommandsFor(
           competitionId,
           controller.snapshot()
@@ -2770,7 +2779,9 @@ export class CompetitionService {
       }
       case "reschedule":
       case "reschedule-stage-deadline":
+      case "advance-ready":
       case "delay-ready":
+      case "shorten-stage-deadline":
       case "extend-stage-deadline": {
         const context = stageContext(action.type);
         return this.consumeConfirmation(
@@ -2811,6 +2822,7 @@ export class CompetitionService {
       }
       case "mark-stage-started":
       case "force-reset-stage":
+      case "force-next-stage-ready":
       case "force-next-stage": {
         const context = stageContext(action.type);
         if (action.stageId !== context.targetStageId) {
@@ -2890,7 +2902,7 @@ export class CompetitionService {
 
   private availableActionsFor(competitionId: string, snapshot?: AutomationSnapshot): ActionAvailability[] {
     const competition = this.get(competitionId);
-    const refereeActionsUnlocked = competition.status !== "draft";
+    const refereeActionsUnlocked = competition.status === "published";
     const phase = snapshot?.phase ?? competition.status;
     const hasObservationGaps = this.observationGapsFor(competitionId).length > 0;
     const blockers = snapshot?.blockers.filter((blocker) => blocker.code !== "AUTOMATION_PAUSED") ?? [];
@@ -2935,6 +2947,14 @@ export class CompetitionService {
       ? -1
       : configuredStages.findIndex((stage) => stage.id === snapshot.currentStageId);
     const nextStageId = currentStageIndex >= 0 ? configuredStages[currentStageIndex + 1]?.id : undefined;
+    const connectionHealthy = workCommandHealthy && !hasOpenServerIncident && phase !== "incident"
+      && !blockers.some(blocker => blocker.code === "PERMISSION_DENIED" || blocker.code === "INCIDENT_OPEN");
+    const preparationEditable = snapshot?.plannedReadyAtMs !== undefined
+      && (snapshot.clockNowMs ?? 0) < snapshot.plannedReadyAtMs - 60_000;
+    const connectionBoundActions = new Set<RefereeActionId>([
+      "end-stage", "restart-stage", "mark-stage-started", "force-reset-stage", "force-next-stage", "force-next-stage-ready",
+      "delay-ready", "advance-ready", "extend-stage-deadline", "shorten-stage-deadline", "reschedule", "reschedule-stage-deadline"
+    ]);
     const descriptor = (
       action: RefereeActionId,
       label: string,
@@ -2946,9 +2966,9 @@ export class CompetitionService {
       action,
       label,
       effect,
-      enabled,
+      enabled: enabled && (!connectionBoundActions.has(action) || connectionHealthy),
       ...(targetStageId === undefined ? {} : { targetStageId }),
-      ...(enabled ? {} : { disabledReason })
+      ...(connectionBoundActions.has(action) && !connectionHealthy ? { disabledReason: "连接或权限异常，请先恢复连接再操作" } : enabled ? {} : { disabledReason })
     });
     return [
       descriptor("disconnect-work", "手动断开", "暂停自动化并关闭受管 MockClient；成功后允许修改服务器地址。", competition.mode === "work" && hasRuntime && !workConnectionBusy, !hasRuntime ? "请先连接服务器" : "连接建立或恢复流程正在进行"),
@@ -2994,16 +3014,22 @@ export class CompetitionService {
         refereeActionsUnlocked && hasRuntime && workCommandHealthy && !manualGoPhaseBlocked && cheatOffConfirmed && !hasPendingCommands && !hasBlockingIssue,
         !refereeActionsUnlocked ? "请先发布比赛配置" : !hasRuntime ? "请先建立比赛连接或创建测试运行" : !workCommandHealthy ? workConnectionReason : manualGoPhaseBlocked ? `当前阶段 ${phase} 不能重复发令` : !cheatOffConfirmed ? "目标关尚无关闭 cheat 成功回显" : hasPendingCommands ? "仍有命令等待回显" : "存在权限、连接或未决命令阻断",
         commandTargetStageId),
-      descriptor("delay-ready", "Ready 延后 1 分钟", "将下一次已安排的 Ready 时间顺延 1 分钟。", refereeActionsUnlocked && snapshot?.plannedReadyAtMs !== undefined && ["preparing", "pre-start-wait", "tail-intake", "restart-preparing"].includes(phase),
-        !refereeActionsUnlocked ? "请先发布比赛配置" : "当前没有可延后的 Ready 计划",
+      descriptor("advance-ready", "T-60 提前 1 分钟", "提前准备计划；若已到当前时间则立即进入 T-60，60 秒后 Ready。",
+        refereeActionsUnlocked && preparationEditable, "当前没有尚未开始的 T-60 计划", snapshot?.plannedReadyStageId),
+      descriptor("shorten-stage-deadline", "本关时限缩短 1 分钟", "截止时间提前 1 分钟；若不晚于当前时间则立即结束接收。",
+        refereeActionsUnlocked && Boolean(openAttempt) && resultIntakeEffective, "当前没有开放的成绩接收窗口", openAttempt?.stageId),
+      descriptor("force-next-stage-ready", "直接进入下一关 Ready+发令流程", "保留本关成绩并关闭接收，立即切到下一关 Ready 并启用自动化发令。",
+        refereeActionsUnlocked && hasRuntime && nextStageId !== undefined, "当前没有可进入的下一关或比赛已经结束", nextStageId),
+      descriptor("delay-ready", "T-60 延后 1 分钟", "将尚未开始的 T-60 和 Ready 同时延后 1 分钟。", refereeActionsUnlocked && preparationEditable && ["preparing", "pre-start-wait", "tail-intake", "restart-preparing"].includes(effectivePhase),
+        !refereeActionsUnlocked ? "请先发布比赛配置" : "当前没有尚未开始的 T-60 计划",
         snapshot?.plannedReadyStageId),
-      descriptor("reschedule", "T-60 改期", "把准备边界改到指定时间，60 秒后发送第一条 Ready，不改变本关时限。", refereeActionsUnlocked && snapshot?.plannedReadyAtMs !== undefined && ["preparing", "pre-start-wait", "tail-intake", "restart-preparing"].includes(phase),
-        !refereeActionsUnlocked ? "请先发布比赛配置" : "当前没有可改期的 T-60 计划",
+      descriptor("reschedule", "T-60 改期", "把准备边界改到指定时间，60 秒后发送第一条 Ready，不改变本关时限。", refereeActionsUnlocked && preparationEditable && ["preparing", "pre-start-wait", "tail-intake", "restart-preparing"].includes(effectivePhase),
+        !refereeActionsUnlocked ? "请先发布比赛配置" : "当前没有尚未开始的 T-60 计划",
         snapshot?.plannedReadyStageId),
-      descriptor("extend-stage-deadline", "本关时限延长 1 分钟", "立即把当前关卡最晚结束时间顺延 1 分钟。", refereeActionsUnlocked && Boolean(openAttempt) && ["running", "tail-intake"].includes(phase),
+      descriptor("extend-stage-deadline", "本关时限延长 1 分钟", "立即把当前关卡最晚结束时间顺延 1 分钟。", refereeActionsUnlocked && Boolean(openAttempt) && ["running", "tail-intake"].includes(effectivePhase),
         !refereeActionsUnlocked ? "请先发布比赛配置" : "当前没有开放的成绩接收窗口",
         openAttempt?.stageId),
-      descriptor("reschedule-stage-deadline", "关卡时限改期", "把当前关卡最晚结束时间改到指定时间，不改变下一次 Ready。", refereeActionsUnlocked && Boolean(openAttempt) && ["running", "tail-intake"].includes(phase),
+      descriptor("reschedule-stage-deadline", "关卡时限改期", "把当前关卡最晚结束时间改到指定时间，不改变下一次 Ready。", refereeActionsUnlocked && Boolean(openAttempt) && ["running", "tail-intake"].includes(effectivePhase),
         !refereeActionsUnlocked ? "请先发布比赛配置" : "当前没有开放的成绩接收窗口",
         openAttempt?.stageId),
       descriptor("end-stage", "提前结束本关", "关闭成绩窗口；未完成选手不补造 DNF，裁判需要 DNF 时应在成绩页修订。", refereeActionsUnlocked && Boolean(openAttempt) && resultIntakeEffective,
@@ -3013,7 +3039,7 @@ export class CompetitionService {
         competition.status === "published" && hasRuntime && Boolean(snapshot?.currentStageId),
         competition.status !== "published" ? "只有已发布且未结束的比赛可以重赛" : !hasRuntime ? "请先建立比赛连接或创建测试运行" : "当前运行没有可重置的关卡",
         snapshot?.currentStageId),
-      descriptor("mark-stage-started", "设为本关已起跑", "清除本关有效成绩，从确认时刻重新计时并继续自动流程，不重新发令。",
+      descriptor("mark-stage-started", "重置本关到已起跑", "清除本关有效成绩，从确认时刻重新计时并继续自动流程，不重新发令。",
         competition.status === "published" && hasRuntime && Boolean(snapshot?.currentStageId),
         competition.status !== "published"
           ? "只有已发布且未结束的比赛可以标记起跑"
@@ -3071,8 +3097,11 @@ export class CompetitionService {
 
   private actionIdFor(action: CompetitionAction): RefereeActionId | undefined {
     switch (action.type) {
-      case "disconnect-work": case "reconnect-work": case "restart-work": case "notification": case "start-ready-flow": case "ready": case "cheat-off": case "manual-go": case "reschedule": case "reschedule-stage-deadline": case "delay-ready":
-      case "extend-stage-deadline": case "end-stage": case "restart-stage": case "mark-stage-started": case "force-reset-stage": case "force-next-stage": case "set-start-protection": case "kick": case "raw-command":
+      case "disconnect-work": case "reconnect-work": case "restart-work": case "notification": case "start-ready-flow": case "ready": case "cheat-off": case "manual-go": case "reschedule": case "reschedule-stage-deadline": case "advance-ready":
+      case "delay-ready":
+      case "shorten-stage-deadline":
+      case "extend-stage-deadline": case "end-stage": case "restart-stage": case "mark-stage-started": case "force-reset-stage": case "force-next-stage-ready":
+      case "force-next-stage": case "set-start-protection": case "kick": case "raw-command":
         return action.type;
       default: return undefined;
     }

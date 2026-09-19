@@ -1997,6 +1997,7 @@ describe("CompetitionService dynamic participants", () => {
     runtime.client = {
       flushLog: () => ({ streamGeneration: 0, byteOffset: 0 })
     } as unknown as NonNullable<WorkRuntime["client"]>;
+    runtime.registeredMapsProcessGeneration = runtime.connection.processGeneration;
     const stageId = runtime.controller.snapshot().currentStageId;
     const restart = runtime.controller.issueStageRestartConfirmation(stageId);
     runtime.controller.confirmStageRestart({
@@ -2291,6 +2292,8 @@ describe("CompetitionService dynamic participants", () => {
       flushLog: () => ({ streamGeneration: 0, byteOffset: 0 })
     } as unknown as NonNullable<WorkRuntime["client"]>;
     const stageId = runtime.controller.snapshot().currentStageId;
+    establishAuthenticatedReferee(runtime);
+    runtime.registeredMapsProcessGeneration = runtime.connection.processGeneration;
     const confirmation = service.createConfirmation(record.id, {
       kind: "restart-stage",
       intent: "restart-stage",
@@ -2842,6 +2845,7 @@ describe("CompetitionService dynamic participants", () => {
       flushLog: () => ({ streamGeneration: 0, byteOffset: 0 })
     } as unknown as NonNullable<WorkRuntime["client"]>;
     runtime.runtime = { dispatch: async () => [] } as unknown as WorkRuntime["runtime"];
+    runtime.registeredMapsProcessGeneration = runtime.connection.processGeneration;
     const now = new Date().toISOString();
     const unresolved = {
       id: "old-uncertain-raw",
