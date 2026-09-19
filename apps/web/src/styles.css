@@ -96,8 +96,7 @@ header > span:last-of-type { margin-left: auto; font-size: 13px; }
   gap: 12px;
   position: sticky;
   top: 72px;
-  height: calc(100vh - 86px);
-  overflow: auto;
+  align-self: start;
 }
 .workspace {
   min-width: 0;
@@ -114,6 +113,7 @@ header > span:last-of-type { margin-left: auto; font-size: 13px; }
   background: #ffffff;
   box-shadow: 0 1px 5px rgb(20 34 48 / 6%);
 }
+.create-panel { overflow: visible; }
 .create-panel button { width: 100%; }
 .competition-list {
   display: grid;
