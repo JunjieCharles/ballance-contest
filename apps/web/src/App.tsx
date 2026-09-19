@@ -652,6 +652,7 @@ export function App() {
         sessionStorage.setItem(sessionKey, JSON.stringify(next)); setSession(next);
       }, "已接管控制权")}>接管</button>}
     </header>
+    {snapshot?.competition.mode === "work" && <div className="global-connection">{snapshot.runtime.workConnection ? <WorkConnectionPanel connection={snapshot.runtime.workConnection} /> : <section className="work-connection-panel" aria-label="工作模式连接状态"><h3>MockClient 与服务器连接</h3><strong>未连接</strong></section>}</div>}
     <div className="shell">
       <aside className="sidebar">
         <section className="panel create-panel"><h2>比赛</h2>
@@ -718,6 +719,7 @@ function ConsolePanel({ snapshot, canWrite, versionKey, saveConnection, startWor
   const [notification, setNotification] = useState("比赛流程通知");
   const [participantId, setParticipantId] = useState(snapshot.config.participants[0]?.id ?? "");
   const [rawCommand, setRawCommand] = useState("");
+  const [deadlineAt, setDeadlineAt] = useState(() => toUtc8Input(new Date(Date.now() + 5 * 60_000)));
   const [scheduleAt, setScheduleAt] = useState(() => toUtc8Input(new Date(Date.now() + 5 * 60_000)));
   const participant = snapshot.config.participants.find((candidate) => candidate.id === participantId);
   const startConnection = availabilityFor(runtime, "start-work");
@@ -745,7 +747,10 @@ function ConsolePanel({ snapshot, canWrite, versionKey, saveConnection, startWor
     "restart-stage",
     "mark-stage-started",
     "force-reset-stage",
-    "force-next-stage"
+    "force-next-stage",
+    "force-next-stage-ready",
+    "advance-ready",
+    "shorten-stage-deadline"
   ]);
   const confirmedAction = (
     label: string,
@@ -764,19 +769,20 @@ function ConsolePanel({ snapshot, canWrite, versionKey, saveConnection, startWor
     const confirmationPayload: Record<string, unknown> = {
       intent: actionId as ConfirmationIntent,
       stageId: targetStageId ?? runtime.currentStageId,
-      ...(actionId === "delay-ready" || actionId === "extend-stage-deadline" ? { milliseconds: 60_000 } : {}),
+      ...(["delay-ready", "advance-ready", "extend-stage-deadline", "shorten-stage-deadline"].includes(actionId) ? { milliseconds: 60_000 } : {}),
       ...(actionId === "reschedule" ? { preparationAt: utc8InputToIso(scheduleAt) } : {}),
-      ...(actionId === "reschedule-stage-deadline" ? { deadlineAt: utc8InputToIso(scheduleAt) } : {}),
+      ...(actionId === "reschedule-stage-deadline" ? { deadlineAt: utc8InputToIso(deadlineAt) } : {}),
       ...(actionId === "raw-command" ? { command: rawCommand.trim() } : {})
     };
     return <ConfirmButton label={label} kind={kind} target={confirmationTarget} versionKey={confirmationVersionKey} className={className}
-      description={["mark-stage-started", "restart-stage", "force-reset-stage", "force-next-stage"].includes(actionId) ? availability?.effect : undefined}
+      description={availability?.effect ? `${targetStageId ? stageTitle(snapshot.config, targetStageId) + " · " : ""}${availability.effect}` : undefined}
       disabled={!canWrite || !availability?.enabled || extraDisabled} disabledReason={!canWrite ? "实时连接或控制权不可用" : extraDisabled ? extraReason : availability?.disabledReason}
       requestPayload={confirmationPayload} requestConfirmation={requestConfirmation} onConfirm={(confirmation) => performAction(build(confirmation))} />;
   };
   return <section className="grid two">
     <div className="panel"><h2>裁判操作</h2>
-      <div className="button-row action-row">
+      <h3 id="服务器连接">服务器连接</h3>
+      <div className="button-row action-row" role="group" aria-labelledby="服务器连接">
         {snapshot.competition.mode === "work" && <div className="connection-settings">
           <label>服务器地址<input value={server} disabled={!canWrite || addressLocked || connectionSaving} onChange={event => setServerDraft({ key: serverKey, value: event.target.value })} /></label>
           {!addressLocked && <button disabled={!canWrite || connectionSaving || !serverDirty || !server.trim()} onClick={() => {
@@ -804,44 +810,50 @@ function ConsolePanel({ snapshot, canWrite, versionKey, saveConnection, startWor
             </>
             : <ActionButton runtime={runtime} action="start-work" canWrite={canWrite && !serverDirty && !connectionSaving}
               onClick={() => void startWork()}>{startConnection?.label ?? "连接比赛服务器"}</ActionButton>}
-        <ActionButton runtime={runtime} action="enable-automation" canWrite={canWrite} onClick={() => void enableAutomation()}>{availabilityFor(runtime, "enable-automation")?.label ?? "启动自动化"}</ActionButton>
+      </div>
+      <h3 id="自动化">自动化</h3>
+      <div className="button-row action-row" role="group" aria-labelledby="自动化">
+        <ActionButton runtime={runtime} action="enable-automation" canWrite={canWrite} onClick={() => void enableAutomation()}>{runtime.automationEnabled ? "自动化运行中" : availabilityFor(runtime, "enable-automation")?.label ?? "启动自动化"}</ActionButton>
         <ActionButton runtime={runtime} action="pause-automation" canWrite={canWrite} className="secondary" onClick={() => void pauseAutomation()}>暂停自动化</ActionButton>
       </div>
-      {workConnection && <WorkConnectionPanel connection={workConnection} />}
-      <h3>面向玩家的通知</h3>
-      <div className="inline-form notification-form"><select aria-label="通知类型" value={channel} onChange={(event) => setChannel(event.target.value as NotificationChannel)}>
-        <option value="bulletin">Bulletin · 顶部状态</option><option value="notice">Notice · 普通通知</option><option value="announce">Announce · 中央重要通知</option><option value="s">s · 公共聊天发言</option>
-      </select><input aria-label="通知文本" value={notification} onChange={(event) => setNotification(event.target.value)} /><ActionButton runtime={runtime} action="notification" canWrite={canWrite} disabled={!notification.trim()} disabledReason="请输入通知文本" onClick={() => void performAction({ type: "notification", channel, text: notification })}>发送</ActionButton></div>
-      <h3>流程控制</h3>
-      <div className="button-row action-row">
-        {confirmedAction("进入 Ready+发令流程", "start-ready-flow", "manual-action", snapshot.competition.id, (confirmation) => ({ type: "start-ready-flow", confirmationToken: confirmation.token, impactHash: confirmation.impactHash }))}
-        {confirmedAction("手动 Ready", "ready", "manual-action", snapshot.competition.id, (confirmation) => ({ type: "ready", confirmationToken: confirmation.token, impactHash: confirmation.impactHash }))}
-        <ActionButton runtime={runtime} action="cheat-off" canWrite={canWrite} onClick={() => void performAction({ type: "cheat-off" })}>关闭 cheat</ActionButton>
-        {confirmedAction("手动发令", "manual-go", "manual-go", snapshot.competition.id, (confirmation) => ({ type: "manual-go", confirmationToken: confirmation.token, impactHash: confirmation.impactHash }))}
-        {confirmedAction("提前结束本关", "end-stage", "manual-action", snapshot.competition.id, (confirmation) => ({ type: "end-stage", confirmationToken: confirmation.token, impactHash: confirmation.impactHash }), "danger")}
+      <h3 id="手动操作">手动操作</h3>
+      <div className="button-row action-row" role="group" aria-labelledby="手动操作">
+{confirmedAction("手动 Ready", "ready", "manual-action", snapshot.competition.id, (confirmation) => ({ type: "ready", confirmationToken: confirmation.token, impactHash: confirmation.impactHash }))}
+<ActionButton runtime={runtime} action="cheat-off" canWrite={canWrite} onClick={() => void performAction({ type: "cheat-off" })}>手动关闭 cheat</ActionButton>
+{confirmedAction("手动发令", "manual-go", "manual-go", snapshot.competition.id, (confirmation) => ({ type: "manual-go", confirmationToken: confirmation.token, impactHash: confirmation.impactHash }))}
+      </div>
+      <h3 id="流程推进">流程推进</h3>
+      <div className="button-row action-row" role="group" aria-labelledby="流程推进">
+{confirmedAction("提前结束本关", "end-stage", "manual-action", snapshot.competition.id, (confirmation) => ({ type: "end-stage", confirmationToken: confirmation.token, impactHash: confirmation.impactHash }), "danger")}
+{confirmedAction("进入下一关 T-60", "force-next-stage", "manual-action", snapshot.competition.id, (confirmation) => ({ type: "force-next-stage", stageId: availabilityFor(runtime, "force-next-stage")?.targetStageId ?? "", confirmationToken: confirmation.token, impactHash: confirmation.impactHash }), "danger")}
+{confirmedAction("直接进入下一关 Ready+发令流程", "force-next-stage-ready", "manual-action", snapshot.competition.id, (confirmation) => ({ type: "force-next-stage-ready", stageId: availabilityFor(runtime, "force-next-stage-ready")?.targetStageId ?? "", confirmationToken: confirmation.token, impactHash: confirmation.impactHash }), "danger")}
+      </div>
+      <h3 id="起跑保护">起跑保护</h3>
+      <div className="button-row action-row" role="group" aria-labelledby="起跑保护">
         <p>起跑保护剩余 {runtime.startProtectionRemaining} 次{runtime.startProtectionRemaining === 1 ? "（仅保护 fatal error）" : runtime.startProtectionRemaining === 2 ? "（第一次保护任何掉线，第二次仅保护 fatal error）" : ""}</p>
         {confirmedAction("将起跑保护标记为已使用", "set-start-protection", "manual-action", `${snapshot.competition.id}:start-protection:${runtime.currentStageId}:true`, (confirmation) => ({ type: "set-start-protection", used: true, confirmationToken: confirmation.token, impactHash: confirmation.impactHash }), "danger", runtime.startProtectionEnabled && runtime.startProtectionRemaining === 0, "本关两次保护均已使用", `${snapshot.competition.stateVersion}:${runtime.currentStageId}:${runtime.startProtectionRemaining}`)}
         {confirmedAction("将起跑保护重置为未使用", "set-start-protection", "manual-action", `${snapshot.competition.id}:start-protection:${runtime.currentStageId}:false`, (confirmation) => ({ type: "set-start-protection", used: false, confirmationToken: confirmation.token, impactHash: confirmation.impactHash }), undefined, runtime.startProtectionEnabled && runtime.startProtectionRemaining === 2, "本关两次保护均未使用", `${snapshot.competition.stateVersion}:${runtime.currentStageId}:${runtime.startProtectionRemaining}`)}
+
       </div>
-      <h3 id="现场恢复">现场恢复</h3>
-      <div className="button-row action-row" role="group" aria-labelledby="现场恢复">
-        {confirmedAction(availabilityFor(runtime, "mark-stage-started")?.label ?? "设为本关已起跑", "mark-stage-started", "manual-action", snapshot.competition.id,
-          (confirmation) => ({ type: "mark-stage-started", stageId: availabilityFor(runtime, "mark-stage-started")?.targetStageId ?? "", confirmationToken: confirmation.token, impactHash: confirmation.impactHash }), "danger")}
-        {confirmedAction("重置本关到 Ready", "restart-stage", "restart-stage", availabilityFor(runtime, "restart-stage")?.targetStageId ?? snapshot.competition.id, (confirmation) => ({ type: "restart-stage", stageId: availabilityFor(runtime, "restart-stage")?.targetStageId ?? "", confirmationToken: confirmation.token, impactHash: confirmation.impactHash }), "danger")}
-        {confirmedAction(availabilityFor(runtime, "force-reset-stage")?.label ?? "重置本关到 T-60", "force-reset-stage", "manual-action", snapshot.competition.id,
-          (confirmation) => ({ type: "force-reset-stage", stageId: availabilityFor(runtime, "force-reset-stage")?.targetStageId ?? "", confirmationToken: confirmation.token, impactHash: confirmation.impactHash }), "danger")}
-        {confirmedAction(availabilityFor(runtime, "force-next-stage")?.label ?? "进入下一关 T-60", "force-next-stage", "manual-action", snapshot.competition.id,
-          (confirmation) => ({ type: "force-next-stage", stageId: availabilityFor(runtime, "force-next-stage")?.targetStageId ?? "", confirmationToken: confirmation.token, impactHash: confirmation.impactHash }), "danger")}
+      <h3 id="本关重置">本关重置</h3>
+      <div className="button-row action-row" role="group" aria-labelledby="本关重置">
+{confirmedAction("重置本关到 T-60", "force-reset-stage", "manual-action", snapshot.competition.id, (confirmation) => ({ type: "force-reset-stage", stageId: availabilityFor(runtime, "force-reset-stage")?.targetStageId ?? "", confirmationToken: confirmation.token, impactHash: confirmation.impactHash }), "danger")}
+{confirmedAction("重置本关到 Ready", "restart-stage", "restart-stage", snapshot.competition.id, (confirmation) => ({ type: "restart-stage", stageId: availabilityFor(runtime, "restart-stage")?.targetStageId ?? "", confirmationToken: confirmation.token, impactHash: confirmation.impactHash }), "danger")}
+{confirmedAction("重置本关到已起跑", "mark-stage-started", "manual-action", snapshot.competition.id, (confirmation) => ({ type: "mark-stage-started", stageId: availabilityFor(runtime, "mark-stage-started")?.targetStageId ?? "", confirmationToken: confirmation.token, impactHash: confirmation.impactHash }), "danger")}
       </div>
-      <h3>相对延时</h3>
-      <div className="button-row action-row">
-        {confirmedAction("Ready 延后 1 分钟", "delay-ready", "manual-action", snapshot.competition.id, (confirmation) => ({ type: "delay-ready", milliseconds: 60_000, confirmationToken: confirmation.token, impactHash: confirmation.impactHash }))}
-        {confirmedAction("本关时限延长 1 分钟", "extend-stage-deadline", "manual-action", snapshot.competition.id, (confirmation) => ({ type: "extend-stage-deadline", milliseconds: 60_000, confirmationToken: confirmation.token, impactHash: confirmation.impactHash }))}
+      <h3 id="时间操作">时间操作</h3>
+      <div className="button-row action-row" role="group" aria-labelledby="时间操作">
+{confirmedAction("T-60 延后 1 分钟", "delay-ready", "manual-action", snapshot.competition.id, (confirmation) => ({ type: "delay-ready", milliseconds: 60_000, confirmationToken: confirmation.token, impactHash: confirmation.impactHash }))}
+{confirmedAction("本关时限延长 1 分钟", "extend-stage-deadline", "manual-action", snapshot.competition.id, (confirmation) => ({ type: "extend-stage-deadline", milliseconds: 60_000, confirmationToken: confirmation.token, impactHash: confirmation.impactHash }))}
+{confirmedAction("T-60 提前 1 分钟", "advance-ready", "manual-action", snapshot.competition.id, (confirmation) => ({ type: "advance-ready", milliseconds: 60_000, confirmationToken: confirmation.token, impactHash: confirmation.impactHash }))}
+{confirmedAction("本关时限缩短 1 分钟", "shorten-stage-deadline", "manual-action", snapshot.competition.id, (confirmation) => ({ type: "shorten-stage-deadline", milliseconds: 60_000, confirmationToken: confirmation.token, impactHash: confirmation.impactHash }))}
       </div>
-      <h3>改期（UTC+8）</h3><p className="muted">T-60 改期设置准备阶段的开始时间，第一条 Ready 在该时间后 60 秒发送。</p>
-      <div className="schedule-editor"><input aria-label="改期时间（UTC+8）" type="datetime-local" value={scheduleAt} onChange={(event) => setScheduleAt(event.target.value)} />
+      <h3>改期（UTC+8）</h3><p className="muted">T-60 开始后不能再调整准备时间；暂停自动化不停止本关计时。</p>
+      <div className="schedule-editor"><label>准备开始时间（UTC+8）<input aria-label="准备开始时间（UTC+8）" type="datetime-local" value={scheduleAt} onChange={(event) => setScheduleAt(event.target.value)} /></label>
         {confirmedAction("T-60 改期", "reschedule", "manual-action", snapshot.competition.id, (confirmation) => ({ type: "reschedule", preparationAt: utc8InputToIso(scheduleAt), confirmationToken: confirmation.token, impactHash: confirmation.impactHash }), undefined, false, undefined, `${versionKey}:${scheduleAt}`)}
-        {confirmedAction("关卡时限改期", "reschedule-stage-deadline", "manual-action", snapshot.competition.id, (confirmation) => ({ type: "reschedule-stage-deadline", deadlineAt: utc8InputToIso(scheduleAt), confirmationToken: confirmation.token, impactHash: confirmation.impactHash }), undefined, false, undefined, `${versionKey}:${scheduleAt}`)}
+      </div>
+      <div className="schedule-editor"><label>本关截止时间（UTC+8）<input aria-label="本关截止时间（UTC+8）" type="datetime-local" value={deadlineAt} onChange={(event) => setDeadlineAt(event.target.value)} /></label>
+        {confirmedAction("关卡时限改期", "reschedule-stage-deadline", "manual-action", snapshot.competition.id, (confirmation) => ({ type: "reschedule-stage-deadline", deadlineAt: utc8InputToIso(deadlineAt), confirmationToken: confirmation.token, impactHash: confirmation.impactHash }), undefined, false, undefined, `${versionKey}:${deadlineAt}`)}
       </div>
     </div>
     <div className="panel"><h2>流程动态与注意事项</h2>
@@ -883,14 +895,20 @@ function ConsolePanel({ snapshot, canWrite, versionKey, saveConnection, startWor
           (confirmation) => ({ type: "restart-work", confirmationToken: confirmation.token, impactHash: confirmation.impactHash }), undefined, false, undefined, lifecycleVersionKey)}
         {item.action === "enable-automation" && <ActionButton runtime={runtime} action="enable-automation" canWrite={canWrite} onClick={() => void enableAutomation()}>核对后恢复自动化</ActionButton>}
       </article>)}</div>
-      <h3>事故与尝试</h3><p className="muted">事故证据和历史尝试永久保留；重赛入口位于左侧流程控制。</p>
+      <h3>事故与尝试</h3><p className="muted">事故证据和历史尝试永久保留；重赛入口位于本关重置。</p>
     </div>
     <div className="panel"><h2>玩家处置</h2>
-      <p className="muted">这里只保留 Kick 和原始命令。DNF 请在成绩页修订。</p>
+      <h3>面向玩家的通知</h3>
+      <div className="inline-form notification-form"><select aria-label="通知类型" value={channel} onChange={(event) => setChannel(event.target.value as NotificationChannel)}>
+        <option value="bulletin">Bulletin · 顶部状态</option><option value="notice">Notice · 普通通知</option><option value="announce">Announce · 中央重要通知</option><option value="s">s · 公共聊天发言</option>
+      </select><input aria-label="通知文本" value={notification} onChange={(event) => setNotification(event.target.value)} /><ActionButton runtime={runtime} action="notification" canWrite={canWrite} disabled={!notification.trim()} disabledReason="请输入通知文本" onClick={() => void performAction({ type: "notification", channel, text: notification })}>发送</ActionButton></div>
+
+      <p className="muted">通知和玩家管理在此操作；DNF 请在成绩页修订。</p>
       <label>目标玩家<select value={participantId} onChange={(event) => setParticipantId(event.target.value)}><option value="">请选择</option>{snapshot.config.participants.map((item) => <option value={item.id} key={item.id}>{item.displayName}</option>)}</select></label>
       <div className="button-row action-row">{confirmedAction("Kick", "kick", "high-risk", participant?.displayName ?? "未选择玩家", (confirmation) => ({ type: "kick", playerName: participant?.displayName ?? "", confirmationToken: confirmation.token, impactHash: confirmation.impactHash }), "danger", !participant, "请先选择目标玩家")}</div>
-      <label>原始命令<input value={rawCommand} onChange={(event) => setRawCommand(event.target.value)} /></label>
+      <details><summary>高级操作：原始命令</summary><label>原始命令<input value={rawCommand} onChange={(event) => setRawCommand(event.target.value)} /></label>
       {confirmedAction("发送原始命令", "raw-command", "high-risk", snapshot.competition.id, (confirmation) => ({ type: "raw-command", command: rawCommand.trim(), confirmationToken: confirmation.token, impactHash: confirmation.impactHash }), "danger", !rawCommand.trim(), "请输入原始命令", `${versionKey}:${rawCommand.trim()}`)}
+      </details>
     </div>
     <div className="panel"><h2>命令审计</h2><CommandTable commands={runtime.commands} /></div>
   </section>;

@@ -187,12 +187,14 @@ header > span:last-of-type { margin-left: auto; font-size: 13px; }
 .notification-form { grid-template-columns: 190px minmax(0, 1fr) auto; }
 .schedule-editor {
   display: grid;
-  grid-template-columns: minmax(220px, 1fr) repeat(2, minmax(170px, auto));
+  grid-template-columns: minmax(220px, 1fr) minmax(170px, auto);
   gap: 8px;
   align-items: start;
   margin-bottom: 12px;
 }
 .action-row { align-items: flex-start; }
+.global-connection { margin: 12px 16px 0; }
+.global-connection .work-connection-panel { margin: 0; }
 .action-control,
 .confirm-action {
   display: grid;
