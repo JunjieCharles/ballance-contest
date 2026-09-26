@@ -1,5 +1,7 @@
 # Ballance 比赛控制台开发进展
 
+2026-09-26 历史成绩展示与提交：按用户要求将此前全部工作区修改提交为 `5390033`（含公开成绩功能及现有便携打包身份文件排除修正）。用户提供的“2025年Ballance十一大奖赛 SR场”另存为 `examples/2025-national-day-sr.json`，以独立历史页面展示 25 名选手、13 关，保留原始总积分、变化、两个并列第 24 名及 31 个 DNF，不套用当前计分规则或写入比赛运行库。源码附离线生成脚本，历史页明确区分单关名次、总积分及页面生成时间。服务端构建、lint、8 项发布/API 定向 Vitest 和 4 项双浏览器 E2E 通过；Edge/Chrome 在本地与线上均逐格核对 425 个单元格、13 个单关冠军配色和 31 个 DNF，并检查桌面/手机布局；线上两浏览器均得到 HTTP 200 且实际完成自动检查更新。Pages 内容提交为 `cb44ec76110c1ddb6fa38c998bc2bcbf2f1de18b`，构建状态 `built`，入口在首页及 `https://junjiecharles.github.io/ballance-contest/scores/2025-national-day-sr/`。本轮为显式授权的历史展示发布，不等同本地比赛自动上传或真实赛事验收；未推送源码 main、重打 portable、操作实服或创建 tag/release。历史来源保留与不重算经验已归入开发指南。
+
 2026-09-26 GitHub Pages 公开成绩：新增成绩页配置、工作模式后台合并上传、本地预览和独立观众页；同仓库上传间隔至少 6 分钟，观众页每 15 秒检查更新。共享成绩表模型保留逐关分数与样式；SQLite 保存配置、修订号、上传指纹和待核对 SHA，凭据只在进程内存保存。覆盖网络/权限失败、结果不确定时读回核对、显式重试、重启恢复、测试隔离、旧缓存不回退、脚本转义、并发设置保护和滚动保留。lint、typecheck、生产构建、40 文件 399 项 Vitest、Edge/Chrome 全量 28 项 E2E 通过；手机姓名列限宽与并发编辑修正后，生产构建/lint、9 项相关 Vitest 和双浏览器 4 项公开成绩 E2E 再次通过，桌面/手机截图已检查。经验归入开发指南，README、前后端需求和测试设计已同步。
 
 同日线上初始化：用户指定 `JunjieCharles/ballance-contest`；确认公开仓库且无已有 Pages 网站后，创建独立根提交 `7f6b562e4e8daeb966734cc57e72144700ffc7d9` 的 `public-scores` 分支并配置根目录发布。GitHub Pages 构建状态为 `built`，`https://junjiecharles.github.io/ballance-contest/` 返回 HTTP 200 且入口标题匹配。仅发布网站入口，没有上传用户比赛成绩；首次真实成绩上传和观众国内网络验收仍待完成。未执行实服、portable 重打/冒烟或 release/tag；源码改动尚未提交，原有打包脚本等用户改动保留。

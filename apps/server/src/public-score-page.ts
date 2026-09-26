@@ -55,7 +55,9 @@ td:nth-child(4),th:nth-child(4){width:180px;max-width:180px;overflow:hidden;text
     document.getElementById('name').textContent = (data.mode === 'test' ? '【测试预览】' : '') + data.name;
     document.title = data.name + ' · 比赛成绩';
     const ended = data.status === 'finished' || data.status === 'archived';
-    document.getElementById('meta').textContent = (ended ? '比赛已结束 · 可复核修订' : '比赛成绩 · 非最终榜单') + ' ｜ 榜单 v' + data.version + ' ｜ 数据更新时间：' + new Date(data.generatedAt).toLocaleString('zh-CN', {timeZone:'Asia/Shanghai',hour12:false}) + '（UTC+8）';
+    const historical = data.status === 'historical';
+    document.getElementById('meta').textContent = (historical ? '历史成绩展示 · 按提供的原表呈现' : ended ? '比赛已结束 · 可复核修订' : '比赛成绩 · 非最终榜单') + ' ｜ 榜单 v' + data.version + (historical ? ' ｜ 页面生成时间：' : ' ｜ 数据更新时间：') + new Date(data.generatedAt).toLocaleString('zh-CN', {timeZone:'Asia/Shanghai',hour12:false}) + '（UTC+8）';
+    if (historical) document.querySelector('footer').textContent = '本页为历史比赛成绩展示示例。SR1–SR13 单元格表示各关名次，积分和并列排名保留原表，未重新计分或复核。页面每 15 秒自动检查更新，无需手动刷新。';
     const heading = document.createElement('tr');
     data.headers.forEach(text => { const th = document.createElement('th'); th.textContent = text; heading.append(th); });
     document.getElementById('head').replaceChildren(heading);

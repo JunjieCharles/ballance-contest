@@ -272,6 +272,8 @@ cheat、可定位到玩家和关卡的明确 Warning，以及带 `[CHEAT]` 的�
 
 部署前应在观众实际网络上验证访问。GitHub 的[静态托管说明](https://docs.github.com/en/pages/getting-started-with-github-pages/what-is-github-pages)、[发布延迟](https://docs.github.com/en/pages/getting-started-with-github-pages/creating-a-github-pages-site)和[额度限制](https://docs.github.com/en/pages/getting-started-with-github-pages/github-pages-limits)以官方文档为准。
 
+历史成绩展示示例：[2025年Ballance十一大奖赛 SR场](https://junjiecharles.github.io/ballance-contest/scores/2025-national-day-sr/)。来源为用户提供的 25 人、13 关历史表，原始数据保存在 [examples/2025-national-day-sr.json](examples/2025-national-day-sr.json)。页面保留原表积分、变化、并列排名和 DNF，各关数字表示名次；未根据现行计分规则重算，也未写入本地比赛运行数据库。构建服务端后执行 `node scripts/build-historical-score-page.mjs` 可重新生成本地预览，输出到 `.runtime/historical-score-page/index.html`；该命令不联网发布。
+
 ## 归档
 
 手动结束后会保存复核阶段、关闭控制器与计分引擎的成绩窗口并取消后续发令计划，刷新或重启不会重新开放。新归档使用完整数据库审计，包含全部命令、注意事项、原始日志事件和持久化运行状态；工作日志文件存在时一并复制，并记录实际 MockClient 版本（旧数据未保存版本时标为 unknown）。界面列表的 50/100 条显示限制不再截断归档；历史归档不会自动补写。
