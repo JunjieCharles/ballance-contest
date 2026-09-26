@@ -247,6 +247,31 @@ cheat、可定位到玩家和关卡的明确 Warning，以及带 `[CHEAT]` 的�
 
 导出固定到发起操作时的榜单版本，不会在生成过程中混入后续成绩。工作/测试标记写入文件名、XLSX 工作表名和隔离目录，不额外污染表格列。当前界面导出最新版本；历史版本选择界面仍在后续计划中。归档中只保存 CSV 与 XLSX 成绩文件。
 
+## 公开成绩网页（GitHub Pages）
+
+成绩页提供“公开成绩 · GitHub Pages”。工作比赛开启后，控制台自动把最新成绩上传到公开仓库，观众通过固定链接查看总榜和逐关成绩，无需手动刷新。网页每 15 秒检查一次；本地每 5 秒检查待同步成绩，同一仓库两次上传至少间隔 6 分钟，期间的完赛、重赛清分和人工修订合并为最新一版。GitHub Pages 部署还可能延迟数分钟，不作为秒级直播使用。
+
+首次准备（只做一次）：
+
+1. 安装 GitHub CLI，并通过 `gh auth login` 登录拥有仓库管理权限的账号。
+2. 在源码目录执行以下命令，为本项目仓库创建独立、无源码历史的 `public-scores` 分支并启用 Pages。脚本不会修改主分支；若仓库已有其他 Pages 网站，会停止并说明原因。
+
+   ```powershell
+   node scripts/setup-public-scores.mjs JunjieCharles/ballance-contest
+   ```
+
+3. 在 GitHub 账号设置中创建 fine-grained personal access token，仅选择目标仓库，授予 **Contents: Read and write**。不要在聊天、公开仓库或网页中填写凭据。
+4. 在已发布工作比赛的“成绩”页填写用户名 `JunjieCharles`、仓库 `ballance-contest`、分支 `public-scores` 和上传凭据，勾选“开启自动发布到公开仓库”并保存。使用其他公开仓库时填写其对应信息。
+5. 打开面板生成的比赛链接，格式为 `https://junjiecharles.github.io/ballance-contest/scores/<比赛ID>/`，首次部署完成后分享给观众。每场比赛有自己的链接。
+
+没有开发环境时，可让维护者执行初始化脚本；后续比赛只需在控制台配置。也可自行准备只含公开网页的分支，在仓库 Settings → Pages 中选择 **Deploy from a branch → public-scores → / (root)**。
+
+仓库配置、上传版本和未确认上传记录保存在本地 SQLite。凭据仅在本次服务内存中保存，重启服务或关闭自动发布后需重新输入；重启后重新输入凭据即继续同步最新榜单。“最近上传”仅表示 GitHub 已确认文件写入，网页是否更新以公开页的数据时间为准。“立即发布最新成绩”仍遵守 6 分钟间隔。上传结果不确定时先读取远端核对，不自动重发；裁判核对后可点“核对并重试”。
+
+公开页仅包含比赛名称、比赛状态、榜单版本、选手展示名和分数，不上传游戏身份、原始日志、连接配置或控制令牌。已结束比赛仍可修订并同步，页面不会自动声称已完成最终复核。关闭自动发布、删除本地比赛或关闭控制台不会撤下已经发布的网页；公开仓库历史提交也会保留旧成绩。需要撤下时在 GitHub 单独管理。测试比赛只提供本地预览，不联网发布。
+
+部署前应在观众实际网络上验证访问。GitHub 的[静态托管说明](https://docs.github.com/en/pages/getting-started-with-github-pages/what-is-github-pages)、[发布延迟](https://docs.github.com/en/pages/getting-started-with-github-pages/creating-a-github-pages-site)和[额度限制](https://docs.github.com/en/pages/getting-started-with-github-pages/github-pages-limits)以官方文档为准。
+
 ## 归档
 
 手动结束后会保存复核阶段、关闭控制器与计分引擎的成绩窗口并取消后续发令计划，刷新或重启不会重新开放。新归档使用完整数据库审计，包含全部命令、注意事项、原始日志事件和持久化运行状态；工作日志文件存在时一并复制，并记录实际 MockClient 版本（旧数据未保存版本时标为 unknown）。界面列表的 50/100 条显示限制不再截断归档；历史归档不会自动补写。

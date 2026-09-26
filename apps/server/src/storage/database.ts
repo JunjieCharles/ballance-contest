@@ -53,6 +53,22 @@ const MIGRATIONS: readonly string[] = [
     created_at TEXT NOT NULL,
     PRIMARY KEY(competition_id, idempotency_key)
   ) STRICT;
+  `,
+  `
+  CREATE TABLE public_score_publications (
+    competition_id TEXT PRIMARY KEY REFERENCES competitions(id) ON DELETE CASCADE,
+    payload TEXT NOT NULL
+  ) STRICT;
+  CREATE TABLE public_score_receipts (
+    competition_id TEXT NOT NULL REFERENCES competitions(id) ON DELETE CASCADE,
+    idempotency_key TEXT NOT NULL,
+    identity TEXT NOT NULL,
+    PRIMARY KEY (competition_id, idempotency_key)
+  ) STRICT;
+  CREATE TABLE public_score_upload_slots (
+    repository TEXT PRIMARY KEY,
+    attempted_at INTEGER NOT NULL
+  ) STRICT;
   `
 ];
 

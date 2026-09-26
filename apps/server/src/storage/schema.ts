@@ -174,3 +174,19 @@ export const attentionItems = sqliteTable("attention_items", {
   participantIds: text("participant_ids", { mode: "json" }),
   action: text("action")
 }, (table) => [index("attention_items_competition_time").on(table.competitionId, table.occurredAt)]);
+
+export const publicScorePublications = sqliteTable("public_score_publications", {
+  competitionId: text("competition_id").primaryKey().references(() => competitions.id, { onDelete: "cascade" }),
+  payload: text("payload", { mode: "json" }).notNull()
+});
+
+export const publicScoreReceipts = sqliteTable("public_score_receipts", {
+  competitionId: text("competition_id").notNull().references(() => competitions.id, { onDelete: "cascade" }),
+  idempotencyKey: text("idempotency_key").notNull(),
+  identity: text("identity").notNull()
+}, table => [uniqueIndex("public_score_receipts_identity").on(table.competitionId, table.idempotencyKey)]);
+
+export const publicScoreUploadSlots = sqliteTable("public_score_upload_slots", {
+  repository: text("repository").primaryKey(),
+  attemptedAt: integer("attempted_at").notNull()
+});

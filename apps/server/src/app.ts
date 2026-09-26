@@ -9,6 +9,7 @@ import {
   type CompetitionConfig,
   type ConfirmationIntent,
   type HealthResponse,
+  type PublicScoreUpdate,
   type ScoreboardOverrideInput,
   type ScoreboardScoringUpdateInput
 } from "@ballance/contracts";
@@ -20,6 +21,8 @@ import { createCompetitionArchive } from "./archive.js";
 import { createScoreboardExports } from "./scoreboard-export.js";
 import { SessionManager, type LocalSession } from "./session.js";
 import { defaultDataRoot, openDatabase } from "./storage/database.js";
+import { PublicScorePublisher } from "./public-score-publisher.js";
+import { publicScoreData, renderPublicScorePage } from "./public-score-page.js";
 
 export interface BuildAppOptions {
   bootstrapToken: string;
@@ -28,6 +31,7 @@ export interface BuildAppOptions {
   dataRoot?: string;
   devShutdown?: { token: string; onShutdown: () => void | Promise<void> };
   trustedOrigins?: readonly string[];
+  publicScoreTransport?: typeof fetch;
 }
 
 const bearer = (request: FastifyRequest): string | undefined => {
@@ -41,8 +45,13 @@ export const buildApp = async (options: BuildAppOptions): Promise<FastifyInstanc
   const database = options.service ? undefined : openDatabase(join(dataRoot, "console.sqlite"));
   const service = options.service ?? new CompetitionService(undefined, { ...(database ? { database } : {}), dataRoot });
   const sessions = new SessionManager(options.bootstrapToken);
+  const publicScores = database ? new PublicScorePublisher(database, id => service.snapshot(id), id => {
+    service.journal.append({ type: "public-score.updated", competitionId: id, data: {} });
+  }, options.publicScoreTransport) : undefined;
+  publicScores?.start();
   await app.register(websocket);
   app.addHook("onClose", async () => {
+    await publicScores?.close();
     await service.close();
     database?.close();
   });
@@ -209,6 +218,27 @@ export const buildApp = async (options: BuildAppOptions): Promise<FastifyInstanc
     requireSession(request);
     const version = request.query.version === undefined ? undefined : Number(request.query.version);
     return { data: service.getLatestScoreboard(request.params.competitionId, version) };
+  });
+  const requirePublicScores = (): PublicScorePublisher => {
+    if (!publicScores) throw new ServiceError("CAPABILITY_UNSUPPORTED", "公开成绩需要持久化数据库", 409);
+    return publicScores;
+  };
+  app.get<{ Params: { competitionId: string } }>("/api/v1/competitions/:competitionId/public-score", async request => {
+    requireSession(request);
+    return { data: requirePublicScores().status(request.params.competitionId) };
+  });
+  app.get<{ Params: { competitionId: string } }>("/api/v1/competitions/:competitionId/public-score/preview", async (request, reply) => {
+    requireSession(request);
+    return reply.header("Cache-Control", "no-store").type("text/html; charset=utf-8")
+      .send(renderPublicScorePage(publicScoreData(service.snapshot(request.params.competitionId))));
+  });
+  app.put<{ Params: { competitionId: string }; Body: PublicScoreUpdate }>("/api/v1/competitions/:competitionId/public-score", async request => {
+    requireSession(request, true);
+    return { data: requirePublicScores().configure(request.params.competitionId, request.body) };
+  });
+  app.post<{ Params: { competitionId: string }; Body: { expectedRevision: number; idempotencyKey: string } }>("/api/v1/competitions/:competitionId/public-score/retry", async request => {
+    requireSession(request, true);
+    return { data: requirePublicScores().retry(request.params.competitionId, request.body) };
   });
   app.post<{
     Params: { competitionId: string };

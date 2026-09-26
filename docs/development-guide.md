@@ -6,6 +6,7 @@
 
 - Windows PowerShell 向 Node 等进程通过管道传递含中文脚本时，先把本次命令的 `$OutputEncoding` 设为 UTF-8；读文件显式使用 UTF-8，写后核对中文差异。调用 npm 使用 `npm.cmd`，避免误触 `npm.ps1` 的脚本执行策略。
 - npm 默认用户缓存目录不可写时，仅为当前命令设置 `npm_config_cache` 到工作区 `.runtime/npm-cache` 后重试；不要修改全局 npm 配置或为缓存写入扩大用户目录权限。
+- Windows 的 GitHub CLI 凭据可能保存在当前用户的系统凭据库中，沙箱账号下 `gh auth status` 报 invalid 不足以证明用户登录失效。已有 GitHub 操作授权时，可先在真实用户上下文做只读认证核验；不得打印实际 token，也不要直接让用户注销或重置账号。
 - E2E 使用独立 `BALLANCE_DATA_ROOT`，不得写入 `%LOCALAPPDATA%\BallanceContestConsole` 的用户数据。
 - Playwright 临时产物写入 `.runtime/playwright-results`；不要在根目录保留 `test-results/`。
 - ESLint 必须显式忽略整个 `.runtime/`；Flat Config 不会自动采用 `.gitignore`，否则 release staging、Playwright 或归档分析中的压缩 bundle 会制造大量假 lint 错误。不得为通过 lint 删除用户的忽略产物。
@@ -47,6 +48,7 @@
 - 重建便携包前确认没有进程正在执行目标包内的 `runtime/node.exe`；遇到 `EBUSY` 时先按可执行路径和命令行确认占用属于该包，再结束其进程树并重试，不直接删除被占用目录。
 - `package:portable` 不要与 `test:portable` 并行运行；便携 smoke test 会占用打包目录中的启动器和 bundled Node，重建前必须等待冒烟结束或先结束这些进程树。
 - 便携验证必须使用包内 Node、生产依赖和实际 `Start-ContestConsole.cmd`，不能只验证源码启动。
+- 便携打包必须排除本机 MockClient 身份文件（`.mock-client-uuid`、`mock_uuid.cfg`），并在产物中复核，避免不同裁判复用同一身份。
 - `test:portable` 输出通过后仍要等待短暂退出窗口，再复查 `38623` 和包内 `runtime/node.exe`；“冒烟通过”不等于子进程已经完全回收，确认清理完成后才可提交。
 - 便携 smoke 清理必须容忍启动器在状态检查与停止调用之间自行退出；按 PID 停止应为幂等操作，随后仍以端口和包内 `runtime/node.exe` 复查作为最终判据。
 - 便携 smoke 的健康响应只有在监听 PID 与包内 `runtime/node.exe` 路径同时核验成功后才算通过；端口或进程查询失败必须失败关闭，不能当作“无监听/无残留”。包内 Node 版本、原生 SQLite、系统查询和进程终止都必须有硬时限。
@@ -68,6 +70,8 @@
 实服探针的验收定义见[后端需求第 15.6 节](contest-console-backend-requirements.md#156-双服连接恢复探针)。用户已有授权适用于本轮相关操作；环境开关用于防止误调用，不能替代授权或空服检查。
 
 ## 选择验证范围
+
+公开成绩发布回归：GitHub Contents PUT 的响应丢失不能直接按失败重发，应先持久化预期 Git blob SHA 并读回核对；HTTP 替身分别模拟“远端已提交但回执丢失”和“未提交且结果不确定”。测试使用独立数据库、虚拟发布时钟和 HTTP 替身，禁止自动测试向真实成绩仓库写入。公开页面自动更新测试应分别验证旧缓存、断网恢复、滚动位置与脚本注入，浏览器假时钟不能推进真实比赛实例。GitHub 上传成功不等于 Pages 部署已可访问，线上验收单独记录。初始化脚本通过 `gh` 的 JSON 标准输入创建独立根提交，不从源码分支复制历史，也不覆盖已有其他 Pages 配置。
 
 README 按使用者的阅读顺序组织：项目介绍、快速开始和操作说明。功能变化应合并进对应操作章节，不在项目介绍前追加更新摘要；接口字段和确认协议写入需求文档，验证结果和实现记录写入开发进展。
 

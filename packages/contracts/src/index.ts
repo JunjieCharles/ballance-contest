@@ -502,6 +502,33 @@ export interface CompetitionSnapshot {
   archives: readonly { version: number; directory: string; packagePath: string; manifestHash: string; createdAt: string }[];
 }
 
+export interface PublicScoreSettings {
+  owner: string;
+  repository: string;
+  branch: string;
+  enabled: boolean;
+}
+
+export interface PublicScoreStatus {
+  settings: PublicScoreSettings;
+  revision: number;
+  hasCredential: boolean;
+  uploading: boolean;
+  pending: boolean;
+  uncertain: boolean;
+  uploadedVersion?: number;
+  uploadedAt?: string;
+  nextUploadAt?: string;
+  pageUrl?: string;
+  error?: string;
+}
+
+export interface PublicScoreUpdate extends PublicScoreSettings {
+  expectedRevision: number;
+  idempotencyKey: string;
+  token?: string;
+}
+
 export type ConfirmationKind = "restart-stage" | "manual-action" | "manual-go" | "scoreboard-override" | "automation-command-resolution" | "command-resolution" | "observation-gap-resolution" | "high-risk";
 
 export type ConfirmationIntent =

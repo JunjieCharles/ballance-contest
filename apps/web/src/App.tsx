@@ -36,6 +36,7 @@ import type {
   WorkRecoveryStep
 } from "@ballance/contracts";
 import { formatUtc8DateTime, toUtc8Input, utc8InputToIso } from "./time.js";
+import { PublicScorePanel } from "./PublicScorePanel.js";
 
 interface Session { token: string; tabId: string; control: boolean }
 interface JournalMessage { sequence?: number; type: string; competitionId?: string }
@@ -686,6 +687,8 @@ export function App() {
           {activeTab === "players" && <PlayersPanel snapshot={snapshot} canWrite={canWrite} performAction={(action) => performAction(action)} />}
           {activeTab === "scoreboard" && <ScoreboardPanel snapshot={snapshot} canWrite={canWrite} versionKey={scoreboardVersionKey}
             requestConfirmation={requestConfirmation} overrideScoreboard={overrideScoreboard} updateScoring={updateScoreboardScoring} downloadExport={downloadExport} />}
+          {activeTab === "scoreboard" && session && <PublicScorePanel key={snapshot.competition.id} competitionId={snapshot.competition.id}
+            mode={snapshot.competition.mode} published={Boolean(snapshot.publishedConfig)} canWrite={canWrite} sessionToken={session.token} />}
           {activeTab === "test" && <TestPanel snapshot={snapshot} scenarios={scenarios} scenarioDetail={scenarioDetail} canWrite={canWrite}
             loadScenario={loadScenario} createRun={createRun} advanceClock={(ms) => advanceClock(ms)} />}
           {activeTab === "archive" && <ArchivePanel snapshot={snapshot} canWrite={canWrite} versionKey={versionKey}

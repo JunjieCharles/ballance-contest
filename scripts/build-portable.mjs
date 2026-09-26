@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { cp, mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
-import { join, resolve } from "node:path";
+import { basename, join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 
 const root = resolve(import.meta.dirname, "..");
@@ -21,7 +21,7 @@ await cp(join(root, "apps", "server", "dist"), join(output, "app", "server"), { 
 await cp(join(root, "apps", "web", "dist"), join(output, "app", "web"), { recursive: true });
 await cp(join(root, "server-windows"), join(output, "server-windows"), {
   recursive: true,
-  filter: (source) => !source.endsWith("server_docs_zh.md")
+  filter: (source) => !["server_docs_zh.md", ".mock-client-uuid", "mock_uuid.cfg"].includes(basename(source))
 });
 await cp(join(root, "THIRD_PARTY_NOTICES.md"), join(output, "THIRD_PARTY_NOTICES.md"));
 await cp(join(root, "scripts", "Prepare-ContestConsolePort.ps1"), join(output, "Prepare-ContestConsolePort.ps1"));

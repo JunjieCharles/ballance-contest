@@ -694,3 +694,9 @@ header > span:last-of-type { margin-left: auto; font-size: 13px; }
 .connection-settings { display: flex; flex-wrap: wrap; align-items: end; gap: 8px; max-width: 100%; }
 .connection-settings label { flex: 1; min-width: 180px; }
 .connection-settings small { flex-basis: 100%; }
+/* Public score publishing stays separate from score adjudication controls. */
+.public-score-fields { display: flex; flex-wrap: wrap; align-items: end; gap: 14px; border: 0; padding: 16px 0; }
+.public-score-fields label { display: flex; flex-direction: column; gap: 6px; }
+.public-score-fields label:has(input[type="checkbox"]) { flex-direction: row; align-items: center; }
+.public-score-status code { overflow-wrap: anywhere; white-space: normal; }
+.public-score-panel details { margin: 12px 0; }
