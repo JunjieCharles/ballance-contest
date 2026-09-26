@@ -2,17 +2,35 @@
 import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import { resolve, join } from "node:path";
 import { pathToFileURL } from "node:url";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
+
+const run = promisify(execFile);
+export const indexSettingsPath = ".github/public-score-index.json";
+
+export async function firstPublishedAt(root, id) {
+  const { stdout } = await run("git", ["log", "--reverse", "--diff-filter=A", "--format=%cI", "--", `scores/${id}/index.html`], { cwd: root, timeout: 10000, windowsHide: true });
+  const date = stdout.trim().split(/\r?\n/)[0];
+  return date ? Date.parse(date) : 0;
+}
 
 const escape = value => String(value).replace(/[&<>"']/g, char => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[char]);
 
 export const scoreRootRedirect = '<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta http-equiv="refresh" content="0;url=./scores/"><title>Ballance 比赛成绩</title><p>比赛目录已迁移，请<a href="./scores/">查看所有公开比赛</a>。</p></html>\n';
 
-export async function buildScoreIndex(root) {
+export async function buildScoreIndex(root, { publicationTime = firstPublishedAt } = {}) {
+  let settings = { hiddenCompetitionIds: [] };
+  try { settings = JSON.parse(await readFile(join(root, indexSettingsPath), "utf8")); }
+  catch (error) { if (error.code !== "ENOENT") throw error; }
+  if (!Array.isArray(settings.hiddenCompetitionIds) || settings.hiddenCompetitionIds.some(id => typeof id !== "string" || !/^[a-zA-Z0-9_-]+$/.test(id))) {
+    throw new Error("Invalid public score index settings");
+  }
+  const hidden = new Set(settings.hiddenCompetitionIds);
   const directory = join(root, "scores");
   await mkdir(directory, { recursive: true });
   const competitions = [];
   for (const entry of await readdir(directory, { withFileTypes: true })) {
-    if (!entry.isDirectory()) continue;
+    if (!entry.isDirectory() || hidden.has(entry.name)) continue;
     let html;
     try { html = await readFile(join(directory, entry.name, "index.html"), "utf8"); }
     catch (error) { if (error.code === "ENOENT") continue; throw error; }
@@ -24,9 +42,11 @@ export async function buildScoreIndex(root) {
     }
     if (data.mode === "test") continue;
     const ended = ["historical", "finished", "archived"].includes(data.status);
-    competitions.push({ id: entry.name, name: data.name, ended });
+    const publishedAt = await publicationTime(root, entry.name);
+    if (!Number.isFinite(publishedAt)) throw new Error(`Invalid publication time: ${entry.name}`);
+    competitions.push({ id: entry.name, name: data.name, ended, publishedAt });
   }
-  competitions.sort((a, b) => Number(a.ended) - Number(b.ended) || a.name.localeCompare(b.name, "zh-CN") || a.id.localeCompare(b.id));
+  competitions.sort((a, b) => b.publishedAt - a.publishedAt || a.id.localeCompare(b.id));
   const items = competitions.map(item => `<li><a href="./${escape(encodeURIComponent(item.id))}/">${escape(item.name)}</a><span class="status${item.ended ? " ended" : ""}">${item.ended ? "已结束" : "进行中"}</span></li>`).join("\n");
   const html = `<!doctype html>
 <html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>公开比赛 · Ballance 比赛成绩</title>
