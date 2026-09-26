@@ -23,6 +23,9 @@ jobs:
         with:
           ref: public-scores
       - uses: actions/configure-pages@v5
+      - name: Apply selected score page preview
+        if: hashFiles('.github/scripts/preview-score-page.mjs') != ''
+        run: node .github/scripts/preview-score-page.mjs
       - name: Generate public competition index
         run: node .github/scripts/build-score-index.mjs
       - uses: actions/upload-pages-artifact@v4
