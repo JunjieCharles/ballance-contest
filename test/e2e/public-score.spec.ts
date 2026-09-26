@@ -1,5 +1,57 @@
 import { expect, test } from "@playwright/test";
 import { renderPublicScorePage, type PublicScoreData } from "../../apps/server/src/public-score-page.js";
+import historical from "../../examples/2025-national-day-sr.json" with { type: "json" };
+
+test("broadcast scoreboard shows 15 large rows and scrolls at 1080p with embedded font and transparent option", async ({ page }) => {
+  const data: PublicScoreData = {
+    competitionId: "broadcast", name: historical.name, mode: "work", status: "historical", version: 1, sequence: 1,
+    generatedAt: "2026-09-26T01:00:00Z", headers: ["排名", "变化", "积分", "选手", ...Array.from({ length: 13 }, (_, i) => `SR${i + 1}`)],
+    rows: historical.players.map((player, playerIndex) => ({ cells: [
+      ...player.slice(0, 4).map((value, column) => ({ text: playerIndex === 0 && column === 3 ? "测试超长玩家名称WaterMelonzZ" : String(value), style: "plain" as const })),
+      ...(player[4] as (string | number)[]).map(value => ({ text: value === "dnf" ? "DNF" : String(value), style: value === "dnf" ? "dnf" as const : "plain" as const }))
+    ] }))
+  };
+  const html = renderPublicScorePage(data);
+  expect(Buffer.byteLength(html)).toBeLessThan(900_000);
+  await page.route("**/broadcast/**", route => route.fulfill({ contentType: "text/html", body: html }));
+  await page.setViewportSize({ width: 1920, height: 1080 });
+  await page.goto("/broadcast/");
+  await expect(page.locator("#status")).toHaveText("已结束");
+  await expect(page.locator("#meta")).toBeHidden();
+  await expect(page.locator("#connection")).toBeHidden();
+  await expect(page.locator("footer")).toHaveCount(0);
+  await expect(page.locator("tbody tr")).toHaveCount(25);
+  const fit = await page.locator(".table-wrap").evaluate(async element => {
+    await document.fonts.ready;
+    return { x: element.scrollWidth <= element.clientWidth, y: element.scrollHeight <= element.clientHeight,
+      bottom: element.getBoundingClientRect().bottom, font: document.fonts.check('20px BallanceBank') && document.fonts.check('40px BallanceTitle', '2025年Ballance十一大奖赛 SR场') };
+  });
+  expect(fit).toEqual({ x: true, y: false, bottom: expect.any(Number), font: true });
+  expect(fit.bottom).toBeLessThan(1080);
+  const proportions = await page.locator('thead th').evaluateAll(cells => cells.slice(0, 4).map(cell => cell.getBoundingClientRect().width / cell.closest('table')!.getBoundingClientRect().width));
+  [0.05, 0.05, 0.08, 0.18].forEach((ratio, index) => expect(proportions[index]).toBeCloseTo(ratio, 2));
+  const names = await page.locator('.player-name').evaluateAll(elements => elements.map(el => ({ fits: el.scrollWidth <= el.clientWidth + 1, size: parseFloat(getComputedStyle(el).fontSize) })));
+  expect(names.every(name => name.fits)).toBe(true);
+  expect(Math.min(...names.map(name => name.size))).toBeLessThan(Math.max(...names.map(name => name.size)));
+
+  const visibleRows = () => page.locator('.table-wrap').evaluate(wrap => {
+    const box = wrap.getBoundingClientRect();
+    const headerBottom = wrap.querySelector('thead')!.getBoundingClientRect().bottom;
+    return [...wrap.querySelectorAll('tbody tr')].filter(row => {
+      const rect = row.getBoundingClientRect();
+      return rect.top >= headerBottom - 1 && rect.bottom <= box.bottom + 1;
+    }).length;
+  });
+  expect(await visibleRows()).toBe(15);
+  expect(await page.locator('tbody td').first().evaluate(el => parseFloat(getComputedStyle(el).fontSize))).toBeGreaterThanOrEqual(34);
+  await page.locator('.table-wrap').evaluate(el => { el.scrollTop = el.scrollHeight; });
+  expect(await page.locator('tbody tr').last().evaluate(el => el.getBoundingClientRect().bottom)).toBeLessThanOrEqual(fit.bottom);
+  await page.locator('.table-wrap').evaluate(el => { el.scrollTop = 0; });
+  await page.screenshot({ path: `.runtime/broadcast-${test.info().project.name.replaceAll(" ", "-")}.png` });
+  await page.goto("/broadcast/?transparent=1");
+  expect(await page.locator("body").evaluate(element => getComputedStyle(element).backgroundColor)).toBe("rgba(0, 0, 0, 0)");
+  expect(await page.locator("body").evaluate(element => getComputedStyle(element).backgroundImage)).toBe("none");
+});
 
 test("public scoreboard updates automatically, preserves scroll and keeps the last result on network failure", async ({ page }) => {
   const data: PublicScoreData = {
@@ -17,6 +69,7 @@ test("public scoreboard updates automatically, preserves scroll and keeps the la
   await page.clock.install();
   await page.goto("/public-score-e2e/");
   await expect(page.getByRole("heading", { name: data.name })).toBeVisible();
+  await expect(page.locator("#status")).toHaveText("进行中");
   await expect(page.locator("#meta")).toContainText("榜单 v1");
   expect(await page.evaluate(() => "pwned" in window)).toBe(false);
   const scroll = await page.locator(".table-wrap").evaluate(element => { element.scrollTop = 200; element.scrollLeft = 250; return { top: element.scrollTop, left: element.scrollLeft }; });
@@ -36,10 +89,11 @@ test("public scoreboard updates automatically, preserves scroll and keeps the la
   await page.clock.fastForward(15_001);
   await expect(page.locator("#meta")).toContainText("榜单 v3");
   await expect(page.locator("#meta")).toContainText("比赛已结束");
+  await expect(page.locator("#status")).toHaveText("已结束");
   await page.screenshot({ path: `.runtime/public-score-${test.info().project.name.replaceAll(" ", "-")}.png` });
   await page.setViewportSize({ width: 390, height: 844 });
   await expect(page.getByRole("heading", { name: data.name })).toBeVisible();
-  expect(await page.locator("th").nth(3).evaluate(element => element.getBoundingClientRect().width)).toBeLessThanOrEqual(150);
+  expect(await page.locator("th").nth(3).evaluate(element => element.getBoundingClientRect().width / element.closest("table")!.getBoundingClientRect().width)).toBeCloseTo(.18, 2);
   await page.screenshot({ path: `.runtime/public-score-mobile-${test.info().project.name.replaceAll(" ", "-")}.png` });
 });
 
