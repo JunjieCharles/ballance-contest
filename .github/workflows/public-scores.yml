@@ -23,6 +23,8 @@ jobs:
         with:
           ref: public-scores
       - uses: actions/configure-pages@v5
+      - name: Generate public competition index
+        run: node .github/scripts/build-score-index.mjs
       - uses: actions/upload-pages-artifact@v4
         with:
           path: '.'
