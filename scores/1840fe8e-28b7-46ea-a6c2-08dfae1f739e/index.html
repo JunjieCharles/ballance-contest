@@ -129,12 +129,276 @@ footer{position:absolute;bottom:8px;left:36px;right:36px;text-align:right;font-s
 @media(min-width:1600px){main{padding-top:30px}.table-wrap{max-height:calc(100svh - 172px)}}
 @media(max-width:900px){main{padding:16px 12px}header{gap:12px;min-height:76px;padding-bottom:16px}header::before{flex-basis:32px;height:32px}h1{font-size:23px}#status{font-size:12px;letter-spacing:1px;padding:8px}td:nth-child(4),th:nth-child(4){padding-left:10px}.table-wrap{max-height:calc(100svh - 124px)}}
 @media(max-width:900px){footer{bottom:0;left:12px;right:12px;font-size:9px;line-height:12px}}
+@media(max-width:600px){td:nth-child(4){position:static}th:nth-child(4){left:auto;z-index:2}}
+.time-machine{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin:0 4px 14px;color:#e7d9b4;font-size:14px}.time-machine select,.time-machine button{font:inherit;color:#ece9db;background:#1c2c39;border:1px solid #958465;border-radius:4px;padding:8px 10px;min-height:38px}.time-machine button{cursor:pointer}.time-machine button:disabled{opacity:.45;cursor:default}.time-machine select:focus-visible,.time-machine button:focus-visible{outline:2px solid #ffe1a0;outline-offset:2px}#history-note{font-size:12px;color:#c4c9ca}
+@media(orientation:landscape){header .time-machine{flex-wrap:nowrap;flex-shrink:0;margin:0}header #history-note{position:absolute;width:1px;height:1px;padding:0;overflow:hidden;clip-path:inset(50%);white-space:nowrap}header .time-machine select{max-width:160px}}
+@media(orientation:landscape) and (max-width:1000px){header{gap:8px}header .time-machine{gap:4px;font-size:12px}header .time-machine label{display:none}header .time-machine select,header .time-machine button{padding:6px;min-height:34px}header .time-machine select{max-width:125px}}
+
+.score-controls{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin:0 4px 14px}.score-controls>.time-machine{margin:0}.view-toggle{font:inherit;font-size:14px;color:#ece9db;background:#1c2c39;border:1px solid #958465;border-radius:4px;padding:8px 10px;min-height:38px;cursor:pointer;white-space:nowrap}.view-toggle:focus-visible{outline:2px solid #ffe1a0;outline-offset:2px}
+.view-switch{position:relative;display:grid;grid-template-columns:1fr 1fr;align-items:center;flex:0 0 140px;width:140px;height:38px;padding:3px;border:1px solid #958465;border-radius:20px;background:#13212d;color:#b7bfbf;font:inherit;font-size:14px;cursor:pointer}.view-switch::before{content:"";position:absolute;top:3px;bottom:3px;left:3px;width:calc((100% - 6px)/2);border-radius:16px;background:linear-gradient(#706445,#514a38);box-shadow:0 1px 4px #0007;transition:transform .2s ease}.view-switch[aria-checked=true]::before{transform:translateX(100%)}.view-switch span{position:relative;text-align:center;z-index:1}.view-switch[aria-checked=false] span:first-child,.view-switch[aria-checked=true] span:last-child{color:#ffe1a0}.view-switch:focus-visible{outline:2px solid #ffe1a0;outline-offset:3px}
+#chart-play{width:38px;min-width:38px;flex:0 0 38px;padding:6px;font-size:0;line-height:1}#chart-play::before{content:"";display:inline-block;width:14px;height:14px;vertical-align:middle;background:currentColor;clip-path:polygon(15% 0,100% 50%,15% 100%)}#chart-play[aria-pressed=true]::before{clip-path:polygon(0 0,35% 0,35% 100%,0 100%,0 0,65% 0,100% 0,100% 100%,65% 100%,65% 0)}#chart-play:disabled{cursor:default;opacity:.38}
+.chart-wrap{overflow:auto;border:1px solid #080f16;background:#192733;scrollbar-color:#777866 #14202a}.chart-wrap svg{display:block;width:100%;min-width:1100px}.chart-heading{position:sticky;top:0;z-index:2;min-width:1100px;height:56px;background:#354045}.chart-wrap p{padding:24px;color:#c4c9ca}.chart-line{fill:none;stroke-width:4;stroke-linecap:round;stroke-linejoin:round}.chart-outline{fill:none;stroke:#192733;stroke-width:7;stroke-linecap:round;stroke-linejoin:round}.chart-number{font-family:BallanceBank,Arial,sans-serif}.chart-name{font-family:Arial,"Microsoft YaHei",sans-serif}.chart-label-connector{fill:none;stroke-width:1.5}
+@media(orientation:landscape){header .score-controls{flex-wrap:nowrap;flex-shrink:0;margin:0}header .score-controls .time-machine{margin:0}}
+@media(orientation:landscape) and (max-width:1000px){header .score-controls{gap:4px}.view-toggle{font-size:12px;padding:6px;min-height:34px}.view-switch{flex-basis:112px;width:112px;height:34px;font-size:12px}}
+@media(prefers-reduced-motion:reduce){.view-switch::before{transition:none}}
+
 body.transparent{background:transparent}html:has(body.transparent){background:transparent}body.transparent::before{display:none}
-</style></head><body><main><header><div class="title-wrap"><h1 id="name">比赛成绩</h1></div><div id="status"></div><div id="meta" hidden></div><div id="connection" hidden></div></header><div class="frame"><div class="table-wrap"><table aria-label="比赛成绩"><colgroup id="columns"></colgroup><thead id="head"></thead><tbody id="rows"></tbody></table><p id="empty" hidden>等待成绩</p></div></div><footer aria-label="更新信息"><span id="refresh-time"></span> · <span id="version-time"></span>（UTC+8）<span id="refresh-error" hidden> · 检查失败</span></footer></main>
-<script id="score-data" type="application/json">{"competitionId":"1840fe8e-28b7-46ea-a6c2-08dfae1f739e","name":"计分表测试","mode":"work","status":"finished","version":4,"sequence":7,"generatedAt":"2026-09-26T11:32:29.575Z","headers":["变化","名次","总分","选手","SR1","SR2","SR3","SR4","SR5","SR6","SR7","SR8","SR9","SR10","SR11","SR12","SR13"],"rows":[{"cells":[{"text":"=","style":"plain"},{"text":"1","style":"plain"},{"text":"30","style":"plain"},{"text":"Silent_Snow","style":"plain"},{"text":"—","style":"plain"},{"text":"1","style":"gold"},{"text":"1","style":"gold"},{"text":"—","style":"plain"},{"text":"—","style":"plain"},{"text":"—","style":"plain"},{"text":"—","style":"plain"},{"text":"—","style":"plain"},{"text":"—","style":"plain"},{"text":"—","style":"plain"},{"text":"—","style":"plain"},{"text":"—","style":"plain"},{"text":"—","style":"plain"}]},{"cells":[{"text":"=","style":"plain"},{"text":"2","style":"plain"},{"text":"0","style":"plain"},{"text":"JunjieCharles","style":"plain"},{"text":"—","style":"plain"},{"text":"DNF","style":"dnf"},{"text":"DNF","style":"excluded"},{"text":"—","style":"plain"},{"text":"—","style":"plain"},{"text":"—","style":"plain"},{"text":"—","style":"plain"},{"text":"—","style":"plain"},{"text":"—","style":"plain"},{"text":"—","style":"plain"},{"text":"—","style":"plain"},{"text":"—","style":"plain"},{"text":"—","style":"plain"}]}]}</script>
+</style></head><body><main><header><div class="title-wrap"><h1 id="name">比赛成绩</h1></div><div id="status"></div><div id="meta" hidden></div><div id="connection" hidden></div></header><div id="score-controls" class="score-controls"><button id="view-toggle" class="view-switch" type="button" role="switch" aria-checked="false" aria-controls="chart-panel" aria-label="切换表格和曲线图"><span>表格</span><span>曲线图</span></button><nav id="time-machine" class="time-machine" aria-label="成绩时光机" hidden><label for="history-select">时光机</label><button id="history-prev" type="button" aria-label="上一关">←</button><button id="chart-play" type="button" aria-pressed="false" disabled title="切换至曲线图后播放">播放</button><button id="history-next" type="button" aria-label="下一关">→</button><select id="history-select" aria-label="查看哪一关结束后的积分"><option value="latest">最新成绩</option></select><button id="history-latest" type="button">回到最新</button><span id="history-note" role="status"></span></nav></div><div class="frame"><div class="table-wrap"><table aria-label="比赛成绩"><colgroup id="columns"></colgroup><thead id="head"></thead><tbody id="rows"></tbody></table><p id="empty" hidden>等待成绩</p></div><div id="chart-panel" hidden><div id="rank-chart" class="chart-wrap"><div class="chart-heading"><svg id="rank-chart-head" aria-label="关卡表头"></svg></div><svg id="rank-chart-svg" role="img" aria-label="累计积分排名变化曲线图"></svg><p id="chart-empty" hidden>等待成绩</p></div></div></div><footer aria-label="更新信息"><span id="refresh-time"></span> · <span id="version-time"></span>（UTC+8）<span id="refresh-error" hidden> · 检查失败</span></footer></main>
+<script id="score-data" type="application/json">{"competitionId":"1840fe8e-28b7-46ea-a6c2-08dfae1f739e","name":"计分表测试","mode":"work","status":"finished","version":4,"sequence":8,"generatedAt":"2026-09-27T11:25:42.333Z","headers":["变化","名次","总分","选手","SR1","SR2","SR3","SR4","SR5","SR6","SR7","SR8","SR9","SR10","SR11","SR12","SR13"],"rows":[{"cells":[{"text":"=","style":"plain"},{"text":"1","style":"plain"},{"text":"30","style":"plain"},{"text":"Silent_Snow","style":"plain"},{"text":"—","style":"plain"},{"text":"1","style":"gold"},{"text":"1","style":"gold"},{"text":"—","style":"plain"},{"text":"—","style":"plain"},{"text":"—","style":"plain"},{"text":"—","style":"plain"},{"text":"—","style":"plain"},{"text":"—","style":"plain"},{"text":"—","style":"plain"},{"text":"—","style":"plain"},{"text":"—","style":"plain"},{"text":"—","style":"plain"}]},{"cells":[{"text":"=","style":"plain"},{"text":"2","style":"plain"},{"text":"0","style":"plain"},{"text":"JunjieCharles","style":"plain"},{"text":"—","style":"plain"},{"text":"DNF","style":"dnf"},{"text":"DNF","style":"excluded"},{"text":"—","style":"plain"},{"text":"—","style":"plain"},{"text":"—","style":"plain"},{"text":"—","style":"plain"},{"text":"—","style":"plain"},{"text":"—","style":"plain"},{"text":"—","style":"plain"},{"text":"—","style":"plain"},{"text":"—","style":"plain"},{"text":"—","style":"plain"}]}],"activeStage":3,"history":[{"throughStage":1,"label":"SR1 结束","rows":[{"cells":[{"text":"—","style":"plain"},{"text":"1","style":"plain"},{"text":"0","style":"plain"},{"text":"JunjieCharles","style":"plain"},{"text":"—","style":"plain"},{"text":"—","style":"plain"},{"text":"—","style":"plain"},{"text":"—","style":"plain"},{"text":"—","style":"plain"},{"text":"—","style":"plain"},{"text":"—","style":"plain"},{"text":"—","style":"plain"},{"text":"—","style":"plain"},{"text":"—","style":"plain"},{"text":"—","style":"plain"},{"text":"—","style":"plain"},{"text":"—","style":"plain"}]},{"cells":[{"text":"—","style":"plain"},{"text":"1","style":"plain"},{"text":"0","style":"plain"},{"text":"Silent_Snow","style":"plain"},{"text":"—","style":"plain"},{"text":"—","style":"plain"},{"text":"—","style":"plain"},{"text":"—","style":"plain"},{"text":"—","style":"plain"},{"text":"—","style":"plain"},{"text":"—","style":"plain"},{"text":"—","style":"plain"},{"text":"—","style":"plain"},{"text":"—","style":"plain"},{"text":"—","style":"plain"},{"text":"—","style":"plain"},{"text":"—","style":"plain"}]}]},{"throughStage":2,"label":"SR2 结束","rows":[{"cells":[{"text":"=","style":"plain"},{"text":"1","style":"plain"},{"text":"15","style":"plain"},{"text":"Silent_Snow","style":"plain"},{"text":"—","style":"plain"},{"text":"1","style":"gold"},{"text":"—","style":"plain"},{"text":"—","style":"plain"},{"text":"—","style":"plain"},{"text":"—","style":"plain"},{"text":"—","style":"plain"},{"text":"—","style":"plain"},{"text":"—","style":"plain"},{"text":"—","style":"plain"},{"text":"—","style":"plain"},{"text":"—","style":"plain"},{"text":"—","style":"plain"}]},{"cells":[{"text":"▼1","style":"rank-down"},{"text":"2","style":"plain"},{"text":"0","style":"plain"},{"text":"JunjieCharles","style":"plain"},{"text":"—","style":"plain"},{"text":"DNF","style":"dnf"},{"text":"—","style":"plain"},{"text":"—","style":"plain"},{"text":"—","style":"plain"},{"text":"—","style":"plain"},{"text":"—","style":"plain"},{"text":"—","style":"plain"},{"text":"—","style":"plain"},{"text":"—","style":"plain"},{"text":"—","style":"plain"},{"text":"—","style":"plain"},{"text":"—","style":"plain"}]}]},{"throughStage":3,"label":"SR3 结束","rows":[{"cells":[{"text":"=","style":"plain"},{"text":"1","style":"plain"},{"text":"30","style":"plain"},{"text":"Silent_Snow","style":"plain"},{"text":"—","style":"plain"},{"text":"1","style":"gold"},{"text":"1","style":"gold"},{"text":"—","style":"plain"},{"text":"—","style":"plain"},{"text":"—","style":"plain"},{"text":"—","style":"plain"},{"text":"—","style":"plain"},{"text":"—","style":"plain"},{"text":"—","style":"plain"},{"text":"—","style":"plain"},{"text":"—","style":"plain"},{"text":"—","style":"plain"}]},{"cells":[{"text":"=","style":"plain"},{"text":"2","style":"plain"},{"text":"0","style":"plain"},{"text":"JunjieCharles","style":"plain"},{"text":"—","style":"plain"},{"text":"DNF","style":"dnf"},{"text":"DNF","style":"excluded"},{"text":"—","style":"plain"},{"text":"—","style":"plain"},{"text":"—","style":"plain"},{"text":"—","style":"plain"},{"text":"—","style":"plain"},{"text":"—","style":"plain"},{"text":"—","style":"plain"},{"text":"—","style":"plain"},{"text":"—","style":"plain"},{"text":"—","style":"plain"}]}]}]}</script>
 <script>
 (() => {
   let current;
+  let selectedStage = "latest";
+  let allHistory = [];
+  const normalizeColumns = (value) => {
+        const swap = (value.headers[0] === "排名" || value.headers[0] === "名次") && value.headers[1] === "变化";
+        const canonical = value.headers[0] === "变化" && (value.headers[1] === "排名" || value.headers[1] === "名次");
+        if (!swap && !canonical)
+            return value;
+        const rows = (items) => swap ? items.map(row => ({ ...row, cells: [row.cells[1], row.cells[0], ...row.cells.slice(2)] })) : items;
+        return { ...value, headers: ["变化", "名次", "总分", ...value.headers.slice(3)], rows: rows(value.rows),
+            ...(Array.isArray(value.history) ? { history: value.history.map(frame => frame && Array.isArray(frame.rows) && frame.rows.every((row) => Array.isArray(row?.cells)) ? { ...frame, rows: rows(frame.rows) } : frame) } : {}) };
+    };
+
+  let chartView = false;
+  let chartFrame = 0, chartState = null, chartScene = null;
+  let chartPlaying = false, playbackFrame = 0, playbackPosition = null, playbackModel = null;
+  const chartColors = new Map();
+  const chartPalette = ['#ffd467','#f5faff','#ffa86f','#53e1b4','#ff87bd','#f4bb48','#42d4f4','#cce850','#c18bff','#ff737b','#80adff','#ffd0a0','#71e49b','#ac9cff','#e7db7b','#64bcd9','#eba7cb','#add96a','#b6cdeb','#d2b7a0','#a2bbc9'];
+  const reducedMotion = matchMedia('(prefers-reduced-motion: reduce)');
+  function playbackControls() {
+    const button=document.getElementById('chart-play');
+    const available=chartView && current && ['finished','archived','historical'].includes(current.status) && allHistory.length>1;
+    button.disabled=!available;
+    button.textContent=chartPlaying?'暂停':playbackPosition!==null?'继续播放':selectedStage==='latest'?'播放':'从此关播放';
+    button.setAttribute('aria-pressed',String(chartPlaying));
+    if(!available) stopPlayback(true);
+    button.title=available?button.textContent:chartView?'至少需要两关累计榜才能播放':'切换至曲线图后播放';
+  }
+  function stopPlayback(reset=false) {
+    cancelAnimationFrame(playbackFrame);
+    chartPlaying=false;
+    document.getElementById('rank-chart-svg').dataset.animating='false';
+    if(reset) playbackPosition=null;
+    const button=document.getElementById('chart-play');
+    button.setAttribute('aria-pressed','false');
+    button.textContent=playbackPosition!==null?'继续播放':'播放';
+    if(!button.disabled) button.title=button.textContent;
+  }
+  function startPlayback() {
+    if(document.getElementById('chart-play').disabled) return;
+    if(chartPlaying) { stopPlayback();return; }
+    cancelAnimationFrame(chartFrame);
+    const last=allHistory.at(-1)?.throughStage, first=allHistory[0]?.throughStage;
+    if(!last || !first || last<=first) return;
+    let position=playbackPosition ?? (selectedStage==='latest'?first:Number(selectedStage));
+    if(position>=last) position=first;
+    selectedStage=String(Math.floor(position));
+    chartPlaying=true;playbackPosition=position;
+    render(current,true);
+    if(!chartPlaying || !playbackModel) return;
+    drawChart({...playbackModel,cutoff:position});
+    const start=performance.now();
+    document.getElementById('rank-chart-svg').dataset.animating='true';
+    const tick=now=>{
+      if(!chartPlaying) return;
+      const end=Math.max(first, ...allHistory.map(h=>h.throughStage));
+      playbackPosition=Math.min(end,position+(now-start)/1400);
+      if(playbackPosition>=end) {
+        stopPlayback(true); selectedStage='latest'; render(current,true); updateChart(current,allHistory,false);return;
+      }
+      const completed=allHistory.filter(h=>h.throughStage<=playbackPosition).at(-1)?.throughStage ?? first;
+      if(selectedStage!==String(completed)) { selectedStage=String(completed);render(current,true); }
+      drawChart({...playbackModel,cutoff:reducedMotion.matches?completed:playbackPosition});
+      playbackFrame=requestAnimationFrame(tick);
+    };
+    playbackFrame=requestAnimationFrame(tick);
+  }
+  function chartColor(name) {
+    if (!chartColors.has(name)) {
+      const i = chartColors.size;
+      chartColors.set(name, chartPalette[i] || 'hsl(' + (i * 137.508 % 360) + ' 80% 70%)');
+    }
+    return chartColors.get(name);
+  }
+  function svgNode(tag, attrs, text) {
+    const el = document.createElementNS('http://www.w3.org/2000/svg', tag);
+    for (const [key, value] of Object.entries(attrs || {})) el.setAttribute(key, String(value));
+    if (text !== undefined) el.textContent = String(text);
+    return el;
+  }
+  function chartRows(data, rows) {
+    const rankColumn = data.headers.findIndex(h => h === '名次' || h === '排名');
+    const result = new Map();
+    for (const row of rows) {
+      const name = row.cells[3]?.text, rank = Number(row.cells[rankColumn]?.text), points = Number(row.cells[2]?.text);
+      // Public data intentionally has no internal IDs: ambiguous names must not be joined.
+      if (!name || result.has(name) || !Number.isInteger(rank) || rank < 1 || !Number.isFinite(points)) throw new Error('ambiguous chart rows');
+      result.set(name, { rank, points });
+    }
+    return result;
+  }
+  function chartModel(data, history) {
+    const frames = new Map(history.map(h => [h.throughStage, chartRows(data, h.rows)]));
+    const latest = chartRows(data, data.rows);
+    latest.forEach((_, name) => chartColor(name));
+    const count = Math.max(1, data.headers.length - 4);
+    let last = Math.max(0, ...frames.keys());
+    for (const row of data.rows) row.cells.slice(4).forEach((cell, i) => { if (cell.text !== '—' && cell.text !== '') last = Math.max(last, i + 1); });
+    if (Number.isInteger(data.activeStage) && data.activeStage > 0 && data.activeStage <= count) last = Math.max(last, data.activeStage);
+    if (last > 0) frames.set(last, latest);
+    const selected = history.find(h => String(h.throughStage) === selectedStage);
+    if (selected) frames.set(selected.throughStage, chartRows(data, selected.rows));
+    const cutoff = selected ? selected.throughStage : last;
+    const series = new Map();
+    for (const [stage, rows] of [...frames].sort((a,b) => a[0]-b[0])) {
+      // Resolve ties only at authoritative stage endpoints, never sort moving labels.
+      const ordered=[...rows].sort((a,b)=>a[1].rank-b[1].rank || a[0].localeCompare(b[0]));
+      const slots=ordered.map((entry,i)=>Math.max(entry[1].rank,i?0:1));
+      for(let i=1;i<slots.length;i++) slots[i]=Math.max(slots[i],slots[i-1]+1);
+      if(slots.length && slots.at(-1)>Math.max(rows.size,...ordered.map(e=>e[1].rank))) {
+        slots[slots.length-1]=Math.max(rows.size,...ordered.map(e=>e[1].rank));
+        for(let i=slots.length-2;i>=0;i--) slots[i]=Math.min(slots[i],slots[i+1]-1);
+      }
+      ordered.forEach(([name,value],i)=>{
+        if (!series.has(name)) series.set(name, { name, color:chartColor(name), nodes:[] });
+        series.get(name).nodes.push({ stage, ...value, slot:slots[i] });
+      });
+    }
+    const ranks = [...series.values()].flatMap(p => p.nodes.map(n => n.rank));
+    return { series, cutoff, count, maxRank:Math.max(2, latest.size, ...ranks), headers:data.headers.slice(4) };
+  }
+  function chartPoint(nodes, stage) {
+    const exact = nodes.find(n => Math.abs(n.stage-stage) < .0001);
+    if (exact) return exact;
+    const left = nodes.filter(n => n.stage < stage).at(-1), right = nodes.find(n => n.stage > stage);
+    // Do not invent points for absent players or gaps in supplied stage history.
+    if (!left || !right || right.stage-left.stage > 1) return null;
+    const t=(stage-left.stage)/(right.stage-left.stage), ease=t*t*(3-2*t);
+    return { stage, rank:left.rank+(right.rank-left.rank)*ease, targetRank:right.rank, points:left.points+(right.points-left.points)*t, slot:left.slot+(right.slot-left.slot)*ease,
+      sideways:Math.sin(Math.PI*t)*Math.sign(right.slot-left.slot)*14 };
+  }
+  function drawChart(model) {
+    chartState = model;
+    const host=document.getElementById('rank-chart'), svg=document.getElementById('rank-chart-svg');
+    const width=Math.max(1100,host.clientWidth), rowHeight=parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--chart-row-height')) || 52;
+    const height=model.maxRank*rowHeight, left=80, right=width-360;
+    const x=stage=>left+(stage-1)/Math.max(1,model.count-1)*(right-left), y=rank=>(rank-.5)*rowHeight;
+    const font=Math.max(17,Math.min(24,rowHeight*.44));
+    svg.setAttribute('aria-label','累计积分排名变化曲线图，截至第 '+Math.round(model.cutoff)+' 关');
+    svg.dataset.stage=model.cutoff.toFixed(3);
+    const key=JSON.stringify([width,rowHeight,model.maxRank,model.headers]);
+    if(!chartScene || chartScene.key!==key) {
+      svg.setAttribute('viewBox','0 0 '+width+' '+height);
+      const defs=svgNode('defs'), clip=svgNode('clipPath',{id:'chart-reveal'}), reveal=svgNode('rect',{x:left-8,y:0,height});
+      clip.append(reveal);defs.append(clip);
+      const grid=svgNode('g'),tracks=svgNode('g'),labels=svgNode('g');
+      for(let r=1;r<=model.maxRank;r++) {
+        grid.append(svgNode('rect',{x:0,y:(r-1)*rowHeight,width,height:rowHeight,fill:r%2?'#192733':'#202e38','data-rank-row':r}));
+        grid.append(svgNode('line',{x1:left,y1:y(r),x2:right,y2:y(r),stroke:'#abb9c2','stroke-opacity':.16}));
+        grid.append(svgNode('text',{x:43,y:y(r)+7,'text-anchor':'end',fill:'#c6c5b4','font-size':font,class:'chart-number'},r));
+      }
+      const header=document.getElementById('rank-chart-head'),heading=[];
+      header.setAttribute('viewBox','0 0 '+width+' 56');
+      heading.push(svgNode('rect',{width,height:56,fill:'#354045'}),svgNode('line',{x1:0,y1:55,x2:width,y2:55,stroke:'#998360'}));
+      heading.push(svgNode('text',{x:12,y:34,fill:'#c6c5b4','font-size':16},'名次'));
+      heading.push(svgNode('text',{x:right+88,y:34,fill:'#c6c5b4','font-size':16},'选手 / 名次'));
+      heading.push(svgNode('text',{x:width-18,y:34,fill:'#c6c5b4','font-size':16,'text-anchor':'end'},'总积分'));
+      for(let stage=1;stage<=model.count;stage++) {
+        grid.append(svgNode('line',{x1:x(stage),y1:0,x2:x(stage),y2:height,stroke:'#abb9c2','stroke-opacity':.12,'stroke-dasharray':'2 6'}));
+        heading.push(svgNode('text',{x:x(stage),y:34,fill:'#ece9db','font-size':model.count>20?12:17,'text-anchor':'middle',class:'chart-number','data-stage-heading':stage},model.headers[stage-1]));
+      }
+      header.replaceChildren(...heading);svg.replaceChildren(defs,grid,tracks,labels);
+      chartScene={key,reveal,tracks,labels,players:new Map()};
+    }
+    // Reveal the fixed full path. A partial curve is never recomputed or stretched.
+    chartScene.reveal.setAttribute('width',Math.max(0,x(model.cutoff)-left+8+.01));
+    for(const [name,record] of chartScene.players) if(!model.series.has(name)) {
+      record.group.remove();record.label.remove();record.connector.remove();chartScene.players.delete(name);
+    }
+    const endpoints=new Map([...model.series].map(([name,player])=>[name,chartPoint(player.nodes,model.cutoff)]));
+    // Update badge numbers at each crossing without reordering or snapping the labels.
+    const moving=[...endpoints.values()].filter(Boolean);
+    for(const point of moving) if(point.targetRank!==undefined || !Number.isInteger(point.rank)) {
+      point.displayRank=1+moving.filter(other=>other.rank<point.rank-.000001 || (Math.abs(other.rank-point.rank)<.000001 && (other.targetRank ?? other.rank)<(point.targetRank ?? point.rank))).length;
+    }
+    for(const player of model.series.values()) {
+      let record=chartScene.players.get(player.name);
+      if(!record) {
+        const group=svgNode('g',{'data-player':player.name}),outline=svgNode('path',{class:'chart-outline','clip-path':'url(#chart-reveal)'}),line=svgNode('path',{stroke:player.color,class:'chart-line','clip-path':'url(#chart-reveal)'}),dots=svgNode('g');
+        group.append(outline,line,dots);chartScene.tracks.append(group);
+        const connector=svgNode('path',{stroke:player.color,class:'chart-label-connector'});
+        const label=svgNode('g',{'data-label':player.name});
+        const back=svgNode('rect',{x:right+37,y:-rowHeight*.36,width:width-right-45,height:rowHeight*.72,fill:'#1c2c38',rx:3});
+        const badge=svgNode('rect',{x:right+42,y:-15,width:38,height:30,fill:player.color,rx:2});
+        const rank=svgNode('text',{x:right+61,y:7,fill:'#14202d','text-anchor':'middle','font-size':Math.max(18,font),class:'chart-number'});
+        const name=svgNode('text',{x:right+92,y:7,fill:'#f0eee5','font-size':font,class:'chart-name'},player.name);
+        name.append(svgNode('title',{},player.name));
+        const points=svgNode('text',{x:width-18,y:8,fill:'#f2d798','text-anchor':'end','font-size':font+3,class:'chart-number'});
+        label.append(back,badge,rank,name,points);chartScene.labels.append(connector,label);
+        record={group,outline,line,dots,label,connector,rank,name,points,path:'',dotKey:''};chartScene.players.set(player.name,record);
+        const available=width-102-(right+92);
+        if(name.getComputedTextLength()>available){name.setAttribute('textLength',available);name.setAttribute('lengthAdjust','spacingAndGlyphs');}
+      }
+      let path='',prev;
+      for(const p of player.nodes) {
+        if(!prev || p.stage-prev.stage>1) path+='M'+x(p.stage)+','+y(p.rank);
+        else {const dx=(x(p.stage)-x(prev.stage))/3;path+='C'+(x(prev.stage)+dx)+','+y(prev.rank)+' '+(x(p.stage)-dx)+','+y(p.rank)+' '+x(p.stage)+','+y(p.rank);}
+        prev=p;
+      }
+      if(record.path!==path){record.outline.setAttribute('d',path);record.line.setAttribute('d',path);record.path=path;}
+      record.group.setAttribute('opacity',player.opacity ?? 1);
+      const complete=player.nodes.filter(p=>p.stage<=model.cutoff),dotKey=JSON.stringify(complete.map(p=>[p.stage,p.rank]));
+      if(record.dotKey!==dotKey){
+        record.dots.replaceChildren(...complete.map(p=>svgNode('circle',{cx:x(p.stage),cy:y(p.rank),r:3.5,fill:player.color,stroke:'#192733','stroke-width':1.2,'data-stage':p.stage,'data-rank':p.rank})));
+        record.dotKey=dotKey;
+      }
+      const point=endpoints.get(player.name);
+      record.label.style.display=record.connector.style.display=point?'':'none';
+      if(!point){record.label.removeAttribute('data-label');continue;}
+      record.label.setAttribute('data-label',player.name);
+      const yy=y(point.slot),dx=point.sideways || 0;
+      record.label.setAttribute('transform','translate('+dx+' '+yy+')');
+      record.label.setAttribute('data-y',yy);record.label.setAttribute('data-rank',point.rank);record.label.setAttribute('data-points',point.points);
+      record.label.setAttribute('opacity',player.opacity ?? 1);
+      record.connector.setAttribute('d','M'+x(point.stage)+','+y(point.rank)+'L'+(right+20+dx)+','+yy+'H'+(right+38+dx));
+      record.rank.textContent=point.displayRank ?? Math.round(point.rank);record.points.textContent=Math.round(point.points);
+    }
+  }
+  function updateChart(data, history, animate = true) {
+    cancelAnimationFrame(chartFrame);
+    const svg=document.getElementById('rank-chart-svg'), message=document.getElementById('chart-empty');
+    svg.dataset.animating='false';
+    if(!chartView) return;
+    let target;
+    try { target=chartModel(data,history); }
+    catch { stopPlayback(true); svg.hidden=true; svg.style.display='none'; message.hidden=false; message.textContent='选手名称或排名无法安全关联，请切换表格查看成绩。'; chartState=null; return; }
+    const empty=target.cutoff===0 || target.series.size===0;
+    svg.style.display=empty?'none':''; message.hidden=!empty;
+    if(empty) { stopPlayback(true); message.textContent='等待成绩'; chartState=null; return; }
+    svg.hidden=false;
+    if(chartPlaying) { playbackModel=target; svg.dataset.animating='true'; return; }
+    const from=chartState;
+    if(!from || !animate || reducedMotion.matches) { drawChart(target); return; }
+    const start=performance.now(), duration=480;
+    svg.dataset.animating='true';
+    const tick=now=>{
+      const t=Math.min(1,(now-start)/duration), a=t*t*(3-2*t);
+      if(t>=1) { drawChart(target);svg.dataset.animating='false';return; }
+      const series=new Map();
+      for(const [name,p] of target.series) {
+        const previous=from.series.get(name);
+        series.set(name,{...p,opacity:previous?1:a,nodes:p.nodes.map(n=>{
+          const old=previous?.nodes.find(o=>o.stage===n.stage);
+          return old?{...n,rank:old.rank+(n.rank-old.rank)*a,points:old.points+(n.points-old.points)*a,slot:old.slot+(n.slot-old.slot)*a}:n;
+        })});
+      }
+      drawChart({...target,series,cutoff:from.cutoff+(target.cutoff-from.cutoff)*a,maxRank:Math.max(from.maxRank,target.maxRank)});
+      chartFrame=requestAnimationFrame(tick);
+    };
+    chartFrame=requestAnimationFrame(tick);
+  }
+
   document.body.classList.toggle('transparent', new URLSearchParams(location.search).get('transparent') === '1');
   const styles = new Set(['plain','gold','silver','bronze','dnf','excluded','rank-up','rank-down']);
   function formatTime(value) {
@@ -152,9 +416,27 @@ body.transparent{background:transparent}html:has(body.transparent){background:tr
       Array.isArray(data.headers) && data.headers.every(x => typeof x === 'string') &&
       Array.isArray(data.rows) && data.rows.every(row => Array.isArray(row.cells) && row.cells.length === data.headers.length && row.cells.every(cell => typeof cell.text === 'string' && styles.has(cell.style)));
   }
-  function render(data) {
+  function render(data, selectionChanged = false) {
     if (!valid(data)) throw new Error('invalid scoreboard');
-    if (current && (data.competitionId !== current.competitionId || data.sequence <= current.sequence)) return;
+    data = normalizeColumns(data);
+    if (current && (data.competitionId !== current.competitionId || (!selectionChanged && data.sequence <= current.sequence))) return;
+    allHistory = (Array.isArray(data.history) ? data.history : []).filter(item => item && Number.isInteger(item.throughStage) && item.throughStage > 0 && item.throughStage <= data.headers.length - 4 && typeof item.label === 'string' && valid({ ...data, rows: item.rows }));
+    allHistory.sort((a,b) => a.throughStage-b.throughStage);
+    const history = ['finished','archived','historical'].includes(data.status) ? allHistory : [];
+    const selected = history.find(item => String(item.throughStage) === selectedStage);
+    if (!selected) selectedStage = 'latest';
+    const select = document.getElementById('history-select');
+    const latestLabel = ['finished','archived','historical'].includes(data.status) ? '最终成绩' : '最新成绩';
+    select.replaceChildren(new Option(latestLabel, 'latest'), ...history.map(item => new Option(item.label, String(item.throughStage))));
+    select.value = selectedStage;
+    document.getElementById('time-machine').hidden = history.length === 0;
+    document.getElementById('history-latest').textContent = '回到' + latestLabel;
+    document.getElementById('history-latest').disabled = !selected;
+    document.getElementById('history-note').textContent = selected ? '正在回看：' + selected.label : '';
+    const index = selected ? history.indexOf(selected) : history.length;
+    document.getElementById('history-prev').disabled = index === 0 || history.length === 0;
+    document.getElementById('history-next').disabled = !selected;
+    const shownRows = selected ? selected.rows : data.rows;
     const wrap = document.querySelector('.table-wrap');
     const top = wrap.scrollTop, left = wrap.scrollLeft;
     document.getElementById('name').textContent = (data.mode === 'test' ? '【测试预览】' : '') + data.name;
@@ -177,22 +459,32 @@ body.transparent{background:transparent}html:has(body.transparent){background:tr
     const heading = document.createElement('tr');
     data.headers.forEach(text => { const th = document.createElement('th'); th.textContent = text; heading.append(th); });
     document.getElementById('head').replaceChildren(heading);
-    const rows = data.rows.map(row => { const tr = document.createElement('tr'); row.cells.forEach((cell, index) => { const td = document.createElement('td'); if (index === 3) { const name = document.createElement('span'); name.className = 'player-name'; name.textContent = cell.text; td.append(name); } else { td.textContent = cell.text; } td.title = cell.text; td.className = cell.style; tr.append(td); }); return tr; });
+    const rows = shownRows.map(row => { const tr = document.createElement('tr'); row.cells.forEach((cell, index) => { const td = document.createElement('td'); if (index === 3) { const name = document.createElement('span'); name.className = 'player-name'; name.textContent = cell.text; td.append(name); } else { td.textContent = cell.text; } td.title = cell.text; td.className = cell.style; tr.append(td); }); return tr; });
     document.getElementById('rows').replaceChildren(...rows);
     document.getElementById('empty').hidden = rows.length > 0;
     wrap.scrollTop = top; wrap.scrollLeft = left;
     current = data;
+    playbackControls();
+    updateChart(data, allHistory);
     document.getElementById('version-time').textContent = '当前版本：' + formatTime(data.generatedAt);
     fitPlayerNames();
     document.fonts.ready.then(fitPlayerNames);
   }
   function sizeTable() {
+    const machine = document.getElementById('score-controls');
+    const header = document.querySelector('header');
+    if (matchMedia('(orientation: landscape)').matches) {
+      if (machine.parentElement !== header) header.insertBefore(machine, document.getElementById('status'));
+    } else if (machine.parentElement === header) header.after(machine);
     const wrap = document.querySelector('.table-wrap');
-    const available = Math.max(220, innerHeight - wrap.getBoundingClientRect().top - 40);
+    const available = Math.max(220, innerHeight - document.querySelector('.frame').getBoundingClientRect().top - 48);
     const height = Math.max(44, Math.min(72, Math.floor((available - 58) / 15)));
     document.documentElement.style.setProperty('--row-height', height + 'px');
     document.documentElement.style.setProperty('--number-size', Math.max(30, Math.min(42, height * .66)) + 'px');
     wrap.style.maxHeight = Math.min(available, 58 + height * 15) + 'px';
+    const chartHeight = Math.max(26, Math.min(72, Math.floor((available - 58) / 15)));
+    document.documentElement.style.setProperty('--chart-row-height', chartHeight + 'px');
+    document.getElementById('rank-chart').style.maxHeight = Math.min(available, 58 + chartHeight * 15) + 'px';
   }
   function fitPlayerNames() {
     document.querySelectorAll('.player-name').forEach(name => {
@@ -204,7 +496,32 @@ body.transparent{background:transparent}html:has(body.transparent){background:tr
       }
     });
   }
-  addEventListener('resize', () => { sizeTable(); fitPlayerNames(); });
+  function selectHistory(value) {
+    stopPlayback(true);
+    selectedStage = value;
+    render(current, true);
+    document.querySelector('.table-wrap').scrollTop = 0;
+  }
+  document.getElementById('history-select').addEventListener('change', event => selectHistory(event.target.value));
+  document.getElementById('history-latest').addEventListener('click', () => selectHistory('latest'));
+  for (const [id, direction] of [['history-prev', -1], ['history-next', 1]]) {
+    document.getElementById(id).addEventListener('click', () => {
+      const values = [...document.getElementById('history-select').options].map(option => option.value);
+      const timeline = [...values.slice(1), 'latest'];
+      selectHistory(timeline[Math.max(0, Math.min(timeline.length - 1, timeline.indexOf(selectedStage) + direction))]);
+    });
+  }
+  document.getElementById('chart-play').addEventListener('click', startPlayback);
+  document.getElementById('view-toggle').addEventListener('click', () => {
+    stopPlayback(true);
+    chartView = !chartView;
+    document.getElementById('view-toggle').setAttribute('aria-checked', String(chartView));
+    document.querySelector('.table-wrap').hidden = chartView;
+    document.getElementById('chart-panel').hidden = !chartView;
+    playbackControls(); sizeTable(); fitPlayerNames(); updateChart(current, allHistory, false);
+  });
+  reducedMotion.addEventListener('change', () => { if(current) updateChart(current, allHistory, false); });
+  addEventListener('resize', () => { sizeTable(); fitPlayerNames(); if(current) updateChart(current, allHistory, false); });
   try { render(JSON.parse(document.getElementById('score-data').textContent)); refreshed(); }
   catch { document.getElementById('connection').textContent = '成绩文件无法读取，请稍后再试。'; return; }
   if (location.protocol !== 'http:' && location.protocol !== 'https:') {
